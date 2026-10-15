@@ -103,7 +103,7 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
                     tokio::select! {
                         piece = watched.recv() => match piece {
                             Some(Ok(piece)) => writer.send(&json(&NodeFrame::Watched { id, watched: piece })).await?,
-                            Some(Err(reason)) => break Err(Failure::new(reason)),
+                            Some(Err(failure)) => break Err(failure),
                             None => break Ok(Reply::Done),
                         },
                         // The client says nothing more on a watch; whatever
@@ -885,19 +885,19 @@ pub(crate) async fn handle(node: &Arc<Node>, peer: &Peer, call: Call) -> Result<
             let acting = crate::around::acting_of(node, &caller::of(node, peer)?);
             crate::logins::query(node, &acting, machine).await.map(Reply::AgentLogins)
         }
-        Call::ScanAgents { machine, stop, limits } => {
+        Call::ScanAgents { machine, stop } => {
             users_voice(node, peer)?;
             crate::managed::refuse(node)?;
 
-            crate::logins::remote::scan(node, machine, stop, limits)
+            crate::logins::remote::scan(node, machine, stop)
                 .await
                 .map(|logins| Reply::MachineAgentLogins(Box::new(logins)))
         }
-        Call::AddAgentLogin { machine, agent, dir, limits } => {
+        Call::AddAgentLogin { machine, agent, dir } => {
             users_voice(node, peer)?;
             crate::managed::refuse(node)?;
 
-            crate::logins::remote::add(node, machine, agent, dir, limits)
+            crate::logins::remote::add(node, machine, agent, dir)
                 .await
                 .map(|logins| Reply::MachineAgentLogins(Box::new(logins)))
         }

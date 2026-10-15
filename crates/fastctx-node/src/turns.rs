@@ -27,12 +27,16 @@ use jiff::Timestamp;
 use crate::Node;
 use crate::speech::{self, Owed};
 
+/// What a report of a resident no longer on record meets: its
+/// conversation was deleted while the report was on its way.
+fn deleted(id: &ResidentId) -> std::io::Error {
+    std::io::Error::other(format!("{id} is no longer on record"))
+}
+
 /// Something a host reported about a resident's session.
 /// Applies a report before the source acknowledges or deletes it.
 pub async fn apply(node: &Arc<Node>, id: &ResidentId, mut event: SessionEvent) -> std::io::Result<()> {
-    let Some((about, _)) = node.residents.about(id) else {
-        return Err(std::io::Error::other("unknown resident"));
-    };
+    let Some((about, _)) = node.residents.about(id) else { return Err(deleted(id)) };
     if let Happened::Heard { message: Some(message), .. } = &event.happened
         && (about.host.agent.as_str() == "codex" && about.world_started && message.detail["type"] == "userMessage"
             || about.host.agent.as_str() == "claude" && message.detail["uuid"].is_string())
@@ -82,11 +86,14 @@ pub async fn apply(node: &Arc<Node>, id: &ResidentId, mut event: SessionEvent) -
                 crate::asked::ask(node, id, asked)?;
             }
             // A Codex thread keeps its first instructions through compacting
-            // its conversation; a change they no longer say is told again.
+            // its conversation; a change they no longer say is told again,
+            // its project's record with the next answer of a World tool. A
+            // Claude session's plugin gives it its project's record again.
             if matches!(item.what, fastctx_types::session::What::Compaction)
                 && about.host.agent.as_str() == "codex"
                 && about.world_started
             {
+                node.residents.compacted(id);
                 let (node, id, compaction) = (node.clone(), id.clone(), item.id.clone());
                 tokio::spawn(async move { crate::focus::compacted(&node, &id, &compaction).await });
             }
@@ -115,7 +122,7 @@ pub async fn apply(node: &Arc<Node>, id: &ResidentId, mut event: SessionEvent) -
         && let Some(report) = presentation_health(change)
     {
         let turn = turn.clone();
-        let speaking = node.residents.speaking(id).expect("known resident");
+        let speaking = node.residents.speaking(id).ok_or_else(|| deleted(id))?;
         let _speaking = speaking.lock().await;
         return health_event(node, id, turn, report, event);
     }
@@ -126,12 +133,12 @@ pub async fn apply(node: &Arc<Node>, id: &ResidentId, mut event: SessionEvent) -
             {
                 node.residents.change_now(&node.world, id, |now| now.last_said = Some(said))?;
             }
-            let speaking = node.residents.speaking(id).expect("known resident");
+            let speaking = node.residents.speaking(id).ok_or_else(|| deleted(id))?;
             let _speaking = speaking.lock().await;
             finish_at(node, id, &turn, end, &[], Some(event.at)).await
         }
         Happened::Health { turn, health: report } => {
-            let speaking = node.residents.speaking(id).expect("known resident");
+            let speaking = node.residents.speaking(id).ok_or_else(|| deleted(id))?;
             let _speaking = speaking.lock().await;
             health_at(node, id, turn, report, event.at)
         }

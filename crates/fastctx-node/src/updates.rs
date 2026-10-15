@@ -72,6 +72,9 @@ pub(crate) fn start(node: &Arc<Node>) {
         }
     }
     report(node);
+    if !fastctx_platform::follows_releases() {
+        return;
+    }
     let node = node.clone();
     tokio::spawn(async move {
         // The first look waits for the node to settle, and for the next due
@@ -174,6 +177,9 @@ fn on_channel(manifest: &Manifest, channel: Channel) -> bool {
 
 /// What this machine tells its hubs of versions now.
 pub(crate) fn report(node: &Node) {
+    if !fastctx_platform::follows_releases() {
+        return;
+    }
     let held = node.updates.held.lock().expect("never poisoned");
     let cache = cache(node);
     let mut found: Vec<Manifest> =

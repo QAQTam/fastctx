@@ -1591,7 +1591,18 @@ function liveTalk(address: Address): KeepablePage {
       page.lost(why);
       page.update();
     },
+    deleted: () => gone(),
   });
+  // Deleted, as its machine answers or the World lists it: nothing of it is
+  // watched any more, and its page is kept no longer than it is in view.
+  let deleted = false;
+  const gone = () => {
+    if (deleted) return;
+    deleted = true;
+    reading.close();
+    page.presence("deleted");
+    keptTalks.gone(talkKey(address));
+  };
   // Opened before the World first answered, as from a notification at
   // start: built again once it has, to name the agent and its project.
   // Otherwise the World's listing of it is followed in place, without
@@ -1611,7 +1622,9 @@ function liveTalk(address: Address): KeepablePage {
     : effect(() => {
         const now = store.world.get();
         talkActs.changed.get();
-        if (!left) page.presence(presenceOf(now, address, listedEver));
+        const presence = deleted ? "deleted" : presenceOf(now, address, listedEver);
+        if (!left) page.presence(presence);
+        if (!left && presence === "deleted") queueMicrotask(gone);
         const known = residentAt(now, address);
         const who = someoneOf(now, address);
         if (!known || !who || left) return;
@@ -1920,8 +1933,8 @@ function show(next: Place): void {
         when,
         workbench: deviceFeatures.conversations,
         read: (machine) => (live ? agentLogins(machine) : specimenLogins(machine, specimen.now)),
-        scan: (machine, stop, limits) => (live ? scanAgents(machine, stop, limits) : specimenScan(machine, stop, specimen.now)),
-        add: (machine, agent, dir, limits) => (live ? addAgentLogin(machine, agent, dir, limits) : specimenTakeUp(machine, agent, dir, specimen.now)),
+        scan: (machine, stop) => (live ? scanAgents(machine, stop) : specimenScan(machine, stop, specimen.now)),
+        add: (machine, agent, dir) => (live ? addAgentLogin(machine, agent, dir) : specimenTakeUp(machine, agent, dir, specimen.now)),
         folder: (machine, dir, change) => (live ? agentFolder(machine, dir, change) : specimenFolder(machine, dir, change, specimen.now)),
         // A phone holds no folder of the World's; a plain browser walks the
         // specimen's folders.
@@ -1948,6 +1961,7 @@ function show(next: Place): void {
         workbench: deviceFeatures.conversations,
         read: (machine) => (live ? agentLogins(machine) : specimenLogins(machine, specimen.now)),
         usage: (machine, agent, dir) => (live ? agentUsage(machine, agent, dir) : specimenUsage(machine, agent, dir, specimen.now)),
+        when,
         talk: (machine, agent, home) => beginTalk(null, loginKey(machine, agent, home), machine),
       });
       break;

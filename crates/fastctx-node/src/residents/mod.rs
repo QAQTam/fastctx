@@ -19,7 +19,9 @@
 pub(crate) mod cache;
 mod records;
 mod removal;
+mod tombstones;
 pub use removal::removal;
+pub use tombstones::Tombstone;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -66,6 +68,10 @@ struct State {
     /// resident on record read the whole history back from disk each time
     /// a session left.
     colleagues: HashMap<Address, Vec<ResidentId>>,
+    /// Residents being deleted, with how many deletions of each are under
+    /// way: they take nothing new while their turn and commands stop.
+    deleting: HashMap<ResidentId, usize>,
+    tombstones: tombstones::Tombstones,
 }
 
 impl State {
@@ -172,6 +178,11 @@ struct Live {
     /// to exactly those whose words went into it.
     /// `None` until it is told who and where it is.
     heard: Option<Heard>,
+    /// What the instructions its session started with tell it of its town,
+    /// which is all it knows of it after compacting; `None` for a session
+    /// that started with none of the World's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instructed: Option<Heard>,
 }
 
 impl Live {
@@ -181,7 +192,18 @@ impl Live {
             .flat_map(|now| now.owed.iter())
             .map(|(turn, readers)| (turn.clone(), readers.iter().cloned().collect()))
             .collect();
-        Self { removed: None, about, places, inbox: None, connections: 0, claude_here: false, now, owed, heard: None }
+        Self {
+            removed: None,
+            about,
+            places,
+            inbox: None,
+            connections: 0,
+            claude_here: false,
+            now,
+            owed,
+            heard: None,
+            instructed: None,
+        }
     }
 
     fn town(&self) -> Option<TownName> {
@@ -207,6 +229,7 @@ impl Residents {
     /// cannot be read is reported and left as it is.
     pub fn load(world: &WorldDir) -> io::Result<(Self, Vec<(PathBuf, io::Error)>)> {
         let root = cache::prepare(world.path())?;
+        let mut problems = Vec::new();
         let mut state = State {
             live: cache::Cache::new(root.join("residents"))?,
             threads: cache::Index::new(root.join("threads"))?,
@@ -214,10 +237,16 @@ impl Residents {
             departed: cache::Index::new(root.join("departed"))?,
             inboxes: cache::Index::new(root.join("inboxes"))?,
             colleagues: HashMap::new(),
+            deleting: HashMap::new(),
+            tombstones: tombstones::Tombstones::load(world, &mut problems)?,
         };
-        let mut problems = Vec::new();
         for kept in world.kept()? {
             let fastctx_types::layout::Kind::Home(id) = &kept.kind else { continue };
+            // What a deletion stopped halfway left of it; the node finishes
+            // that deletion (`data::delete::finish_interrupted`).
+            if state.tombstones.of(id).is_some() {
+                continue;
+            }
             let directory = &kept.directory;
             // Files attached for a conversation not opened yet have a home
             // and no resident.
@@ -334,6 +363,26 @@ impl Residents {
     pub fn set_heard(&self, id: &ResidentId, heard: Heard) {
         if let Some(live) = self.lock().live.get_mut(id) {
             live.heard = Some(heard);
+        }
+    }
+
+    /// The session of `id` starts with instructions that tell it `heard` of
+    /// its town: it has heard that, and is back there when it compacts.
+    pub fn set_instructed(&self, id: &ResidentId, heard: Heard) {
+        if let Some(live) = self.lock().live.get_mut(id) {
+            live.heard = Some(heard.clone());
+            live.instructed = Some(heard);
+        }
+    }
+
+    /// The session of `id` compacted its conversation, and knows of its town
+    /// only what its instructions tell it: what changed since is told again,
+    /// as all of it is to one whose instructions told it of another town or
+    /// of none.
+    pub fn compacted(&self, id: &ResidentId) {
+        if let Some(live) = self.lock().live.get_mut(id) {
+            let town = live.town();
+            live.heard = live.instructed.clone().filter(|heard| heard.town == town);
         }
     }
 
@@ -875,14 +924,14 @@ pub fn idle(since: Timestamp) -> Now {
 }
 
 /// A fresh id for a resident of `agent`: its name and four hex digits,
-/// unused on this machine.
+/// unused on this machine, and by no conversation deleted from it lately.
 fn new_id(agent: &AgentName, state: &State) -> Result<ResidentId, Failure> {
     loop {
         let mut bytes = [0u8; 2];
         getrandom::fill(&mut bytes).map_err(|error| Failure::new(format!("choosing a resident id: {error}")))?;
         let id = ResidentId::try_from(format!("{agent}-{:02x}{:02x}", bytes[0], bytes[1]))
             .expect("an agent name and four hex digits");
-        if !state.live.contains_key(&id) {
+        if !state.live.contains_key(&id) && state.tombstones.of(&id).is_none() {
             return Ok(id);
         }
     }

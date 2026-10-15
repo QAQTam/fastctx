@@ -4,13 +4,29 @@ use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 
+/// Whether this program was built by the release scripts, which set
+/// `FASTCTX_RELEASE` (`scripts/kernel.mjs`, `gui/scripts/release.mjs`,
+/// `gui/scripts/android.mjs`). Any other build is a development build,
+/// whose World is kept apart from the one the user's installed Fastctx
+/// runs: in `.fastctx-dev`, off the PATH, looking for no new versions.
+pub const RELEASED: bool = option_env!("FASTCTX_RELEASE").is_some();
+
+/// Whether this program takes part in its networks' versions, looking for
+/// new releases and telling its hubs what it runs: a release does, and a
+/// development build only in a drill whose `FASTCTX_UPDATE_RELEASES` names
+/// a list of releases of its own.
+pub fn follows_releases() -> bool {
+    RELEASED || std::env::var_os("FASTCTX_UPDATE_RELEASES").is_some()
+}
+
 /// The directory holding everything fastctx keeps for this user:
 /// `FASTCTX_HOME` when it is set, which lets a test or a second World run
-/// beside the real one, and `.fastctx` in the user's home otherwise.
+/// beside the real one, and `.fastctx` in the user's home otherwise, or
+/// `.fastctx-dev` for a development build (`RELEASED`).
 pub fn fastctx_root() -> io::Result<PathBuf> {
     match std::env::var_os("FASTCTX_HOME") {
         Some(root) => absolute("FASTCTX_HOME", root),
-        None => Ok(user_home()?.join(".fastctx")),
+        None => Ok(user_home()?.join(if RELEASED { ".fastctx" } else { ".fastctx-dev" })),
     }
 }
 
@@ -20,6 +36,20 @@ pub fn fastctx_root() -> io::Result<PathBuf> {
 /// that a shell may have respelled.
 pub fn user_home() -> io::Result<PathBuf> {
     imp::user_home()
+}
+
+/// The numeric id of the user this process runs as; none on Windows, which
+/// has no such id.
+pub fn user_id() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid cannot fail.
+        Some(unsafe { libc::getuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 fn absolute(what: &str, path: OsString) -> io::Result<PathBuf> {

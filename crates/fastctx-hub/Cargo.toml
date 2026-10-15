@@ -1,0 +1,41 @@
+[package]
+name = "fastctx-hub"
+description = "The hub: accounts, logins and the directory, and the one machine every member connects to; and the relay that forwards to it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+fastctx-net = { path = "../fastctx-net" }
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-types = { path = "../fastctx-types" }
+fastctx-update = { path = "../fastctx-update" }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+tokio-util = { version = "0.7", features = ["io"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fastctx-ripgrep = { path = "../fastctx-ripgrep" }
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

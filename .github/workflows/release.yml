@@ -1,543 +1,950 @@
 name: Release
 
-# Pushing a tag is a push event, so GitHub applies the skip markers ([skip ci],
-# [ci skip], [no ci], [skip actions], [actions skip]) from the message of the
-# commit the tag points at. A release commit carrying one silently suppresses
-# this entire workflow: the tag lands, no build runs, and no release appears.
-# Keep those markers out of any commit that a release tag will point at.
-# 2026-07-19: this happened once and cost a tag delete plus a re-tag.
+# Every platform's installer from one commit: the command-line programs built, tested and run on the
+# machines they are for; World's installers carrying those very programs; each package signed bound
+# to the release's version; and, for a version tag, a GitHub release of them with the manifest the
+# updater reads. A push to a ci/ branch runs everything but the release. Nothing goes to npm.
+#
+# The jobs start together. One that needs what another uploads does what it can before
+# (`scripts/ci-await.py`): an application compiles while the kernel it carries is still being built.
+# The machines that compile fastest compile for their slower siblings: both Mac kernels and applications
+# are built on Apple silicon and both Windows ones on ARM64 Windows, Intel's and x64's as cross builds,
+# and an Intel Mac and an x64 Windows machine run those very kernels, tests and applications.
+
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
+  push:
+    tags: ['v*']
+    branches: ['ci/**']
 
 permissions:
   contents: read
+  # The jobs that wait read the run's own jobs, to see what has been uploaded.
+  actions: read
 
-# The pinned Pdfium archive is a build input rather than a build output, so it belongs
-# in its own cache instead of the Cargo one. A tag build cannot be shrugged off and
-# retried the way a branch build can, and the release CDN it comes from does go down,
-# so this job fetches it once per pinning. Absolute, so every step resolves the same
-# directory whatever working directory Cargo hands the build script.
 env:
-  FASTCTX_PDFIUM_CACHE_DIR: ${{ github.workspace }}/.pdfium-archive-cache
+  CARGO_TERM_COLOR: always
+  TAURI_CLI: '@tauri-apps/cli@2.12.1'
 
 jobs:
-  build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+  notices:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rust-docs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: notices
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python scripts/cargo-about.py
+      - run: cargo fetch --locked
+      - name: Write the notices
+        run: |
+          # The syntax definitions' notices are data two-face carries; an unoptimized build prints the same.
+          cargo run --locked -p fastctx-tui --example syntax_notices > syntax-notices.md
+          python scripts/notices.py --syntax-notices syntax-notices.md --output dist/THIRD_PARTY_LICENSES.md
+      - name: Upload the notices
+        uses: actions/upload-artifact@v4
+        with:
+          name: notices
+          path: dist/THIRD_PARTY_LICENSES.md
+          if-no-files-found: error
+
+  kernel-windows:
+    name: kernel ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: '-C target-feature=+crt-static'
+    steps:
+      - uses: actions/checkout@v4
+      # These machines scan every file as it is written, and keep scanning a build's thousands of new files
+      # long after it: what runs next waits behind them. The build's own files need no scan.
+      - name: Keep the antivirus off the build's own files
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/check-launcher.cjs "$RUNNER_TEMP"
+      - name: Wait for the notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: dist
+      - run: node scripts/kernel.mjs '${{ matrix.target }}'
+      - name: Verify version and package the native program
+        run: |
+          binary="target/${{ matrix.target }}/release/fastctx.exe"
+          version="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$("$binary" --version)" = "fastctx $version"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          python scripts/package.py platform --target '${{ matrix.target }}' --binary "$binary" --notices dist/THIRD_PARTY_LICENSES.md --output dist
+          mkdir -p kernel && cp "$binary" kernel/
+      - name: Upload the kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.target }}
+          path: kernel/fastctx.exe
+          if-no-files-found: error
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/fastctx-*.zip
+          if-no-files-found: error
+      - name: Build the release tests
+        run: node scripts/kernel.mjs --tests '${{ matrix.target }}' tests
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
+        name: Upload the tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.target }}
+          path: tests
+          if-no-files-found: error
+      - if: matrix.target == 'aarch64-pc-windows-msvc'
+        name: Smoke test on this machine
+        run: python scripts/smoke.py kernel/fastctx.exe
+      - if: matrix.target == 'aarch64-pc-windows-msvc'
+        name: Verify the bundled ripgrep, the node's lifetime, job control and byte streams
+        run: |
+          python scripts/ripgrep.py verify
+          export FASTCTX_TEST_BASH="$(cygpath -m /usr/bin/bash.exe)"
+          export FASTCTX_TEST_ROOT="$(cygpath -m "$RUNNER_TEMP")"
+          tests/offline.exe
+          tests/own_lifetime.exe
+          tests/job_lifecycle.exe
+
+  windows-x64:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Wait for what ARM64 Windows built for x64
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/ci-await.py "kernel x86_64-pc-windows-msvc=Upload the kernel" \
+            "kernel x86_64-pc-windows-msvc=Upload the tests" "gui x86_64-pc-windows-msvc=Upload the installer"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-x86_64-pc-windows-msvc
+          path: kernel
+      - uses: actions/download-artifact@v4
+        with:
+          name: tests-x86_64-pc-windows-msvc
+          path: tests
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui-windows-x64
+          path: dist/gui
+      - name: Smoke test on an x64 machine
+        run: python scripts/smoke.py kernel/fastctx.exe
+      - name: Verify the bundled ripgrep, the node's lifetime, job control and byte streams
+        run: |
+          python scripts/ripgrep.py verify
+          export FASTCTX_TEST_BASH="$(cygpath -m /usr/bin/bash.exe)"
+          export FASTCTX_TEST_ROOT="$(cygpath -m "$RUNNER_TEMP")"
+          tests/offline.exe
+          tests/own_lifetime.exe
+          tests/job_lifecycle.exe
+      - name: Install it and open it
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist/gui/*-setup.exe | Select-Object -First 1
+          Start-Process $installer.FullName -ArgumentList '/S' -Wait
+          $app = Join-Path $env:LOCALAPPDATA 'Fastctx/fastctx-app.exe'
+          if (-not (Test-Path $app)) { throw "the installer left no $app" }
+          $kernel = Join-Path $env:LOCALAPPDATA 'Fastctx/fastctx.exe'
+          if ((Get-FileHash $kernel).Hash -ne (Get-FileHash kernel/fastctx.exe).Hash) { throw "the installed kernel is not the one this run built and tested" }
+          & $kernel --version
+          $process = Start-Process $app -PassThru
+          Start-Sleep -Seconds 25
+          if ($process.HasExited) { throw "Fastctx exited with $($process.ExitCode)" }
+          & scripts/window-shot.ps1 -ProcessId $process.Id -Path "shots/windows-x64.png"
+          Stop-Process -Id $process.Id
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shot-windows-x64
+          path: shots
+          if-no-files-found: ignore
+
+  kernel-linux:
+    name: kernel ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary: fastctx.exe
-            archive: fastctx-x86_64-pc-windows-msvc.zip
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            binary: fastctx.exe
-            archive: fastctx-aarch64-pc-windows-msvc.zip
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            zig_target: x86_64-unknown-linux-gnu.2.31
-            binary: fastctx
-            archive: fastctx-x86_64-unknown-linux-gnu.tar.gz
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            binary: fastctx
-            archive: fastctx-x86_64-apple-darwin.tar.gz
-          - os: macos-14
-            target: aarch64-apple-darwin
-            binary: fastctx
-            archive: fastctx-aarch64-apple-darwin.tar.gz
-
+          - target: x86_64-unknown-linux-gnu
+            build: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            build: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Prepare Git Bash temporary directories
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $git = (Get-Command git.exe -ErrorAction Stop).Source
-          $cursor = Split-Path $git -Parent
-          $gitRoot = $null
-          while ($cursor) {
-            if (Test-Path (Join-Path $cursor "usr/bin/bash.exe")) {
-              $gitRoot = $cursor
-              break
-            }
-            $parent = Split-Path $cursor -Parent
-            if (-not $parent -or $parent -eq $cursor) { break }
-            $cursor = $parent
-          }
-          if (-not $gitRoot) { throw "Cannot locate the Git for Windows root from $git" }
-          $bash = Join-Path $gitRoot "usr/bin/bash.exe"
-          # Git Bash resolves POSIX /tmp through a runtime "usertemp" mount. That
-          # mount ignores TEMP/TMP/TMPDIR and cannot be redirected from fstab, so
-          # the target is whatever cygpath reports and nothing else. When it is
-          # missing every bash start writes a warning to stderr, that warning is
-          # captured as command output, and byte-exact output assertions fail.
-          # Ask bash for the path instead of guessing it. (2026-07-25)
-          # usr/bin/bash.exe inherits PATH from the caller, and pwsh does not
-          # carry the Git toolset, so /usr/bin has to be put back by hand or
-          # cygpath and mkdir below resolve to nothing.
-          $posixTemp = (& $bash --noprofile --norc -c 'PATH=/usr/bin:/bin:$PATH; cygpath -w /tmp').Trim()
-          if ([string]::IsNullOrWhiteSpace($posixTemp)) {
-            throw "Git Bash did not report a Windows path for POSIX /tmp"
-          }
-          Write-Host "POSIX /tmp resolves to $posixTemp"
-          $tempPaths = @(
-            $posixTemp
-            (Join-Path $gitRoot "tmp")
-            $env:TEMP
-            $env:TMP
-            [System.IO.Path]::GetTempPath()
-            (Join-Path $env:USERPROFILE "AppData/Local/Temp")
-            (Join-Path $env:LOCALAPPDATA "Temp")
-          ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique
-          foreach ($path in $tempPaths) {
-            New-Item -ItemType Directory -Force -Path $path | Out-Null
-          }
-          # Existence alone is not the bar: bash wants a directory it can write.
-          & $bash --noprofile --norc -c 'PATH=/usr/bin:/bin:$PATH; mkdir -p /tmp && printf probe > /tmp/.fastctx-probe && rm -f /tmp/.fastctx-probe'
-          if ($LASTEXITCODE -ne 0) {
-            throw "Git Bash could not create and write inside its POSIX /tmp directory"
-          }
-          # Fail here rather than eight minutes later inside the test matrix:
-          # any startup chatter would be captured as command output downstream.
-          $noiseLog = Join-Path ([System.IO.Path]::GetTempPath()) "gitbash-startup-noise.txt"
-          & $bash --noprofile --norc -c "true" 2>$noiseLog
-          $noise = Get-Content -LiteralPath $noiseLog -Raw -ErrorAction SilentlyContinue
-          Remove-Item -LiteralPath $noiseLog -Force -ErrorAction SilentlyContinue
-          if (-not [string]::IsNullOrWhiteSpace($noise)) {
-            throw "Git Bash still writes startup noise to stderr: $noise"
-          }
-          # Creating the directory once is not enough: it has gone missing partway
-          # through a job, after this step had already verified it. Windows refuses
-          # to remove a directory that holds an open handle, so park one inside it
-          # for the rest of the job and rebuild the directory if it disappears
-          # regardless. Fire and forget - if the keeper fails to start, the job
-          # behaves exactly as it did before. The log is the evidence trail.
-          # Keep the keeper's own files off the directory it is guarding.
-          $runnerTemp = if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { [System.IO.Path]::GetTempPath() } else { $env:RUNNER_TEMP }
-          $keeperLog = Join-Path $runnerTemp "posix-tmp-keeper.log"
-          "watching $posixTemp from $(Get-Date -Format o)" | Set-Content -LiteralPath $keeperLog -Encoding UTF8
-          $keeperBody = @'
-          param([string]$Target, [string]$LogPath)
-          $stream = $null
-          while ($true) {
-            try {
-              if (-not (Test-Path -LiteralPath $Target)) {
-                if ($stream) { $stream.Dispose(); $stream = $null }
-                New-Item -ItemType Directory -Force -Path $Target | Out-Null
-                Add-Content -LiteralPath $LogPath -Value ("recreated " + (Get-Date -Format o))
-              }
-              if (-not $stream) {
-                $anchor = Join-Path $Target ".posix-tmp-keeper"
-                $stream = [System.IO.File]::Open($anchor, "OpenOrCreate", "ReadWrite", "None")
-                Add-Content -LiteralPath $LogPath -Value ("anchored " + (Get-Date -Format o))
-              }
-            } catch {
-              Add-Content -LiteralPath $LogPath -Value ("error " + (Get-Date -Format o) + " " + $_.Exception.Message)
-            }
-            Start-Sleep -Milliseconds 200
-          }
-          '@
-          $keeper = Join-Path $runnerTemp "posix-tmp-keeper.ps1"
-          Set-Content -LiteralPath $keeper -Value $keeperBody -Encoding UTF8
-          Start-Process pwsh -WindowStyle Hidden -ArgumentList @(
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $keeper,
-            "-Target", $posixTemp, "-LogPath", $keeperLog
-          )
-
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
         with:
-          targets: ${{ matrix.target }}
-      - name: Install pinned Zig
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: 0.14.1
-      - name: Install pinned cargo-zigbuild
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: cargo install cargo-zigbuild --locked --version 0.23.0
+          targets: ${{ matrix.build }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
-
-      - name: Cache the pinned Pdfium archive
-        uses: actions/cache@v4
+          key: kernel-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
         with:
-          path: .pdfium-archive-cache
-          key: pdfium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('build.rs') }}
-
-      - name: Test release contracts
-        run: cargo test --locked --release --target ${{ matrix.target }}
-
-      # The contract tests above leave control centers riding out their idle window and detached
-      # job supervisors finishing their commands. Windows cannot replace a mapped binary, so the
-      # release build below fails with os error 5 while relinking the same path. CI drains between
-      # its test groups for the same reason; this job relinks right after a test group too.
-      - name: Drain test processes before the release build
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/drain-test-processes.ps1
-
-      - name: Build single-file executable
-        if: matrix.target != 'x86_64-unknown-linux-gnu'
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install zig and cargo-zigbuild
+        run: |
+          python -m pip install ziglang==0.14.1
+          cargo install --locked cargo-zigbuild --version 0.23.0
+          # The kernel's debug sections and symbols are stripped with zig itself, which pip installs as a module.
+          mkdir -p "$RUNNER_TEMP/zig-bin"
+          printf '#!/bin/sh\nexec %s -m ziglang "$@"\n' "$(command -v python)" > "$RUNNER_TEMP/zig-bin/zig"
+          chmod +x "$RUNNER_TEMP/zig-bin/zig"
+          echo "$RUNNER_TEMP/zig-bin" >> "$GITHUB_PATH"
+      - run: node scripts/check-launcher.cjs "$RUNNER_TEMP"
+      - name: Wait for the notices
         env:
-          FASTCTX_DISTRIBUTION: github-release
-        run: cargo build --locked --release --target ${{ matrix.target }}
-
-      - name: Build glibc 2.31 Linux executable
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        env:
-          FASTCTX_DISTRIBUTION: github-release
-        run: cargo zigbuild --locked --release --target ${{ matrix.zig_target }}
-
-      - name: Enforce Linux GLIBC symbol floors
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          highest_glibc() {
-            local file="$1"
-            LANG=C readelf -W --version-info --dyn-syms "$file" |
-              sed -nE 's/.*Name: GLIBC_([0-9]+(\.[0-9]+)+).*/\1/p' |
-              sort -Vu |
-              tail -n 1
-          }
-
-          version_at_most() {
-            local actual="$1"
-            local maximum="$2"
-            [[ "$(printf '%s\n%s\n' "$actual" "$maximum" | sort -V | tail -n 1)" == "$maximum" ]]
-          }
-
-          assert_glibc_at_most() {
-            local file="$1"
-            local maximum="$2"
-            local label="$3"
-            local actual
-            actual="$(highest_glibc "$file")"
-            if [[ -z "$actual" ]]; then
-              echo "::error::$label exposes no GLIBC version requirements"
-              return 1
-            fi
-            if ! version_at_most "$actual" "$maximum"; then
-              echo "::error::$label requires GLIBC_$actual, above GLIBC_$maximum"
-              return 1
-            fi
-            echo "$label: highest required symbol is GLIBC_$actual (maximum GLIBC_$maximum)"
-          }
-
-          binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          assert_glibc_at_most "$binary" "2.31" "FastCtx Linux executable"
-
-          if assert_glibc_at_most "$binary" "2.17" "negative-control executable"; then
-            echo "::error::The GLIBC gate negative control unexpectedly accepted a 2.17 floor"
-            exit 1
-          fi
-          echo "Negative control correctly rejected the executable at a GLIBC_2.17 floor"
-
-          mapfile -t pdfium_libraries < <(
-            find "target/${{ matrix.target }}/release/build" \
-              -type f \
-              -path '*/out/bundled-pdfium/libpdfium.so' \
-              -print
-          )
-          if [[ "${#pdfium_libraries[@]}" -eq 0 ]]; then
-            echo "::error::The embedded libpdfium.so build input was not found"
-            exit 1
-          fi
-          for pdfium in "${pdfium_libraries[@]}"; do
-            assert_glibc_at_most "$pdfium" "2.16" "Embedded Pdfium"
-          done
-
-      - name: Stage release archive
-        shell: pwsh
-        run: |
-          ./scripts/stage-release-archive.ps1 `
-            -Target "${{ matrix.target }}" `
-            -Binary "target/${{ matrix.target }}/release/${{ matrix.binary }}"
-
-      - name: Smoke-test Linux on glibc 2.31 and 2.35
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > target/glibc-smoke.sh <<'SCRIPT'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          binary=/opt/fastctx
-          # Every check below reports what it wanted and what it got. A bare `[[ ]]` or `grep -q`
-          # under `set -e` fails the whole release with an empty log, which is how a real defect
-          # here once cost an afternoon of bisecting.
-          version="$("$binary" --version)"
-          echo "fastctx reports: $version"
-          if [[ "$version" != fastctx\ * ]]; then
-            echo "::error::glibc smoke test: --version printed $version"
-            exit 1
-          fi
-          responses="$(
-            printf '%s\n' \
-              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"glibc-smoke","version":"1.0"}}}' \
-              '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
-              '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' |
-              timeout 15s "$binary" serve
-          )"
-          require() {
-            if ! grep -Eq "$1" <<<"$responses"; then
-              echo "::error::glibc smoke test: the MCP responses carry no $2"
-              echo "Captured ${#responses} bytes of responses:"
-              head -c 2000 <<<"$responses"
-              exit 1
-            fi
-          }
-          require '"id"[[:space:]]*:[[:space:]]*1' 'answer to initialize'
-          require '"id"[[:space:]]*:[[:space:]]*2' 'answer to tools/list'
-          require '"name"[[:space:]]*:[[:space:]]*"inspect_local_file"' 'inspect_local_file tool'
-          require '"name"[[:space:]]*:[[:space:]]*"replace"' 'replace tool'
-          SCRIPT
-          chmod +x target/glibc-smoke.sh
-          binary="$PWD/target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          probe="$PWD/target/glibc-smoke.sh"
-          for image in ubuntu:20.04 ubuntu:22.04; do
-            docker run --rm \
-              --volume "$binary:/opt/fastctx:ro" \
-              --volume "$probe:/opt/glibc-smoke:ro" \
-              "$image" \
-              /bin/bash /opt/glibc-smoke
-          done
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: Pack and verify npm artifact
-        shell: pwsh
-        run: |
-          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "([^"]+)"$').Matches[0].Groups[1].Value
-          $package = switch ("${{ matrix.target }}") {
-            "x86_64-pc-windows-msvc" { "fastctx-win32-x64-$version.tgz" }
-            "aarch64-pc-windows-msvc" { "fastctx-win32-arm64-$version.tgz" }
-            "x86_64-unknown-linux-gnu" { "fastctx-linux-x64-$version.tgz" }
-            "x86_64-apple-darwin" { "fastctx-darwin-x64-$version.tgz" }
-            "aarch64-apple-darwin" { "fastctx-darwin-arm64-$version.tgz" }
-          }
-          $verificationDirectory = "target/npm-release-verification"
-          ./scripts/stage-npm-package.ps1 `
-            -Target "${{ matrix.target }}" `
-            -Binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" `
-            -OutputDirectory $verificationDirectory `
-            -IncludeRootPackages
-          ./scripts/verify-npm-install.ps1 `
-            -PlatformTarball "$verificationDirectory/$package" `
-            -MainTarball "$verificationDirectory/fastctx-$version.tgz" `
-            -AliasTarball "$verificationDirectory/codex-fastctx-$version.tgz"
-          New-Item -ItemType Directory -Force -Path "dist/npm" | Out-Null
-          Copy-Item -LiteralPath "$verificationDirectory/$package" -Destination "dist/npm/$package"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ matrix.target }}
-          path: |
-            dist/release/${{ matrix.archive }}
-            dist/npm/*.tgz
-          if-no-files-found: error
-
-  publish-release:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
       - uses: actions/download-artifact@v4
         with:
+          name: notices
           path: dist
-          merge-multiple: true
-      - name: Pack npm launcher and compatibility alias
-        shell: pwsh
-        run: ./scripts/pack-npm-root.ps1 -OutputDirectory "dist/npm"
-      - name: Finalize and verify release artifacts
-        shell: pwsh
+      - run: node scripts/kernel.mjs '${{ matrix.target }}'
+      - name: Verify version and package the native program
         run: |
-          ./scripts/verify-distribution-contract.ps1
-          ./scripts/finalize-release-assets.ps1
-          ./scripts/verify-release-assets.ps1
-      - name: Retain npm packages for manual publishing
+          binary="target/${{ matrix.build }}/release/fastctx"
+          version="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$("$binary" --version)" = "fastctx $version"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          python scripts/package.py platform --target '${{ matrix.target }}' --binary "$binary" --notices dist/THIRD_PARTY_LICENSES.md --output dist
+          mkdir -p kernel && cp "$binary" kernel/
+      - name: Upload the kernel
         uses: actions/upload-artifact@v4
         with:
-          name: npm-tarballs-${{ github.ref_name }}
-          path: dist/npm/*.tgz
+          name: kernel-${{ matrix.target }}
+          path: kernel/fastctx
           if-no-files-found: error
-          retention-days: 90
-      - name: Verify annotated release identity
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: ./scripts/verify-release-identity.ps1 -TagName $env:GITHUB_REF_NAME
-      - name: Create exact GitHub Release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/fastctx-*.tar.gz
+          if-no-files-found: error
+      - name: Smoke test on this machine
+        run: python scripts/smoke.py kernel/fastctx --service
+      - name: Verify the bundled ripgrep, the node's lifetime, job control and byte streams
+        run: |
+          node scripts/kernel.mjs --tests '${{ matrix.target }}' tests
+          python scripts/ripgrep.py verify
+          export FASTCTX_TEST_BASH=/bin/bash FASTCTX_TEST_ROOT="$RUNNER_TEMP"
+          tests/offline
+          tests/own_lifetime
+          tests/job_lifecycle
+
+  kernel-macos:
+    name: kernel ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-apple-darwin'
+        name: Let Apple silicon run what is built for Intel
+        run: softwareupdate --install-rosetta --agree-to-license || /usr/bin/arch -x86_64 /usr/bin/true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/check-launcher.cjs "$RUNNER_TEMP"
+      - name: Wait for the notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: dist
+      - run: node scripts/kernel.mjs '${{ matrix.target }}'
+      - name: Verify version and package the native program
+        run: |
+          binary="target/${{ matrix.target }}/release/fastctx"
+          version="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$("$binary" --version)" = "fastctx $version"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "v$version"; fi
+          python scripts/package.py platform --target '${{ matrix.target }}' --binary "$binary" --notices dist/THIRD_PARTY_LICENSES.md --output dist
+          mkdir -p kernel && cp "$binary" kernel/
+      - name: Upload the kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.target }}
+          path: kernel/fastctx
+          if-no-files-found: error
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/fastctx-*.tar.gz
+          if-no-files-found: error
+      - if: matrix.target == 'aarch64-apple-darwin'
+        name: Smoke test on this machine
+        run: python scripts/smoke.py kernel/fastctx --service
+      - name: Build the release tests
+        run: node scripts/kernel.mjs --tests '${{ matrix.target }}' tests
+      - if: matrix.target == 'aarch64-apple-darwin'
+        name: Verify the bundled ripgrep, the node's lifetime, job control and byte streams, in the bash a Mac comes with
+        run: |
+          python scripts/ripgrep.py verify
+          export FASTCTX_TEST_BASH=/bin/bash FASTCTX_TEST_ROOT="$RUNNER_TEMP"
+          tests/offline
+          tests/own_lifetime
+          tests/job_lifecycle
+      - if: matrix.target == 'x86_64-apple-darwin'
+        name: Upload the tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-${{ matrix.target }}
+          path: tests
+          if-no-files-found: error
+
+  macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Use the bash a Mac comes with
+        run: |
+          for bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+            if [ -e "$bash" ]; then sudo mv "$bash" "$bash.hidden"; fi
+          done
+          /bin/bash --version | head -1
+      - name: Wait for what Apple silicon built for Intel
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="$RUNNER_TEMP/fastctx-release-notes.md"
-          cat > "$notes" <<'EOF'
-          ## FastCtx v0.2.6
-
-          Windows on ARM builds, tool schemas every provider accepts, and MCP sessions that survive a failing control center.
-
-          **Upgrading:** replacing the binary is enough. This release does not require `fastctx apply`.
-
-          ### Breaking
-
-          - **`glob` no longer applies Git ignore rules.** `.gitignore`, `.git/info/exclude` and your global Git ignore no longer remove files from a `glob` result, and `.git` is no longer excluded automatically. A model that asked where a file was could previously be told it did not exist, purely because Git ignored it. `filter_mode` is now `ignore` (default, honours plain `.ignore` files) or `all`; the old value `project` is still accepted and behaves as `ignore`. Exclude what you do not want with a negative pattern such as `!target/**`. `grep` and `replace` are unchanged.
-
-          ### Added
-
-          - **Windows on ARM.** FastCtx now ships an `aarch64-pc-windows-msvc` build with the same features as every other platform, on GitHub Releases and as `@fastctx/win32-arm64`.
-          - **`glob` can report size and modification time.** Pass `output_mode: "details"` to get each match with its byte size and UTC modification time, instead of following a search with a separate directory listing.
-          - **One `limit` for a whole batch read.** `inspect_local_file` accepts a top-level `limit` next to `files`; it applies to every entry that does not set its own, so a uniform cap no longer has to be repeated per entry.
-
-          ### Fixed
-
-          - **A failing control center no longer ends your conversations.** One host process runs many conversations that share a single control center, and Codex never restarts an MCP server it has lost — so one failure took every conversation of that user down at once, with no way back except starting over. A session now settles what it owes, swaps in another engine and continues; only the host ends a session.
-          - **Tool schemas are published in a portable subset.** Schemas used `$ref` and composition, which some providers reject outright — and a rejected tool declaration fails the whole request, not one parameter. Every published schema is now a flat, single-type form.
-          - **Git Bash installed through Scoop is found.** `run` reported that no Bash was available on machines where Scoop had installed one.
-          - **Background jobs no longer report a false startup failure on a busy machine.** The supervisor's startup window was too narrow to survive load.
-          - **`run` says which local tasks it is for.** Its description now leads with non-interactive CLI work — Git, build and test tools, package managers, database CLIs, project scripts — before the Bash execution details.
-          - The search CPU limit setting states which event makes a new value take effect: it is read once when the control center starts, which now means after every Codex process has exited.
-          - The pinned Pdfium archive is cached during builds instead of being downloaded once per build unit.
-          EOF
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release delete "${GITHUB_REF_NAME}" --yes
-          fi
-          gh release create "${GITHUB_REF_NAME}" dist/release/* \
-            --verify-tag \
-            --title "FastCtx ${GITHUB_REF_NAME}" \
-            --notes-file "$notes"
-      - name: Confirm dry-run boundary
-        if: github.event_name == 'workflow_dispatch'
+          python scripts/ci-await.py "kernel x86_64-apple-darwin=Upload the kernel" \
+            "kernel x86_64-apple-darwin=Upload the tests" "gui x86_64-apple-darwin=Upload the application"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-x86_64-apple-darwin
+          path: kernel
+      - uses: actions/download-artifact@v4
+        with:
+          name: tests-x86_64-apple-darwin
+          path: tests
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui-macos-x64
+          path: dist
+      - name: Smoke test on an Intel Mac
         run: |
-          echo "Release artifacts were built and verified without creating or replacing a GitHub Release."
+          chmod +x kernel/fastctx tests/*
+          python scripts/smoke.py kernel/fastctx --service --expect-bash 3.2
+      - name: Verify the bundled ripgrep, the node's lifetime, job control and byte streams
+        run: |
+          python scripts/ripgrep.py verify
+          export FASTCTX_TEST_BASH=/bin/bash FASTCTX_TEST_ROOT="$RUNNER_TEMP"
+          tests/offline
+          tests/own_lifetime
+          tests/job_lifecycle
+      - name: Open the application
+        run: |
+          tar -xzf dist/*.app.tar.gz -C "$RUNNER_TEMP"
+          app="$RUNNER_TEMP/Fastctx.app"
+          codesign --verify --verbose "$app"
+          # The bundle signs what it carries again, so its bytes differ; it is the program built here
+          # when it has the UUID the linker derived from that program's content.
+          uuid() { dwarfdump --uuid "$1" | awk '{ print $2 }'; }
+          built="$(uuid kernel/fastctx)" && test -n "$built"
+          test "$(uuid "$app/Contents/MacOS/fastctx")" = "$built"
+          "$app/Contents/MacOS/fastctx" --version
+          "$app/Contents/MacOS/fastctx-app" > app.log 2>&1 &
+          sleep 25
+          pgrep -x fastctx-app
+          mkdir -p shots
+          screencapture -x shots/macos-x64.png || true
+          pkill -x fastctx-app || true
+          cat app.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shot-macos-x64
+          path: shots
+          if-no-files-found: ignore
 
-  publish-npm:
-    name: Publish npm packages
-    needs: publish-release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Trusted publishing exchanges this short-lived OIDC identity for a
-      # registry credential. No npm token exists in this repository.
-      id-token: write
+  sign-kernels:
+    needs: kernel-linux
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: npm-tarballs-${{ github.ref_name }}
-          path: dist/npm
-      - uses: actions/setup-node@v6
+          pattern: archive-*-unknown-linux-gnu
+          merge-multiple: true
+          path: kernels
+      - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - name: Use an npm release that supports trusted publishing
-        run: npm install --global npm@latest
-      - name: Publish packages in dependency order
-        shell: bash
+          node-version: '22'
+      - uses: actions/checkout@v4
+        with:
+          path: source
+      - name: Sign the Linux command-line programs
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-
-          publish_package() {
-            local name="$1"
-            local tarball="dist/npm/$2-${version}.tgz"
-            if [[ ! -f "$tarball" ]]; then
-              echo "::error::Missing tarball $tarball"
-              exit 1
-            fi
-            # Published versions are immutable, so a partially published release
-            # can only be finished by skipping what already landed. This check
-            # keeps a re-run of this job safe instead of failing on E403.
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "::notice::$name@$version is already published; skipping"
-              return
-            fi
-            echo "Publishing $name@$version"
-            npm publish "$tarball" --access public
-          }
-
-          # Dependents last: the launcher's optionalDependencies must resolve.
-          publish_package "@fastctx/win32-x64" "fastctx-win32-x64"
-          publish_package "@fastctx/win32-arm64" "fastctx-win32-arm64"
-          publish_package "@fastctx/linux-x64" "fastctx-linux-x64"
-          publish_package "@fastctx/darwin-x64" "fastctx-darwin-x64"
-          publish_package "@fastctx/darwin-arm64" "fastctx-darwin-arm64"
-          publish_package "fastctx" "fastctx"
-          publish_package "codex-fastctx" "codex-fastctx"
-      - name: Confirm registry visibility
-        shell: bash
-        run: |
-          set -uo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          packages=(
-            "@fastctx/win32-x64"
-            "@fastctx/win32-arm64"
-            "@fastctx/linux-x64"
-            "@fastctx/darwin-x64"
-            "@fastctx/darwin-arm64"
-            "fastctx"
-            "codex-fastctx"
-          )
-          # The registry read path lags publish by minutes, so absence here is a
-          # propagation notice rather than a failed publish.
-          lagging=()
-          for name in "${packages[@]}"; do
-            visible=""
-            for _ in $(seq 1 10); do
-              if npm view "$name@$version" version >/dev/null 2>&1; then
-                visible="yes"
-                break
-              fi
-              sleep 30
-            done
-            if [[ -n "$visible" ]]; then
-              echo "$name@$version is visible"
-            else
-              lagging+=("$name")
-            fi
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("source/Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          for archive in kernels/fastctx-*-unknown-linux-gnu.tar.gz; do
+            npx --yes "$TAURI_CLI" signer sign --app-version "$version" "$archive"
           done
-          if [[ "${#lagging[@]}" -gt 0 ]]; then
-            echo "::warning::Still propagating after 5 minutes: ${lagging[*]}"
-          fi
-      - name: Request npmmirror synchronization
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-kernels
+          path: kernels/fastctx-*-unknown-linux-gnu.tar.gz*
+          if-no-files-found: error
+
+  gui-windows:
+    name: gui ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    runs-on: windows-11-arm
+    defaults:
+      run:
         shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # These machines scan every file as it is written, and keep scanning a build's thousands of new files
+      # long after it: what runs next waits behind them. The build's own files need no scan.
+      - name: Keep the antivirus off the build's own files
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rust-docs
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+          key: gui-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python scripts/cargo-about.py
+      - name: Fetch the application's dependencies
+        working-directory: gui
         run: |
-          set -uo pipefail
-          # Mirrors copy new versions lazily, which strands users whose registry
-          # is a mirror. This asks npmmirror to enqueue each package now; the
-          # response only acknowledges the request, not its completion.
-          for name in \
-            "%40fastctx%2Fwin32-x64" \
-            "%40fastctx%2Fwin32-arm64" \
-            "%40fastctx%2Flinux-x64" \
-            "%40fastctx%2Fdarwin-x64" \
-            "%40fastctx%2Fdarwin-arm64" \
-            "fastctx" \
-            "codex-fastctx"
-          do
-            status="$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
-              "https://registry.npmmirror.com/-/package/${name}/syncs" || echo "000")"
-            if [[ "$status" == "2"* ]]; then
-              echo "Sync queued for ${name} (HTTP ${status})"
-            else
-              echo "::warning::npmmirror sync request for ${name} returned HTTP ${status}"
-            fi
+          npm ci --no-audit --no-fund
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      - name: Wait for the notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: dist
+      - name: Compile the application while its kernel is built
+        working-directory: gui
+        run: node scripts/release.mjs --prepare --target '${{ matrix.target }}'
+      - name: Wait for the kernels it carries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/ci-await.py "kernel ${{ matrix.target }}=Upload the kernel" \
+            "kernel x86_64-unknown-linux-gnu=Upload the archive" "kernel aarch64-unknown-linux-gnu=Upload the archive"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-${{ matrix.target }}
+          path: kernel
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*-unknown-linux-gnu
+          merge-multiple: true
+          path: gui/src-tauri/linux
+      - name: Build the installer
+        working-directory: gui
+        run: node scripts/release.mjs --prepared --kernel ../kernel/fastctx.exe --target '${{ matrix.target }}' --out ../dist/gui
+      - name: Sign the installer for the updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: gui
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          for installer in ../dist/gui/*-setup.exe; do
+            node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$version" "$installer"
           done
+      - if: matrix.arch == 'arm64'
+        name: Install it and open it
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist/gui/*-setup.exe | Select-Object -First 1
+          Start-Process $installer.FullName -ArgumentList '/S' -Wait
+          $app = Join-Path $env:LOCALAPPDATA 'Fastctx/fastctx-app.exe'
+          if (-not (Test-Path $app)) { throw "the installer left no $app" }
+          $kernel = Join-Path $env:LOCALAPPDATA 'Fastctx/fastctx.exe'
+          if ((Get-FileHash $kernel).Hash -ne (Get-FileHash kernel/fastctx.exe).Hash) { throw "the installed kernel is not the one this run built and tested" }
+          & $kernel --version
+          $process = Start-Process $app -PassThru
+          Start-Sleep -Seconds 25
+          if ($process.HasExited) { throw "Fastctx exited with $($process.ExitCode)" }
+          & scripts/window-shot.ps1 -ProcessId $process.Id -Path "shots/windows-${{ matrix.arch }}.png"
+          Stop-Process -Id $process.Id
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.arch == 'arm64'
+        with:
+          name: shot-windows-${{ matrix.arch }}
+          path: shots
+          if-no-files-found: ignore
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows-${{ matrix.arch }}
+          path: dist/gui/*-setup.exe*
+          if-no-files-found: error
+
+  gui-macos:
+    name: gui ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rust-docs
+          targets: ${{ matrix.target }}
+      - if: matrix.target == 'x86_64-apple-darwin'
+        name: Let Apple silicon run what is built for Intel
+        run: softwareupdate --install-rosetta --agree-to-license || /usr/bin/arch -x86_64 /usr/bin/true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+          key: gui-${{ matrix.target }}
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python scripts/cargo-about.py
+      - name: Fetch the application's dependencies
+        working-directory: gui
+        run: |
+          npm ci --no-audit --no-fund
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      - name: Wait for the notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: dist
+      - name: Compile the application while its kernel is built
+        working-directory: gui
+        run: node scripts/release.mjs --prepare --target '${{ matrix.target }}'
+      - name: Wait for the kernels it carries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/ci-await.py "kernel ${{ matrix.target }}=Upload the kernel" \
+            "kernel x86_64-unknown-linux-gnu=Upload the archive" "kernel aarch64-unknown-linux-gnu=Upload the archive"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-${{ matrix.target }}
+          path: kernel
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*-unknown-linux-gnu
+          merge-multiple: true
+          path: gui/src-tauri/linux
+      - name: Build the application
+        working-directory: gui
+        run: |
+          chmod +x ../kernel/fastctx
+          node scripts/release.mjs --prepared --kernel ../kernel/fastctx --target '${{ matrix.target }}' --out ../dist/gui
+      - name: Sign the application for the updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: gui
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$version" ../dist/gui/*.app.tar.gz
+      - if: matrix.target == 'aarch64-apple-darwin'
+        name: Open it
+        run: |
+          app=gui/src-tauri/target/release/bundle/macos/Fastctx.app
+          codesign --verify --verbose "$app"
+          # The bundle signs what it carries again, so its bytes differ; it is the program built here
+          # when it has the UUID the linker derived from that program's content.
+          uuid() { dwarfdump --uuid "$1" | awk '{ print $2 }'; }
+          built="$(uuid kernel/fastctx)" && test -n "$built"
+          test "$(uuid "$app/Contents/MacOS/fastctx")" = "$built"
+          "$app/Contents/MacOS/fastctx" --version
+          "$app/Contents/MacOS/fastctx-app" > app.log 2>&1 &
+          sleep 25
+          pgrep -x fastctx-app
+          mkdir -p shots
+          screencapture -x "shots/macos-${{ matrix.arch }}.png" || true
+          pkill -x fastctx-app || true
+          cat app.log
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.target == 'aarch64-apple-darwin'
+        with:
+          name: shot-macos-${{ matrix.arch }}
+          path: shots
+          if-no-files-found: ignore
+      - name: Upload the application
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos-${{ matrix.arch }}
+          path: |
+            dist/gui/*.dmg
+            dist/gui/*.app.tar.gz*
+          if-no-files-found: error
+
+  gui-linux:
+    name: gui x86_64-unknown-linux-gnu
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/gui/src-tauri/target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the build's system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev patchelf squashfs-tools xvfb x11-utils imagemagick file libfuse2
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rust-docs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+          key: gui-linux
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python scripts/cargo-about.py
+      - name: Fetch the application's dependencies
+        working-directory: gui
+        run: |
+          npm ci --no-audit --no-fund
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      - name: Wait for the notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: dist
+      - name: Compile the application while its kernel is built
+        working-directory: gui
+        run: node scripts/release.mjs --prepare
+      - name: Wait for the kernels it carries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/ci-await.py "kernel x86_64-unknown-linux-gnu=Upload the kernel" \
+            "kernel x86_64-unknown-linux-gnu=Upload the archive" "kernel aarch64-unknown-linux-gnu=Upload the archive"
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-x86_64-unknown-linux-gnu
+          path: kernel
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*-unknown-linux-gnu
+          merge-multiple: true
+          path: gui/src-tauri/linux
+      - name: Build, seal and verify the deb and the AppImage
+        run: |
+          chmod +x kernel/fastctx
+          # linux-bundle.py checks both packages carry this very program.
+          mkdir -p "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release"
+          cp kernel/fastctx "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/fastctx"
+          cd gui
+          node scripts/release.mjs --prepared --kernel ../kernel/fastctx
+          python ../scripts/linux-bundle.py --target-dir "$CARGO_TARGET_DIR" --output ../dist/gui
+      - name: Sign the packages for the updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        working-directory: gui
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          for package in ../dist/gui/*.AppImage ../dist/gui/*.deb; do
+            node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$version" "$package"
+          done
+      - name: Open the AppImage
+        run: |
+          image="$(realpath dist/gui/*.AppImage)"
+          chmod +x "$image"
+          mkdir -p shots
+          export APPIMAGE_EXTRACT_AND_RUN=1 WEBKIT_DISABLE_DMABUF_RENDERER=1
+          # The application is found by its own process name, and by its window's title on the screen.
+          status=0
+          xvfb-run -a -s "-screen 0 1280x860x24" sh -c '
+            "$1" > app.log 2>&1 &
+            sleep 30
+            import -window root shots/linux-x64.png
+            xwininfo -root -tree | grep -F "\"Fastctx\""
+            shown=$?
+            pgrep -x fastctx-app > /dev/null || shown=1
+            pkill -x fastctx-app
+            exit $shown' sh "$image" || status=$?
+          cat app.log
+          exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shot-linux-x64
+          path: shots
+          if-no-files-found: ignore
+      - name: Upload the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-x64
+          path: |
+            dist/gui/*.AppImage*
+            dist/gui/*.deb*
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: rust-docs
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gui/src-tauri
+          key: android
+          cache-on-failure: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python scripts/cargo-about.py
+      - name: Install the Android SDK parts the build takes
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865" > /dev/null
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - name: Fetch the application's dependencies
+        working-directory: gui
+        run: |
+          npm ci --no-audit --no-fund
+          cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+      - name: Wait for the notices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "notices=Upload the notices"
+      - uses: actions/download-artifact@v4
+        with:
+          name: notices
+          path: dist
+      - name: Build the APK for every phone's processor
+        working-directory: gui
+        run: |
+          node scripts/android.mjs build --apk
+          built="$(ls src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk)"
+          mkdir -p ../dist/gui
+          "$ANDROID_HOME/build-tools/37.0.0/zipalign" -f -P 16 4 "$built" "../dist/gui/aligned.apk"
+      - name: Sign the APK
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Fastctx's release key; a phone takes an update only from the key it was installed with.
+          RELEASE_CERTIFICATE: 99590e075e2b54f5d3b02c9ec650f1bf1ece97f8605edba16c975b4feb51ca42
+        working-directory: gui
+        run: |
+          set -o pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          keystore="$RUNNER_TEMP/release.jks"
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE" | base64 -d > "$keystore"
+          signed="../dist/gui/Fastctx_${version}_universal.apk"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" sign --ks "$keystore" --ks-key-alias fastctx \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD --key-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --out "$signed" ../dist/gui/aligned.apk
+          rm ../dist/gui/aligned.apk
+          "$ANDROID_HOME/build-tools/37.0.0/zipalign" -c -P 16 4 "$signed"
+          certificates="$("$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$signed")"
+          printf '%s\n' "$certificates" | grep 'certificate SHA-256 digest'
+          printf '%s\n' "$certificates" | grep -q "certificate SHA-256 digest: $RELEASE_CERTIFICATE"
+          node node_modules/@tauri-apps/cli/tauri.js signer sign --app-version "$version" "$signed"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-android
+          path: dist/gui/*.apk*
+          if-no-files-found: error
+
+  update-windows:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Wait for the x64 installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci-await.py "gui x86_64-pc-windows-msvc=Upload the installer"
+      - uses: actions/download-artifact@v4
+        with:
+          name: gui-windows-x64
+          path: dist
+      - name: Sign a copy of the installer as a later version
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          version="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          later="${version%.*}.99"
+          mkdir -p later
+          cp dist/*-setup.exe later/next-setup.exe
+          npx --yes "$TAURI_CLI" signer sign --app-version "$later" later/next-setup.exe
+          echo "LATER=$later" >> "$GITHUB_ENV"
+      - name: Update to it, as a user with automatic updates would
+        run: python scripts/update-drill.py "$(ls dist/*-setup.exe)" later/next-setup.exe "$LATER"
+
+  manifest:
+    needs: [kernel-windows, windows-x64, kernel-linux, kernel-macos, macos-intel, sign-kernels, gui-windows, gui-macos, gui-linux, android, update-windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gui-*
+          merge-multiple: true
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-kernels
+          path: assets
+      - name: Write the updater's manifest
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          python3 scripts/release-manifest.py --version "$version" --assets assets --output assets/latest.json \
+            --notes "This is a beta release of the new Fastctx, for testing before the stable release."
+          ls -la assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            assets/latest.json
+            assets/*-setup.exe
+            assets/*.dmg
+            assets/*.app.tar.gz
+            assets/*.AppImage
+            assets/*.deb
+            assets/*.apk
+          if-no-files-found: error
+
+  publish:
+    needs: manifest
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Publish the test release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          test "$GITHUB_REF_NAME" = "v$version"
+          case "$version" in *-*) ;; *) echo "only a test release is published by this workflow"; exit 1 ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --prerelease --title "Fastctx $version" \
+            --notes "This is a beta release of the new Fastctx, for testing before the stable release." release/*

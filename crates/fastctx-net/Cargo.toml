@@ -1,0 +1,61 @@
+[package]
+name = "fastctx-net"
+description = "Machines and the hub: keys, accounts and logins, the directory, the wire, and each machine's link to the hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The password stretching of OPAQUE logins (`crate::login`).
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+base64 = "0.22"
+bytes = "1"
+ed25519-dalek = "3.0.0"
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-types = { path = "../fastctx-types" }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = { version = "0.3", features = ["std"] }
+hkdf = "0.12"
+hmac = "0.12"
+# Requests to the open web: new versions on GitHub (`crate::web`).
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+jiff.workspace = true
+# Password logins without the hub ever holding the password (RFC 9807).
+opaque-ke = { version = "3.0.0", default-features = false, features = ["argon2", "ristretto255-voprf"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "crypto"] }
+# The ring provider throughout: aws-lc-rs needs cmake and NASM to build.
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+socket2 = { version = "0.6.5", features = ["all"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+# The public authorities the open web is checked against, carried in the program.
+webpki-roots = "1"
+zeroize = { version = "1.8", features = ["serde"] }
+zstd = { version = "0.14", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Power",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -1,0 +1,62 @@
+//! The World's contracts.
+//!
+//! Every concept that crosses a boundary (a process, a machine, a file on
+//! disk) has exactly one type, defined in this crate: names, residents'
+//! records, the events every agent's session is translated into, the
+//! requests local clients send to the node, and the hands' requests and
+//! results. Other crates refer to these types and never redefine them; what
+//! is written to disk and what travels on the wire is their serde form.
+
+pub mod access;
+pub mod accounts;
+pub mod agents;
+pub mod attachments;
+pub mod calls;
+pub mod collab;
+pub mod collab_prompt;
+pub mod composer;
+pub mod copy;
+pub mod data;
+pub mod device;
+pub mod features;
+pub mod file_read;
+pub mod file_search;
+pub mod files;
+pub mod focus;
+pub mod hub_move;
+pub mod ipc;
+pub mod kernel;
+pub mod layout;
+pub mod lines;
+pub mod logins;
+pub mod machine_log;
+pub mod management;
+pub mod names;
+pub mod node_lifetime;
+pub mod on;
+pub mod pages;
+pub mod password;
+pub mod process;
+pub mod project;
+pub mod remote;
+pub mod renewal;
+pub mod residents;
+pub mod run;
+pub mod run_facts;
+pub mod session;
+pub mod since;
+pub mod stats;
+pub mod thumbnail;
+pub mod town;
+pub mod uninstall;
+pub mod update;
+pub mod usage;
+pub mod world;
+pub mod write;
+
+pub use calls::{Attach, Call, JournalCall, ProjectCall, Reply};
+pub use names::{
+    AccountName, Address, AgentName, EntryId, HubName, JobId, JournalName, MachineName, NameError, NameProblem,
+    NoticeId, PageName, ResidentId, TownName,
+};
+pub use process::ProcessIdentity;

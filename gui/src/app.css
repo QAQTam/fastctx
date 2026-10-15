@@ -1,0 +1,1291 @@
+/* The page around a conversation: a head that names who it is with, the
+   conversation in a region of its own that scrolls, and a composer that
+   stays at the foot. */
+
+.conversation-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.conversation-page > .page-head {
+  position: relative;
+  z-index: 2;
+  box-shadow: 0 1px 0 transparent;
+  transition: box-shadow var(--hover) ease;
+}
+
+.conversation-page.scrolled > .page-head {
+  box-shadow: 0 1px 0 var(--hairline);
+}
+
+.talk-scroller {
+  flex: 1;
+}
+
+.who {
+  min-width: 0;
+}
+
+.who-name {
+  margin: 0;
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+  font-size: var(--size-h2);
+  line-height: var(--leading-heading);
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.who-at {
+  font-family: var(--font-reading);
+  color: var(--text-2);
+}
+
+.who-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.who-state span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.who-state.working {
+  color: var(--text-2);
+}
+
+.who-state.gone {
+  color: var(--caution);
+}
+
+.who-state .pulse {
+  flex: none;
+  width: 6px;
+  height: 6px;
+}
+
+/* The composer: a raised sheet resting on the foot of the page. */
+
+.composer-dock {
+  flex: none;
+  position: relative;
+  z-index: 2;
+  padding: 0 var(--gutter) calc(var(--space-4) + var(--safe-bottom));
+  background: var(--bg);
+}
+
+/* The way back to the newest, from far up a conversation: a solid round
+   mark resting above the composer, its chevron pointing down. */
+.to-latest {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + var(--space-3));
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  color: var(--text-2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  cursor: pointer;
+  transform: translateX(-50%);
+  animation: to-latest-in var(--enter) ease-out;
+  transition: color var(--hover) ease;
+}
+
+.to-latest[hidden] {
+  display: none;
+}
+
+.to-latest:hover,
+.to-latest:focus-visible {
+  color: var(--text-strong);
+}
+
+@keyframes to-latest-in {
+  from { opacity: 0; transform: translate(-50%, 6px); }
+}
+
+/* Back to each step's context, after one of its rows was opened in the
+   conversation: a solid pill at the composer's left edge, and its cross. */
+.steps-back {
+  position: absolute;
+  left: max(var(--gutter), calc(50% - var(--column) / 2));
+  bottom: calc(100% + var(--space-3));
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  animation: sheet-in var(--enter) var(--fold-easing) both;
+}
+
+.steps-back[hidden] {
+  display: none;
+}
+
+.steps-back-go,
+.steps-back-x {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 var(--space-3) 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--size-ui);
+  cursor: pointer;
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.steps-back-go .glyph {
+  transform: rotate(90deg);
+}
+
+.steps-back-x {
+  padding: 0 var(--space-2);
+  color: var(--text-3);
+}
+
+.steps-back-go:hover,
+.steps-back-x:hover {
+  color: var(--text-strong);
+  background: var(--fill);
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .steps-back-go,
+  .steps-back-x {
+    min-height: 40px;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .to-latest {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* On a phone the way down keeps to the right edge, where the words of a
+   reply rarely reach, rather than over the middle of them. */
+@media (max-width: 600px) {
+  .to-latest {
+    left: auto;
+    right: var(--space-2);
+    width: 38px;
+    height: 38px;
+    transform: none;
+    animation-name: to-latest-in-side;
+  }
+}
+
+@keyframes to-latest-in-side {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+/* The conversation fades out beneath the composer rather than being cut. */
+.composer-dock::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: var(--space-6);
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+
+.composer {
+  max-width: var(--column);
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
+  border-radius: var(--radius-l);
+  background: var(--bg-elevated);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+}
+
+/* Archived or deleted: a quiet slip where the composer was, saying so, and
+   the way back for one archived. */
+.composer-gone {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: var(--column);
+  min-height: 52px;
+  margin: 0 auto;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-radius: var(--radius-l);
+  background: var(--fill);
+  font-size: var(--size-ui);
+  line-height: var(--leading-ui);
+  color: var(--text-2);
+}
+
+.composer-gone[hidden] {
+  display: none;
+}
+
+.composer-gone > .glyph {
+  flex: none;
+  color: var(--text-3);
+}
+
+.composer-gone .composer-restore {
+  margin-left: auto;
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  max-height: 40dvh;
+  overflow-y: hidden;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--body-size);
+  line-height: var(--leading-prose);
+}
+
+.composer textarea::placeholder {
+  color: var(--text-3);
+}
+
+.composer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* How much of the context is used: a ring filled as far as it is used, and
+   its share. */
+.composer-context {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--size-small);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.context-ring > circle:not(.used) {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.2;
+  opacity: 0.7;
+}
+
+.context-ring .used {
+  fill: currentColor;
+}
+
+.composer-context.full {
+  color: var(--caution);
+}
+
+/* On a narrow screen the model's name gives way first; the buttons and the
+   send button never do. */
+.composer-tools {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: calc(-1 * var(--space-2));
+}
+
+.composer-tools > .icon-button {
+  flex: none;
+}
+
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  font-size: var(--size-small);
+  white-space: nowrap;
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.composer-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* On a phone the effort leaves the chip, kept in its menu, and the
+   context's share is the ring alone, its number a tap away, so the model's
+   name has the room. */
+@media (max-width: 480px) {
+  .composer-chip > .chip-effort,
+  .composer-context > .context-share {
+    display: none;
+  }
+}
+
+.composer-chip > .glyph {
+  flex: none;
+}
+
+.composer-chip:hover {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.chip-effort {
+  color: var(--text-3);
+}
+
+.composer-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* A command the host refused, or that failed: in clay. */
+.composer-note.refused {
+  color: var(--accent);
+}
+
+/* The tier the next turn runs at, such as Fast. */
+.chip-tier {
+  color: var(--accent);
+}
+
+/* The composer's menus float just above it. */
+.composer {
+  position: relative;
+}
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + var(--space-2));
+  max-height: min(42dvh, 340px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: var(--space-1);
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  animation: sheet-in var(--enter) var(--fold-easing) both;
+}
+
+.composer-menu[hidden] {
+  display: none;
+}
+
+.composer-menu.models,
+.composer-menu.efforts {
+  right: auto;
+  width: min(420px, 100%);
+}
+
+.menu-row {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: var(--space-3);
+  min-height: 32px;
+  padding: 5px var(--space-3);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  font-size: var(--size-ui);
+}
+
+.composer-menu.models .menu-row,
+.composer-menu.efforts .menu-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.menu-row.chosen {
+  background: var(--hairline);
+}
+
+.menu-name {
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+
+.menu-args,
+.menu-current {
+  color: var(--text-3);
+}
+
+.menu-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.menu-source {
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.menu-empty {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.composer-action {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-full);
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--bg);
+  transition: background-color var(--hover) ease, opacity var(--hover) ease, transform var(--hover) ease;
+}
+
+.composer-action:hover:not(:disabled) {
+  background: var(--accent-bright);
+}
+
+.composer-action:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.composer-action:disabled {
+  background: var(--hairline);
+  color: var(--text-3);
+}
+
+.composer-action.stop {
+  background: var(--text);
+  color: var(--bg);
+}
+
+/* Asked to stop: it breathes until the turn has ended. */
+.composer-action.stopping {
+  animation: stopping 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes stopping {
+  to {
+    opacity: 0.45;
+  }
+}
+
+:root[data-reduced] .composer-action.stopping {
+  animation: none;
+  opacity: 0.6;
+}
+
+.composer-action .glyph {
+  stroke-width: 2;
+}
+
+/* The card about the agent: a sheet resting under the head's right edge,
+   over the conversation, scrolling on its own. */
+.details {
+  position: absolute;
+  z-index: 3;
+  top: calc(52px + var(--safe-top));
+  right: var(--space-4);
+  width: min(420px, 100% - 2 * var(--space-4));
+  max-height: calc(100% - 52px - var(--safe-top) - var(--space-6));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border-radius: var(--radius-l);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  animation: sheet-in var(--enter) var(--fold-easing) both;
+}
+
+.details[hidden] {
+  display: none;
+}
+
+.details-body {
+  padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.details .facts {
+  grid-template-columns: 5.5em minmax(0, 1fr);
+  font-size: var(--size-ui);
+}
+
+.details-trouble {
+  margin: var(--space-3) 0 0;
+  font-size: var(--size-small);
+  color: var(--caution);
+}
+
+.details-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) calc(-1 * var(--space-3)) 0;
+}
+
+.details-acts .text-button:disabled {
+  color: var(--text-3);
+  opacity: 0.6;
+}
+
+.details-acts .text-button .glyph {
+  color: currentColor;
+}
+
+.details-note {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.details-section {
+  margin-top: var(--space-5);
+}
+
+.details-title {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-reading);
+  font-weight: 400;
+  font-size: var(--size-small);
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+.details-task {
+  margin: 0;
+  font-size: var(--size-ui);
+  line-height: var(--leading-prose);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.details-people,
+.details-jobs,
+.details-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.details-people a {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 30px;
+  margin: 0 calc(-1 * var(--space-2));
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-s);
+  color: var(--text);
+  font-size: var(--size-ui);
+  text-decoration: none;
+  transition: background-color var(--hover) ease;
+}
+
+.details-people a:hover {
+  background: var(--hairline);
+}
+
+.details-people a > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details-faint {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.details-jobs li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: var(--space-2);
+  padding: var(--space-1) 0;
+  font-size: var(--size-ui);
+}
+
+.details-jobs code {
+  grid-column: 1 / -1;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-small);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details-job {
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-small);
+}
+
+.details-actions li {
+  display: grid;
+  grid-template-columns: 3em minmax(0, 1fr);
+  column-gap: var(--space-2);
+  padding: 3px 0;
+  font-size: var(--size-small);
+  line-height: var(--leading-ui);
+}
+
+.details-actions time {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.details-hand {
+  margin-right: 0.6em;
+  color: var(--text-3);
+}
+
+.details-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  color: var(--text);
+}
+
+.details-result {
+  grid-column: 2;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details-records {
+  display: flex;
+  gap: var(--space-2);
+  margin: var(--space-5) 0 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.details-records > span {
+  flex: none;
+}
+
+.details-records code {
+  min-width: 0;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+
+@media (max-width: 760px) {
+  .details {
+    left: var(--space-2);
+    right: var(--space-2);
+    width: auto;
+  }
+}
+
+.who-state.waiting .who-first {
+  color: var(--accent);
+}
+
+.who-state .ask-mark {
+  flex: none;
+  width: 7px;
+  height: 7px;
+}
+
+/* What is attached to the words: a row of small cards above them, each
+   with its picture or its kind, its name and how it is going. */
+.attach-tray {
+  list-style: none;
+  display: flex;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2) calc(-1 * var(--space-1));
+  padding: 2px 2px var(--space-1);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.attach-tray[hidden] {
+  display: none;
+}
+
+.attach-item {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 240px;
+  height: 48px;
+  padding: 4px 30px 4px 4px;
+  border-radius: var(--radius-m);
+  background: var(--bg);
+  background: var(--fill);
+  overflow: hidden;
+}
+
+.attach-item.failed {
+  background: color-mix(in srgb, var(--wrong) 14%, transparent);
+}
+
+.attach-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-s);
+  object-fit: cover;
+}
+
+.attach-glyph {
+  display: grid;
+  place-items: center;
+  background: var(--hairline);
+  color: var(--text-2);
+}
+
+.attach-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.attach-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--size-small);
+  color: var(--text);
+}
+
+.attach-fact {
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attach-fact.wrong {
+  color: var(--wrong);
+}
+
+.attach-act {
+  flex: none;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.attach-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  color: var(--text-3);
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.attach-remove:hover {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.attach-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 0;
+  background: var(--accent);
+  transition: width var(--hover) linear;
+}
+
+.composer-attach {
+  width: 30px;
+  height: 30px;
+  color: var(--text-2);
+}
+
+.composer-attach[hidden],
+.composer-pick {
+  display: none;
+}
+
+/* A drop over the page: one plain card saying where it goes. */
+.drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  pointer-events: none;
+}
+
+.drop-veil[hidden] {
+  display: none;
+}
+
+.drop-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-l);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop), 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--text);
+}
+
+.drop-card .glyph {
+  color: var(--accent);
+}
+
+/* Said before a conversation is started again or forked. */
+.composer-confirm {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-m);
+  background: var(--bg);
+  background: color-mix(in srgb, var(--caution) 14%, transparent);
+  font-size: var(--size-ui);
+  line-height: var(--leading-ui);
+  color: var(--text-2);
+}
+
+.composer-confirm[hidden] {
+  display: none;
+}
+
+.composer-confirm p {
+  margin: 0;
+}
+
+.composer-confirm-acts {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+/* What the conversation has used, opened from the context ring. */
+button.composer-context {
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  transition: background-color var(--hover) ease, color var(--hover) ease;
+}
+
+button.composer-context:hover {
+  background: var(--hairline);
+  color: var(--text-2);
+}
+
+button.composer-context[hidden] {
+  display: none;
+}
+
+.usage-pop {
+  left: auto;
+}
+
+.usage-title {
+  margin-bottom: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* What a command answered at length: a list, or the host's own words. */
+.said-pop {
+  width: min(560px, 100%);
+  padding: var(--space-2) var(--space-3) var(--space-3) var(--space-4);
+}
+
+.said-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.said-head .usage-title {
+  margin: 0;
+}
+
+.said-body {
+  max-height: min(50vh, 26rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.said-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.said-list li {
+  display: grid;
+  row-gap: 2px;
+  padding: var(--space-2) 0;
+}
+
+.said-list li + li {
+  border-top: 1px solid var(--divider);
+}
+
+.said-name {
+  font-size: var(--size-ui);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.said-what {
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.said-text {
+  margin: 0;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-code);
+  line-height: var(--leading-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  row-gap: 4px;
+  padding: var(--space-2) 0;
+}
+
+.usage-row + .usage-row {
+  border-top: 1px solid var(--divider);
+}
+
+.usage-name {
+  font-size: var(--size-ui);
+  color: var(--text);
+}
+
+.usage-fact {
+  font-size: var(--size-small);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-bar {
+  display: block;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+.usage-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+/* The context in its parts: one ink, a lighter shade for each part. */
+.usage-stack {
+  display: flex;
+  height: 4px;
+}
+
+.usage-stack > span {
+  flex: none;
+  border-radius: 0;
+  background: color-mix(in oklab, var(--accent) var(--tone), var(--hairline));
+}
+
+.usage-parts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--space-3);
+  row-gap: 2px;
+  margin-top: 2px;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.usage-part {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-part > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-part > i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--accent) var(--tone), var(--hairline));
+}
+
+/* A conversation's title, renamed in place. */
+.who-name.renamable {
+  cursor: text;
+  border-radius: var(--radius-s);
+}
+
+.who-name.renamable:hover {
+  box-shadow: 0 2px 0 -1px var(--rule);
+}
+
+.who-rename {
+  width: min(28em, 100%);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  box-shadow: 0 2px 0 -1px var(--accent);
+}
+
+/* Words said while the agent works: a block of their own above the input,
+   one line each, the next to go first, each with what can be done to it. */
+.send-queue {
+  max-width: var(--column);
+  margin: 0 auto var(--space-2);
+  padding: 2px 0;
+  border-radius: var(--radius-m);
+  background: var(--fill);
+  font-size: var(--size-small);
+}
+
+.send-queue[hidden] {
+  display: none;
+}
+
+.queue-head {
+  padding: 6px var(--space-3) 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.queue-head.held {
+  color: var(--caution);
+}
+
+.queue-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 2px;
+  max-height: 168px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 34px;
+  padding: 2px var(--space-2) 2px 2px;
+}
+
+.queue-row.wrong .queue-text {
+  color: var(--wrong);
+}
+
+.queue-row.unsure .queue-text {
+  padding-left: var(--space-3);
+  color: var(--text-3);
+}
+
+.queue-state {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.queue-row .attach-tray {
+  flex: 1 1 100%;
+  margin: var(--space-1) 0 0;
+}
+
+/* What a finger presses is at least 44 pixels square (`world-gui.md`,
+   界面的结构); the marks keep their size and the target grows around them. */
+@media (pointer: coarse) {
+  .composer-tools > button,
+  .composer-action,
+  .job-stop,
+  .model-default,
+  .turn-icon {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+@media (pointer: coarse) {
+  .queue-row {
+    min-height: 44px;
+  }
+
+  .queue-acts .icon-button,
+  .queue-acts .text-button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* The grip is what a finger moves a line by. */
+  .queue-grip {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.queue-row.dragging {
+  position: relative;
+  z-index: 1;
+  border-radius: var(--radius-s);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+.queue-grip {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 28px;
+  color: var(--text-3);
+  cursor: grab;
+  touch-action: none;
+}
+
+.queue-row.dragging .queue-grip {
+  cursor: grabbing;
+}
+
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+}
+
+.queue-files {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.queue-acts {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.queue-acts .icon-button {
+  width: 26px;
+  height: 26px;
+  color: var(--text-3);
+}
+
+.queue-acts .text-button {
+  min-height: 26px;
+  padding: 0 var(--space-2);
+  font-size: 12px;
+}
+
+.queue-now .glyph {
+  color: var(--accent);
+}
+
+.queue-row.editing {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: var(--space-2);
+}
+
+.queue-edit {
+  flex: 1 1 100%;
+  min-height: 3em;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-s);
+  outline: 0;
+  resize: vertical;
+  background: var(--bg-elevated);
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--size-small);
+  line-height: var(--leading-ui);
+}
+
+.queue-row.editing .queue-acts {
+  margin-left: auto;
+}
+

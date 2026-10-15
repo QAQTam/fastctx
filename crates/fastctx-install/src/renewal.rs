@@ -1,0 +1,449 @@
+//! Durable local executable replacement. Images are immutable and the intent
+//! is flushed before the installed name changes. No World records are edited.
+
+use std::fs;
+use std::io::{self, Read as _};
+use std::path::{Path, PathBuf};
+
+use fastctx_platform::{FileLock, Permissions, ensure_private_dir, publish};
+use fastctx_types::renewal::{Build, Phase};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+
+pub const EXECUTABLE: &str = if cfg!(windows) { "fastctx.exe" } else { "fastctx" };
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Program {
+    pub path: PathBuf,
+    pub build: Build,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Plan {
+    pub candidate: Program,
+    /// Recovery checks this build against the stable program. The path is
+    /// where it was observed, not an extra executable kept for rollback.
+    pub previous: Option<Program>,
+    pub phase: Phase,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub keeper_restarted: bool,
+}
+
+pub fn directory(root: &Path) -> PathBuf {
+    root.join("renewal")
+}
+
+pub fn installed(root: &Path) -> PathBuf {
+    root.join("bin").join(EXECUTABLE)
+}
+
+/// The SHA-256 of a file. Every command asks it of the World program and of
+/// itself, and hashing a program costs seconds in a debug build, so the
+/// answer is kept under fastctx's own directory beside the file's snapshot;
+/// a file replaced or written since has another snapshot and is hashed
+/// again. Keeping it is only a saving: where it cannot be kept, the digest
+/// is still exact.
+pub fn digest(path: &Path) -> io::Result<String> {
+    let mut file = fastctx_platform::file_read::open(path)?;
+    let metadata = file.metadata()?;
+    let mark = fastctx_platform::file_read::snapshot(&file, &metadata)?.fingerprint();
+    let kept = kept_digest(path);
+    if let Some(kept) = &kept
+        && let Ok(text) = fs::read_to_string(kept)
+        && let Some((held, digest)) = text.trim().split_once(' ')
+        && held == mark
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Ok(digest.to_string());
+    }
+    let mut hash = Sha256::new();
+    io::copy(&mut file, &mut hash)?;
+    let digest = format!("{:x}", hash.finalize());
+    // Kept only when the file did not change while it was read.
+    let after = fastctx_platform::file_read::snapshot(&file, &file.metadata()?)?.fingerprint();
+    if let Some(kept) = kept
+        && after == mark
+        && let Some(parent) = kept.parent()
+        && fs::create_dir_all(parent).is_ok()
+    {
+        let _ = publish(&kept, format!("{mark} {digest}\n").as_bytes(), Permissions::Private);
+    }
+    Ok(digest)
+}
+
+/// Where the digest of `path` is kept: one small file per path, named by the
+/// hash of the path's canonical spelling. Only in a World that is there: a
+/// program asking as another account, such as the service's guardian
+/// running as SYSTEM, would otherwise make a fastctx directory in that
+/// account's profile, which nothing reads and no removal knows of.
+fn kept_digest(path: &Path) -> Option<PathBuf> {
+    let canonical = fs::canonicalize(path).ok()?;
+    let root = fastctx_platform::fastctx_root().ok()?;
+    if !root.is_dir() {
+        return None;
+    }
+    let name = format!("{:x}", Sha256::digest(canonical.as_os_str().as_encoded_bytes()));
+    Some(root.join("cache").join("digests").join(name))
+}
+
+pub fn build() -> io::Result<Build> {
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let digest = match DIGEST.get() {
+        Some(digest) => digest.clone(),
+        None => {
+            let digest = own_digest()?;
+            let _ = DIGEST.set(digest.clone());
+            digest
+        }
+    };
+    Ok(Build {
+        version: env!("CARGO_PKG_VERSION").into(),
+        protocol: fastctx_types::ipc::PROTOCOL,
+        digest,
+        built: option_env!("FASTCTX_BUILT").and_then(|built| built.parse().ok()),
+    })
+}
+
+fn own_digest() -> io::Result<String> {
+    #[cfg(target_os = "linux")]
+    return digest(Path::new("/proc/self/exe"));
+    #[cfg(not(target_os = "linux"))]
+    digest(&std::env::current_exe()?)
+}
+
+pub fn read(root: &Path) -> io::Result<Option<Plan>> {
+    read_json(&directory(root).join("plan.json"))
+}
+
+pub fn save(root: &Path, plan: &Plan) -> io::Result<()> {
+    write_json(&directory(root).join("plan.json"), plan)
+}
+
+/// Local maintenance facts remain available independently of business IPC.
+pub async fn status(root: &Path) -> anyhow::Result<fastctx_types::renewal::Status> {
+    use fastctx_client::renewal::Probe;
+    let plan = read(root)?;
+    let (node, mismatch) = match fastctx_client::renewal::probe(&fastctx_types::layout::WorldDir::under(root)).await? {
+        Probe::Running(node) => (Some(node), None),
+        Probe::Legacy { mismatch, .. } => (None, Some(mismatch)),
+        Probe::Absent => (None, None),
+    };
+    let root_for_files = root.to_owned();
+    let (client, installed, commands) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let client = Some(build()?);
+        let installed_path = self::installed(&root_for_files);
+        let installed =
+            if installed_path.try_exists()? { Some(crate::program::inspect(&installed_path)?) } else { None };
+        Ok((client, installed, crate::path_command::inspect(&root_for_files)))
+    })
+    .await??;
+    let phase = plan.as_ref().map(|plan| {
+        if plan.phase == Phase::Complete
+            && (mismatch.is_some() || node.as_ref().is_some_and(|node| node.build != plan.candidate.build))
+        {
+            Phase::Staged
+        } else {
+            plan.phase.clone()
+        }
+    });
+    Ok(fastctx_types::renewal::Status {
+        client,
+        installed,
+        commands,
+        node,
+        mismatch,
+        pending: plan.as_ref().filter(|_| phase != Some(Phase::Complete)).map(|plan| plan.candidate.build.clone()),
+        phase,
+        error: plan.and_then(|plan| plan.error),
+    })
+}
+
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(io::Error::other),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    publish(path, &serde_json::to_vec(value).map_err(io::Error::other)?, Permissions::Private)
+}
+
+/// Held by program collection around the renewal's own locks.
+pub fn collection_lock(root: &Path) -> PathBuf {
+    directory(root).join("collection.lock")
+}
+
+/// How long a placement waits for a node to hand the World to the successor
+/// waiting for it.
+const HANDOVER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Waits out a handover to a successor waiting for the World, the entry
+/// lock once it serves; none when no successor waits, or it does not serve
+/// within `HANDOVER`. The node serving now is asked to yield when it is not
+/// yielding already: whoever installed the service may not have reached it,
+/// and the two would wait for each other for good.
+fn handed_over(root: &Path, entry: &Path) -> anyhow::Result<Option<FileLock>> {
+    let world = fastctx_types::layout::WorldDir::under(root);
+    if !world.node_successor().try_exists()? {
+        return Ok(None);
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    if let Ok(fastctx_client::renewal::Probe::Running(node)) = runtime.block_on(fastctx_client::renewal::probe(&world))
+        && !node.yielding
+    {
+        // Not answered, the successor still waits: the wait below says so.
+        let _ = runtime.block_on(fastctx_client::renewal::request(&world, fastctx_types::renewal::Action::Yield));
+    }
+    let began = std::time::Instant::now();
+    while began.elapsed() < HANDOVER {
+        if let Some(lock) = FileLock::try_acquire(entry)? {
+            return Ok(Some(lock));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    Ok(None)
+}
+
+/// Stores and checks the new program before publishing either the intent or
+/// the installed name. Repeating an unfinished placement retains its state.
+pub fn stage(root: &Path, source: &Path, _running: Option<&Path>) -> anyhow::Result<Plan> {
+    anyhow::ensure!(
+        !root.join("uninstalled.json").try_exists()?,
+        "this World was uninstalled; reinstall it before placing a program"
+    );
+    ensure_private_dir(&directory(root))?;
+    let worker = directory(root).join("worker.lock");
+    let _lock = match FileLock::try_acquire(&worker)? {
+        Some(lock) => lock,
+        // Program collection holds the worker lock only inside the collection
+        // lock: waiting for that one waits out a collection, and while it is
+        // held no collection begins, so a worker lock still taken then is a
+        // renewal's.
+        None => {
+            let _collection = FileLock::acquire(&collection_lock(root))?;
+            FileLock::try_acquire(&worker)?.ok_or_else(|| {
+                anyhow::anyhow!("the World program is already being replaced; its plan was left unchanged")
+            })?
+        }
+    };
+    let entry = directory(root).join("node-entry.lock");
+    let _node_entry = match FileLock::try_acquire(&entry)? {
+        Some(lock) => lock,
+        None => handed_over(root, &entry)?.ok_or_else(|| {
+            anyhow::anyhow!("the node is completing its program handover; it was asked to finish it, and its plan was left unchanged")
+        })?,
+    };
+    let _activation = FileLock::try_acquire(&directory(root).join("activation.lock"))?.ok_or_else(|| {
+        anyhow::anyhow!("the World program is starting or being published; its plan was left unchanged")
+    })?;
+    let world = fastctx_types::layout::WorldDir::under(root);
+    ensure_private_dir(world.path())?;
+    let stable = installed(root);
+    let mut source = source;
+    if stable.is_file() {
+        let current = crate::program::inspect(&stable)?;
+        let offered = crate::program::inspect(source)?;
+        if current != offered && !crate::program::newer(&offered, &current)? {
+            source = &stable;
+        }
+    }
+    let copied = copy_image(root, source)?;
+    let build = crate::program::inspect(&copied)?;
+    anyhow::ensure!(build.protocol != 0, "the offered program has no World kernel identity");
+    let old_plan = read(root)?;
+    if let Some(plan) = &old_plan {
+        if plan.candidate.build == build && plan.phase != Phase::Failed && plan.phase != Phase::Complete {
+            return Ok(plan.clone());
+        }
+        anyhow::ensure!(
+            plan.candidate.build == build || crate::program::newer(&build, &plan.candidate.build)?,
+            "the offered kernel {} is older than the recorded renewal {}; the plan was left unchanged",
+            build.version,
+            plan.candidate.build.version
+        );
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let serving = runtime.block_on(fastctx_client::renewal::probe(&world))?;
+    let installed_build =
+        if installed(root).is_file() { Some(crate::program::inspect(&installed(root))?) } else { None };
+    if let Some(installed) = &installed_build {
+        anyhow::ensure!(
+            installed == &build || crate::program::newer(&build, installed)?,
+            "offered kernel {} is older than installed {}; the World program was left unchanged",
+            build.version,
+            installed.version
+        );
+    }
+    let previous_path = match &serving {
+        fastctx_client::renewal::Probe::Running(node) => Some(node.executable.clone().into()),
+        fastctx_client::renewal::Probe::Legacy { .. } => runtime.block_on(fastctx_client::renewal::image(&world))?,
+        fastctx_client::renewal::Probe::Absent => installed_build.as_ref().map(|_| installed(root)),
+    };
+    let previous = if let Some(previous_path) = previous_path {
+        let previous = crate::program::inspect(&previous_path)?;
+        if let fastctx_client::renewal::Probe::Running(node) = &serving {
+            anyhow::ensure!(
+                previous == node.build,
+                "the serving node's image cannot be identified; its plan was left unchanged"
+            );
+        }
+        anyhow::ensure!(
+            previous == build || crate::program::newer(&build, &previous)?,
+            "offered kernel {} is older than installed {}; the World program was left unchanged",
+            build.version,
+            previous.version
+        );
+        Some(Program { build: previous, path: previous_path })
+    } else {
+        None
+    };
+    let mut plan = Plan {
+        candidate: Program { path: copied, build },
+        previous,
+        phase: Phase::Staged,
+        error: None,
+        keeper_restarted: false,
+    };
+    save(root, &plan)?;
+    if !world.node_service().exists()
+        && matches!(serving, fastctx_client::renewal::Probe::Absent)
+        && let Some(_world) = FileLock::try_acquire(&world.node_lock())?
+    {
+        install(root, &plan.candidate)?;
+        plan.phase = Phase::Complete;
+        save(root, &plan)?;
+    } else if installed_build.as_ref() == Some(&plan.candidate.build)
+        && plan.previous.as_ref().is_some_and(|previous| previous.build == plan.candidate.build)
+        && match &serving {
+            fastctx_client::renewal::Probe::Running(node) => {
+                std::fs::canonicalize(&node.executable)? == std::fs::canonicalize(installed(root))?
+            }
+            fastctx_client::renewal::Probe::Absent => true,
+            fastctx_client::renewal::Probe::Legacy { .. } => false,
+        }
+        && old_plan.as_ref().is_none_or(|old| old.phase == Phase::Complete)
+    {
+        plan.phase = Phase::Complete;
+        save(root, &plan)?;
+    }
+    Ok(plan)
+}
+
+pub fn verify(program: &Program) -> io::Result<()> {
+    if digest(&program.path)? != program.build.digest {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "staged executable digest differs"));
+    }
+    Ok(())
+}
+
+pub fn install(root: &Path, program: &Program) -> io::Result<()> {
+    verify(program)?;
+    ensure_private_dir(&root.join("bin"))?;
+    let _lock = FileLock::acquire(&root.join("apply.lock"))?;
+    let installed = installed(root);
+    if installed.is_file() {
+        let current = crate::program::inspect(&installed).map_err(io::Error::other)?;
+        if current != program.build && !crate::program::newer(&program.build, &current).map_err(io::Error::other)? {
+            return Err(io::Error::other(
+                "the stable World program advanced after staging; no older image was installed",
+            ));
+        }
+    }
+    publish_image(&program.path, &installed)
+}
+
+/// Keeps a hard link to a mapped Windows image before replacing its name.
+/// Without it NTFS refuses replacing the last name of an executable in use.
+pub fn publish_image(source: &Path, target: &Path) -> io::Result<()> {
+    use crate::transaction::{FileChange, Snapshot, Transaction};
+    let before = Snapshot::read(target).map_err(io::Error::other)?;
+    let copy = FileChange::copy_executable(before, source).map_err(io::Error::other)?;
+    let receipt = Transaction::new([copy]).commit().map_err(io::Error::other)?;
+    // Mapped images are intentionally retained; the existing cleanup helper
+    // retries recognized links at the next placement. Immutable images
+    // retained as renewal provenance live separately in renewal/images.
+    let retained = crate::executable::cleanup_retired(target);
+    write_json(
+        &target.with_extension("renewal-files.json"),
+        &serde_json::json!({
+            "preserved": receipt.preserved,
+            "cleanup": receipt.cleanup.iter().chain(&retained).map(ToString::to_string).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+/// Requests progress in a separate user process; closing the interface does
+/// not cancel an idle handover. The worker serializes concurrent requests.
+/// Only an explicit placement, retry, or approval retries a known failure.
+pub fn request(root: &Path, retry: bool) -> anyhow::Result<()> {
+    let _starting = FileLock::acquire(&directory(root).join("request.lock"))?;
+    if let Some(plan) = read(root)? {
+        verify(&plan.candidate)?;
+        let mut args = vec!["renew".into(), "run".into(), "--dir".into(), root.into()];
+        if retry {
+            args.push("--retry".into());
+        }
+        launch(root, &plan.candidate.path, &args)?;
+    }
+    Ok(())
+}
+
+pub fn launch(
+    root: &Path,
+    program: &Path,
+    args: &[std::ffi::OsString],
+) -> io::Result<fastctx_platform::DetachedProcess> {
+    let mut environment = fastctx_platform::world_process_environment()?;
+    environment.retain(|(name, _)| !name.eq_ignore_ascii_case("FASTCTX_HOME"));
+    environment.push(("FASTCTX_HOME".into(), root.into()));
+    // Maintenance preserves the selected host homes and executable search
+    // path. Credentials and other launcher variables still come only from
+    // the user's logon environment; jobs keep their own fresh environment.
+    for name in ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "PATH"] {
+        if let Some(value) = std::env::var_os(name) {
+            environment.retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+            environment.push((name.into(), value));
+        }
+    }
+    fastctx_platform::spawn_detached(
+        program,
+        &args.iter().map(|arg| arg.as_os_str()).collect::<Vec<_>>(),
+        root,
+        &environment,
+    )
+}
+
+fn copy_image(root: &Path, source: &Path) -> io::Result<PathBuf> {
+    let hash = digest(source)?;
+    let folder = directory(root).join("images").join(&hash);
+    ensure_private_dir(&folder)?;
+    let path = folder.join(EXECUTABLE);
+    if !path.try_exists()? {
+        copy_to(source, &path)?;
+    }
+    if digest(&path)? != hash {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "immutable executable digest differs"));
+    }
+    Ok(path)
+}
+
+fn copy_to(source: &Path, target: &Path) -> io::Result<()> {
+    if target.try_exists()? && digest(source)? == digest(target)? {
+        return Ok(());
+    }
+    let mut input = fs::File::open(source)?;
+    let mut staged = fastctx_platform::atomic::Staged::create(target, Some(0o700))?;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        staged.write_all(&buffer[..count])?;
+    }
+    staged.commit()
+}

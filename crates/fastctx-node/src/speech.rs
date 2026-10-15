@@ -1,0 +1,797 @@
+//! Words and facts on their way to a resident (`world-colleagues.md`, 话怎样
+//! 送到居民眼前).
+//!
+//! What is for a resident of this machine is kept first, with who is owed
+//! the end of the turn it goes into (`crate::inbox`), and then goes the way
+//! its host lets the World in: into the thread of a Codex resident the World
+//! holds, where it starts a turn or joins the running one at its next tool
+//! boundary; to the World's plugin in a Claude session, which says which
+//! turn took it; otherwise it waits, and the World's tools hand it over with
+//! their next answer. It stays kept until the World knows which turn took
+//! it. What is for a resident of another machine goes there as a letter,
+//! which that machine takes the same way.
+//!
+//! Words that go into a session make someone owed the end of the turn they
+//! go into: whoever said them, or, for a fact of the resident's own work
+//! such as a job's end, whoever it is working for.
+
+use std::sync::Arc;
+
+use fastctx_hands::told;
+use fastctx_hosts::codex::{Input, SendError};
+use fastctx_types::ipc::Failure;
+use fastctx_types::layout::ConversationDir;
+use fastctx_types::remote::Letter;
+use fastctx_types::residents::{
+    About, Delivery, FIRST_WORDS_CHARS, Landed, MessageKind, MessageLine, Notice, Origin, Outcome, Pending,
+    PendingState,
+};
+use fastctx_types::session::{Happened, Health, HealthKind, SessionEvent, Speaker, TurnHow};
+use fastctx_types::{Address, NoticeId, ResidentId};
+use jiff::Timestamp;
+
+use crate::Node;
+
+/// Who is owed the end of the turn words go into.
+#[derive(Clone, Debug)]
+pub enum Owed {
+    /// Whoever said them.
+    Speaker(Address),
+    /// Whoever the resident is working for.
+    Working,
+    /// Nobody: the user's own words, which the user watches.
+    Nobody,
+}
+
+/// Tells `to` something. `id` names it, here and in the letter that carries
+/// it to another machine; the same id told again is the same notice.
+pub async fn tell(
+    node: &Arc<Node>,
+    acting: &fastctx_types::access::Acting,
+    to: &Address,
+    id: NoticeId,
+    notice: Notice,
+    owed: Owed,
+) -> Result<Landed, Failure> {
+    if node.is_me(&to.machine) {
+        let delivery = Delivery { id, at: Timestamp::now(), notice };
+        if crate::on_delivery::park(node, &to.resident, &delivery)
+            .map_err(|error| Failure::new(format!("keeping the on completion: {error}")))?
+        {
+            return Ok(Landed::Waiting { why: None, answered: false });
+        }
+        return tell_here(node, &to.resident, delivery, owed).await;
+    }
+    let letter = match notice {
+        // Words a resident said make it owed the turn they go into, which
+        // the receiving machine knows from who sent them.
+        Notice::Words { from: Speaker::Resident { address }, text }
+            if node.is_me(&address.machine) && matches!(owed, Owed::Speaker(_)) =>
+        {
+            Letter::Speak { to: to.resident.clone(), from: address.resident, text, accounts: Vec::new() }
+        }
+        notice => Letter::Notice { to: to.resident.clone(), notice: Box::new(notice) },
+    };
+    crate::letters::send(node, acting, &(&to.machine).into(), id, letter)
+        .map_err(|error| Failure::new(format!("sending to {}: {error}", to.machine)))?;
+    Ok(Landed::Sent)
+}
+
+/// Tells a resident of this machine something: kept first, then handed over
+/// the way its host lets the World in.
+pub async fn tell_here(node: &Arc<Node>, to: &ResidentId, delivery: Delivery, owed: Owed) -> Result<Landed, Failure> {
+    let gate = node.residents.management(to)?;
+    let _reading = gate.read().await;
+    tell_here_locked(node, to, delivery, owed).await
+}
+
+pub(crate) async fn tell_here_locked(
+    node: &Arc<Node>,
+    to: &ResidentId,
+    delivery: Delivery,
+    owed: Owed,
+) -> Result<Landed, Failure> {
+    if crate::on_delivery::park(node, to, &delivery)
+        .map_err(|error| Failure::new(format!("keeping the completion: {error}")))?
+    {
+        return Ok(Landed::Waiting { why: None, answered: false });
+    }
+    let removed = node.residents.removed(to).is_some();
+    if !removed || matches!(delivery.notice, Notice::Words { .. } | Notice::Attached { .. }) {
+        node.residents.active(to)?;
+    }
+    let (about, _) = node
+        .residents
+        .about(to)
+        .ok_or_else(|| Failure::new(format!("no resident {to} lives on {}", node.machine())))?;
+    let working = matches!(owed, Owed::Working);
+    let readers = match owed {
+        Owed::Speaker(address) => vec![address],
+        Owed::Working => Vec::new(),
+        Owed::Nobody => Vec::new(),
+    };
+    let directory = node.world.conversation(to);
+    if let Some(kind) = delivery.notice.along() {
+        // Told again before it went in: what has not gone anywhere yet goes
+        // no more; what a mod holds, it drops (`claude::into_inbox`).
+        let earlier = {
+            let directory = directory.clone();
+            tokio::task::spawn_blocking(move || crate::inbox::pending(&directory))
+                .await
+                .map_err(|error| Failure::new(error.to_string()))?
+                .map_err(|error| Failure::new(format!("reading what waits: {error}")))?
+        };
+        for kept in earlier {
+            if kept.state == PendingState::Waiting
+                && kept.delivery.id != delivery.id
+                && kept.delivery.notice.along() == Some(kind)
+                && kept.delivery.at <= delivery.at
+            {
+                crate::inbox::withdraw(&directory, &kept.delivery.id)
+                    .map_err(|error| Failure::new(format!("replacing what waits: {error}")))?;
+            }
+        }
+    }
+    let pending = Pending { delivery, readers, state: PendingState::Waiting, working, session: None };
+    let kept = {
+        let (directory, pending) = (directory.clone(), pending.clone());
+        tokio::task::spawn_blocking(move || crate::inbox::keep(&directory, &pending))
+            .await
+            .map_err(|error| Failure::new(format!("keeping it: {error}")))?
+            .map_err(|error| Failure::new(format!("keeping it: {error}")))?
+    };
+    if removed {
+        return Ok(Landed::Waiting {
+            why: Some(
+                "the resident was removed; this fact is preserved in its archived inbox and will not wake it".into(),
+            ),
+            answered: false,
+        });
+    }
+    if !kept {
+        if let Some(why) = crate::delivery::input_uncertainty(&directory, &pending.delivery.id)
+            .map_err(|error| Failure::new(error.to_string()))?
+        {
+            return Ok(Landed::Uncertain { why });
+        }
+        // The same thing told again: it is on its way or went in already.
+        return Ok(Landed::Waiting { why: None, answered: answered(node, to, &about) });
+    }
+    // What rides with the next turn waits while none runs; a Claude
+    // session's mod holds it for the next one (`along`).
+    if pending.delivery.notice.along().is_some() {
+        let running = node.residents.now(to).is_some_and(|now| now.turn.is_some());
+        if !running && about.host.agent.as_str() != "claude" {
+            return Ok(Landed::Waiting { why: None, answered: true });
+        }
+        return hand_over_locked(node, to, &about, &directory, pending).await;
+    }
+    // The end of the resident's own job waits for whatever call is waiting
+    // now; words for it end the wait (`world-run.md`).
+    if !matches!(pending.delivery.notice, Notice::JobEnded { .. }) {
+        node.words.raise(&fastctx_types::Address { machine: node.machine(), resident: to.clone() });
+    }
+    hand_over_locked(node, to, &about, &directory, pending).await
+}
+
+/// A turn of `id` began: what waited to ride with the next turn goes into
+/// it now (`Notice::along`).
+pub async fn along(node: &Arc<Node>, id: &ResidentId) {
+    let Some((about, _)) = node.residents.about(id) else { return };
+    let directory = node.world.conversation(id);
+    let waiting = {
+        let directory = directory.clone();
+        match tokio::task::spawn_blocking(move || crate::inbox::pending(&directory)).await {
+            Ok(Ok(waiting)) => waiting,
+            Ok(Err(error)) => {
+                node.log.line(format_args!("reading what waits for {id}: {error}"));
+                return;
+            }
+            Err(_) => return,
+        }
+    };
+    for pending in
+        waiting.into_iter().filter(|kept| kept.state == PendingState::Waiting && kept.delivery.notice.along().is_some())
+    {
+        if let Err(failure) = hand_over(node, id, &about, &directory, pending).await {
+            node.log.line(format_args!("what rides with {id}'s turn waits: {}", failure.message));
+        }
+    }
+}
+
+/// Puts something kept into the resident's session, if its host lets the
+/// World in now; otherwise it waits.
+pub async fn hand_over(
+    node: &Arc<Node>,
+    to: &ResidentId,
+    about: &About,
+    directory: &ConversationDir,
+    pending: Pending,
+) -> Result<Landed, Failure> {
+    let gate = node.residents.management(to)?;
+    let _reading = gate.read().await;
+    hand_over_locked(node, to, about, directory, pending).await
+}
+
+async fn hand_over_locked(
+    node: &Arc<Node>,
+    to: &ResidentId,
+    about: &About,
+    directory: &ConversationDir,
+    pending: Pending,
+) -> Result<Landed, Failure> {
+    // Background delivery can load a thread before it submits a turn. Keep
+    // that opening and its durable outcome inside the handover boundary too.
+    let Some(_answering) = node.handoff.call() else {
+        return Ok(Landed::Waiting { why: Some(crate::handoff::WAITING.into()), answered: answered(node, to, about) });
+    };
+    node.ready().await;
+    node.residents.active(to)?;
+    if let Err(error) = crate::homes::available(node, about).and_then(|()| crate::assists::may_turn(node, about)) {
+        return Ok(Landed::Waiting { why: Some(error.message), answered: answered(node, to, about) });
+    }
+    if let Some(landed) = crate::claude::deliver(node, to, about, directory, &pending).await {
+        return landed;
+    }
+    let mut why = None;
+    if about.world_started
+        && about.host.agent.as_str() == "codex"
+        && let Some(thread) = &about.session
+    {
+        match into_thread(node, to, thread, directory, pending).await {
+            Ok(landed) => return Ok(landed),
+            Err(failure) => {
+                node.log.line(format_args!("words could not go to {to} now, and wait: {failure}"));
+                why = Some(failure.message);
+            }
+        }
+    }
+    Ok(Landed::Waiting { why, answered: answered(node, to, about) })
+}
+
+/// Whether the end of the turn words go into will be told: the World sees
+/// the turns of the Codex threads it holds and of the Claude sessions its
+/// plugin runs in, no others.
+fn answered(node: &Node, to: &ResidentId, about: &About) -> bool {
+    match about.host.agent.as_str() {
+        "codex" => about.world_started,
+        "claude" => about.world_started || about.session.is_some() || crate::claude::paired(node, to),
+        _ => false,
+    }
+}
+
+/// Puts what is kept into the thread of a Codex resident the World holds:
+/// what waited for a way in first, in order, with `pending`. Whoever each
+/// is for is owed the turn they go into.
+async fn into_thread(
+    node: &Arc<Node>,
+    id: &ResidentId,
+    thread: &str,
+    directory: &ConversationDir,
+    pending: Pending,
+) -> Result<Landed, Failure> {
+    submit_thread(node, id, thread, directory, pending, false, false)
+        .await
+        .map(|landed| landed.expect("ordinary submissions do not defer to a composer"))
+}
+
+/// Submits exactly one composer message. Automatic release rechecks idle while holding the speech lock.
+pub async fn send_composer(
+    node: &Arc<Node>,
+    id: &ResidentId,
+    delivery: Delivery,
+    idle_only: bool,
+) -> Result<Option<Landed>, Failure> {
+    node.ready().await;
+    let gate = node.residents.management(id)?;
+    let _reading = gate.read().await;
+    node.residents.active(id)?;
+    let (about, _) = node.residents.about(id).ok_or_else(|| Failure::new("unknown resident"))?;
+    let directory = node.world.conversation(id);
+    if about.world_started
+        && about.host.agent.as_str() == "codex"
+        && let Some(thread) = &about.session
+    {
+        let Some(_answering) = node.handoff.call() else {
+            return Err(Failure::new(crate::handoff::WAITING));
+        };
+        let pending =
+            Pending { delivery, readers: Vec::new(), state: PendingState::Waiting, working: false, session: None };
+        return submit_thread(node, id, thread, &directory, pending, true, idle_only).await;
+    }
+    if idle_only && node.residents.now(id).is_some_and(|now| now.activity == fastctx_types::residents::Activity::Busy) {
+        return Ok(None);
+    }
+    tell_here_locked(node, id, delivery, Owed::Nobody).await.map(Some)
+}
+
+async fn submit_thread(
+    node: &Arc<Node>,
+    id: &ResidentId,
+    thread: &str,
+    directory: &ConversationDir,
+    pending: Pending,
+    single: bool,
+    idle_only: bool,
+) -> Result<Option<Landed>, Failure> {
+    // Its home's app-server holds its thread.
+    let (about, _) = node.residents.about(id).ok_or_else(|| Failure::new(format!("{id} has no record here")))?;
+    crate::homes::available(node, &about)?;
+    crate::assists::may_turn(node, &about)?;
+    let codex = node.codex.of(&about)?;
+    // Its tools start before the words go in, outside the lock others' words
+    // and its turns' ends wait on.
+    let missing = codex.prepare(thread).await.map_err(Failure::new)?;
+    let speaking = node.residents.speaking(id).ok_or_else(|| Failure::new(format!("{id} has no record here")))?;
+    let _speaking = speaking.lock().await;
+    if single
+        && idle_only
+        && (node.residents.now(id).is_some_and(|now| now.activity == fastctx_types::residents::Activity::Busy)
+            || codex.running_turn(thread).is_some())
+    {
+        return Ok(None);
+    }
+    // A node handing the World on starts no turn; the words wait for its
+    // successor, which hands them over when it serves.
+    let Some(_starting) = node.handoff.start_turn() else {
+        if single {
+            return Err(Failure::new(crate::handoff::Handoff::waiting_why(node)));
+        }
+        return Ok(Some(Landed::Waiting { why: Some(crate::handoff::Handoff::waiting_why(node)), answered: true }));
+    };
+    if single {
+        crate::inbox::keep(directory, &pending).map_err(|error| Failure::new(error.to_string()))?;
+    }
+    let accepted: std::collections::HashSet<_> = crate::delivery::handovers(directory)
+        .map_err(|error| Failure::new(error.to_string()))?
+        .into_iter()
+        .filter(|handover| handover.turn.is_some() || handover.unresolved.is_some())
+        .flat_map(|handover| handover.inputs.into_iter().map(|input| input.delivery.id))
+        .collect();
+    let mut batch: Vec<Pending> = {
+        let directory = directory.clone();
+        tokio::task::spawn_blocking(move || crate::inbox::pending(&directory))
+            .await
+            .map_err(|error| Failure::new(error.to_string()))?
+            .map_err(|error| Failure::new(format!("reading what waits: {error}")))?
+    };
+    {
+        let taking = node.taking.lock().expect("never poisoned");
+        batch.retain(|kept| {
+            kept.state == PendingState::Waiting
+                && !accepted.contains(&kept.delivery.id)
+                && !taking.contains(&(id.clone(), kept.delivery.id.clone()))
+        });
+    }
+    if !batch.iter().any(|kept| kept.delivery.id == pending.delivery.id) {
+        if let Some(why) = crate::delivery::input_uncertainty(directory, &pending.delivery.id)
+            .map_err(|error| Failure::new(error.to_string()))?
+        {
+            return Ok(Some(Landed::Uncertain { why }));
+        }
+        return match crate::delivery::input_turn(directory, &pending.delivery.id)
+            .map_err(|error| Failure::new(error.to_string()))?
+        {
+            Some(turn) => Ok(Some(Landed::JoinedTurn { turn })),
+            None => Ok(Some(Landed::Waiting {
+                why: Some("this delivery is already recorded; it was not submitted again".to_string()),
+                answered: true,
+            })),
+        };
+    }
+    // The user's words go alone, but for what rides with the next turn.
+    if single {
+        batch.retain(|kept| kept.delivery.id == pending.delivery.id || kept.delivery.notice.along().is_some());
+    }
+    // The user's words go in as typed and first: the World's telling after
+    // them begins with a head note, so none of it reads as theirs, while
+    // their words after it would read as its end. Other words they typed go
+    // in the next message.
+    let first = if typed(&pending.delivery.notice) {
+        Some(pending.delivery.id.clone())
+    } else {
+        batch.iter().find(|kept| typed(&kept.delivery.notice)).map(|kept| kept.delivery.id.clone())
+    };
+    let (mut taken, left): (Vec<Pending>, Vec<Pending>) =
+        batch.into_iter().partition(|kept| !typed(&kept.delivery.notice) || Some(&kept.delivery.id) == first.as_ref());
+    if let Some(at) = taken.iter().position(|kept| Some(&kept.delivery.id) == first.as_ref()) {
+        let words = taken.remove(at);
+        taken.insert(0, words);
+    }
+    let mut batch = taken;
+    for kept in &mut batch {
+        if kept.working {
+            kept.readers = node.residents.working_for(id);
+            kept.working = false;
+        }
+    }
+    let mut handover =
+        crate::delivery::begin(directory, batch.clone()).map_err(|error| Failure::new(error.to_string()))?;
+    let client = Some(format!("{}{}", fastctx_hosts::codex::WORLD_CLIENT, handover.id));
+    let (input, client) = match batch.as_slice() {
+        // A fact of its own work reads best as the output of the tool that
+        // started it.
+        [only] if matches!(only.delivery.notice, Notice::JobEnded { .. }) => (
+            Input::ToolOutput { name: "run".to_string(), namespace: None, output: told::told(&only.delivery.notice) },
+            None,
+        ),
+        batch if batch.iter().any(|kept| matches!(kept.delivery.notice, Notice::Attached { .. })) => (
+            Input::Messages(
+                batch
+                    .iter()
+                    .map(|kept| {
+                        let images = match &kept.delivery.notice {
+                            Notice::Attached { message, .. } => message
+                                .attachments
+                                .iter()
+                                .filter(|attachment| attachment.is_image())
+                                .map(|attachment| attachment.path.clone())
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        fastctx_hosts::codex::InputMessage { text: told::told(&kept.delivery.notice), images }
+                    })
+                    .collect(),
+            ),
+            client,
+        ),
+        batch => {
+            (Input::Text(batch.iter().map(|kept| said(&kept.delivery.notice)).collect::<Vec<_>>().join("\n\n")), client)
+        }
+    };
+    for kept in &batch {
+        set_state(directory, &kept.delivery.id, PendingState::Sending).await?;
+    }
+    let sent = match codex.send(thread, input, client).await {
+        Ok(sent) => sent,
+        Err(SendError::NotSent(why)) => {
+            crate::delivery::refused(directory, &mut handover).map_err(|error| Failure::new(error.to_string()))?;
+            for kept in &batch {
+                set_state(directory, &kept.delivery.id, PendingState::Waiting).await?;
+            }
+            if single {
+                crate::inbox::withdraw(directory, &pending.delivery.id)
+                    .map_err(|error| Failure::new(error.to_string()))?;
+            }
+            return Err(Failure::new(why));
+        }
+        Err(SendError::Unknown(why)) => {
+            // Whether they went in is not known, and a turn they went into
+            // ended as the app-server stopped: each reader hears that.
+            crate::turns::unresolved(node, id, directory, &mut handover, TurnHow::Interrupted, why.clone())
+                .await
+                .map_err(|error| Failure::new(error.to_string()))?;
+            return Ok(Some(Landed::Uncertain { why }));
+        }
+    };
+    if let Err(error) = bind(node, id, directory, &mut handover, &sent.turn).await {
+        let accepted = crate::delivery::input_turn(directory, &pending.delivery.id)
+            .map_err(|error| Failure::new(error.to_string()))?;
+        if accepted.as_deref() != Some(&sent.turn) {
+            return Err(error);
+        }
+        node.log.line(format_args!(
+            "{} accepted the words in {}; its durable receipt awaits reconciliation: {error}",
+            id, sent.turn
+        ));
+    }
+    if let Some(missing) = missing {
+        let health = Health { kind: HealthKind::ToolsMissing, text: missing };
+        crate::turns::health(node, id, Some(sent.turn.clone()), health)
+            .map_err(|error| Failure::new(error.to_string()))?;
+    }
+    // What waited and could not go in with these goes in next, as they would
+    // have, rather than waiting for something else to wake it.
+    if let Some(next) = left.into_iter().next() {
+        hand_over_later(node.clone(), id.clone(), about, directory.clone(), next);
+    }
+    Ok(Some(if sent.joined { Landed::JoinedTurn { turn: sent.turn } } else { Landed::NewTurn { turn: sent.turn } }))
+}
+
+/// Hands `pending` over in a task of its own.
+fn hand_over_later(node: Arc<Node>, id: ResidentId, about: About, directory: ConversationDir, pending: Pending) {
+    tokio::spawn(async move {
+        if let Err(failure) = hand_over(&node, &id, &about, &directory, pending).await {
+            node.log.line(format_args!("words for {id} wait: {}", failure.message));
+        }
+    });
+}
+
+/// A notice as it goes into a thread: the user's words as they typed them,
+/// everything else as the World tells it.
+fn said(notice: &Notice) -> String {
+    match notice {
+        Notice::Words { from: Speaker::User { .. }, text } => text.clone(),
+        notice => told::told(notice),
+    }
+}
+
+/// Whether a notice is the user's words, which go in as typed.
+fn typed(notice: &Notice) -> bool {
+    matches!(notice, Notice::Words { from: Speaker::User { .. }, .. })
+}
+
+/// Commits the consuming turn for the entire batch before changing either
+/// its inbox entries or the turn's debt. The caller holds the speech lock.
+pub async fn bind(
+    node: &Arc<Node>,
+    id: &ResidentId,
+    directory: &ConversationDir,
+    handover: &mut crate::delivery::Handover,
+    turn: &str,
+) -> Result<(), Failure> {
+    crate::delivery::accept(directory, handover, turn).map_err(|error| Failure::new(error.to_string()))?;
+    let readers: Vec<Address> = handover.inputs.iter().flat_map(|input| input.readers.iter().cloned()).collect();
+    if let Some(finished) =
+        crate::delivery::terminal(directory, turn).map_err(|error| Failure::new(error.to_string()))?
+    {
+        crate::turns::finish_locked(node, id, turn, finished.end, &readers)
+            .await
+            .map_err(|error| Failure::new(error.to_string()))?;
+    } else {
+        let owner = crate::delivery::session(directory, turn).map_err(|error| Failure::new(error.to_string()))?;
+        let active = owner.is_none() || node.residents.about(id).is_some_and(|(about, _)| about.session == owner);
+        node.residents.owe(&node.world, id, turn, &readers, active).map_err(|error| Failure::new(error.to_string()))?;
+    }
+    for input in &handover.inputs {
+        crate::composer::bound(node, id, &input.delivery.id, turn).await?;
+        heard(node, id, &input.delivery, turn);
+        settle(node, directory, &input.delivery.id).await?;
+    }
+    Ok(())
+}
+
+/// What went into `turn`: everyone watching sees who said it, and a
+/// colleague's records keep the words said to it. Words are their
+/// speaker's; a colleague's answer is that colleague's, as the resident read
+/// it; the rest is the World's telling, also as read.
+pub fn heard(node: &Arc<Node>, id: &ResidentId, delivery: &Delivery, turn: &str) {
+    let (from, text) = match &delivery.notice {
+        Notice::Words { from, text } => (from.clone(), text.clone()),
+        Notice::Attached { message, text } => (message.speaker(), text.clone()),
+        Notice::Answer { colleague, .. } => {
+            (Speaker::Resident { address: colleague.clone() }, told::told(&delivery.notice))
+        }
+        Notice::JobEnded { .. } | Notice::Health { .. } => (Speaker::World, told::told(&delivery.notice)),
+        Notice::World { text, .. } => (Speaker::World, text.clone()),
+    };
+    // What an interface shows of the World's telling and a colleague's
+    // answer is the notice itself, not the words written for the model.
+    let notice = match &delivery.notice {
+        Notice::Words { .. } | Notice::Attached { .. } => None,
+        Notice::JobEnded { .. } | Notice::Answer { .. } | Notice::Health { .. } | Notice::World { .. } => {
+            Some(Box::new(delivery.notice.clone()))
+        }
+    };
+    let event = SessionEvent {
+        at: Timestamp::now(),
+        happened: Happened::Heard {
+            message: match &delivery.notice {
+                Notice::Attached { message, text } => Some(Box::new(message.message(text))),
+                _ => None,
+            },
+            delivery: Some(delivery.id.clone()),
+            turn: Some(turn.to_string()),
+            from: Some(from.clone()),
+            text: text.clone(),
+            notice,
+        },
+    };
+    if !node.residents.knows(id) {
+        return;
+    }
+    let directory = node.world.conversation(id);
+    match crate::delivery::event(&directory, &format!("heard:{}", delivery.id), &event) {
+        Ok(true) => node.watchers.publish(id, &event),
+        Ok(false) => return,
+        Err(error) => {
+            node.log.line(format_args!("recording what {id} heard: {error}"));
+            return;
+        }
+    }
+    // The user's first words name the conversation where its host does not.
+    if matches!(from, Speaker::User { .. }) {
+        let words = crate::turns::opening(&text, FIRST_WORDS_CHARS);
+        if !words.is_empty()
+            && let Err(error) = node.residents.change_now(&node.world, id, |now| {
+                now.first_words.get_or_insert(words);
+            })
+        {
+            node.log.line(format_args!("recording {id}'s first words: {error}"));
+        }
+        if let Err(error) = crate::asked::settle(node, id, |asked| crate::asked::answers(&text, asked)) {
+            node.log.line(format_args!("recording that {id}'s question was answered: {error}"));
+        }
+    }
+    if let Some((about, _)) = node.residents.about(id)
+        && matches!(about.origin, Origin::Colleague { .. })
+        && matches!(delivery.notice, Notice::Words { .. })
+    {
+        let line = MessageLine {
+            at: delivery.at,
+            what: MessageKind::Heard { from: from.clone(), turn: Some(turn.to_string()), text: text.clone() },
+        };
+        let directory = node.world.conversation(id);
+        if let Err(error) = crate::residents::append_message(&directory, &line) {
+            node.log.line(format_args!("recording what {id} heard: {error}"));
+        }
+    }
+}
+
+async fn set_state(directory: &ConversationDir, id: &NoticeId, state: PendingState) -> Result<(), Failure> {
+    let (directory, id) = (directory.clone(), id.clone());
+    tokio::task::spawn_blocking(move || crate::inbox::set_state(&directory, &id, state))
+        .await
+        .map_err(|error| Failure::new(error.to_string()))?
+        .map_err(|error| Failure::new(format!("keeping what is on its way: {error}")))
+}
+
+/// Something kept went in: it is no longer kept, and its id is known.
+pub async fn settle(node: &Arc<Node>, directory: &ConversationDir, id: &NoticeId) -> Result<Option<Pending>, Failure> {
+    let (directory, id) = (directory.clone(), id.clone());
+    let node = node.clone();
+    tokio::task::spawn_blocking(move || crate::inbox::settle(&node, &directory, &id))
+        .await
+        .map_err(|error| Failure::new(error.to_string()))?
+        .map_err(|error| Failure::new(format!("settling what went in: {error}")))
+}
+
+/// Finishes what a node that stopped left on its way: what was being put
+/// into a Codex thread as it stopped went in or not, nobody knows, and its
+/// readers hear so; what waited for a Codex thread goes in now; the ends of
+/// turns not yet told are told.
+pub async fn restore(node: &Arc<Node>) {
+    for resident in node.residents.everyone() {
+        if resident.removed.is_some() {
+            continue;
+        }
+        let directory = node.world.conversation(&resident.id);
+        let result = async {
+            // An older node may have saved only part of a terminal outbox.
+            // Its saved outcome remains authoritative for every reader.
+            for owing in crate::inbox::owing(&directory)? {
+                if let Notice::Answer { turn, end, .. } = owing.delivery.notice
+                    && !turn.is_empty()
+                {
+                    let mut readers = node.residents.readers(&resident.id, &turn);
+                    readers.push(owing.to);
+                    crate::delivery::finish(&directory, &turn, end, &readers)?;
+                }
+            }
+            let speaking = node.residents.speaking(&resident.id).expect("resident on record");
+            let _speaking = speaking.lock().await;
+            for mut handover in crate::delivery::handovers(&directory)? {
+                if let Some(turn) = handover.turn.clone() {
+                    bind(node, &resident.id, &directory, &mut handover, &turn)
+                        .await
+                        .map_err(|error| std::io::Error::other(error.message))?;
+                }
+            }
+            for finished in crate::delivery::terminals(&directory)? {
+                crate::turns::finish_locked(node, &resident.id, &finished.turn, finished.end, &finished.readers)
+                    .await?;
+            }
+            Ok::<(), std::io::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            node.log.line(format_args!("restoring delivery records for {}: {error}", resident.id));
+        }
+    }
+}
+
+pub async fn recover(node: &Arc<Node>) {
+    for resident in node.residents.everyone() {
+        let node = node.clone();
+        tokio::spawn(async move {
+            let directory = node.world.conversation(&resident.id);
+            if resident.removed.is_some() {
+                crate::turns::pay(&node, &resident.id, &directory).await;
+                return;
+            }
+            let result = async {
+                let speaking = node.residents.speaking(&resident.id).expect("resident on record");
+                let guard = speaking.lock().await;
+                let handovers = crate::delivery::handovers(&directory)?;
+                let covered: std::collections::BTreeSet<NoticeId> = handovers.iter()
+                    .flat_map(|handover| handover.inputs.iter().map(|input| input.delivery.id.clone())).collect();
+                for mut handover in handovers {
+                    if handover.turn.is_none() && (handover.attempting || handover.unresolved.is_some()) {
+                        let why = format!("the node on {} restarted during a submission; whether {} read it is unknown; its exact contents remain in its handovers record", node.machine(), resident.id);
+                        crate::turns::unresolved(&node, &resident.id, &directory, &mut handover, TurnHow::Interrupted, why).await?;
+                    }
+                }
+                // Sending entries from versions without batch records are
+                // retained and settled as one legacy attempt per resident.
+                let kept = crate::inbox::pending(&directory)?;
+                let legacy: Vec<Pending> = kept.iter().filter(|input| input.state == PendingState::Sending && !covered.contains(&input.delivery.id)).cloned().collect();
+                if !legacy.is_empty() {
+                    let mut handover = crate::delivery::begin(&directory, legacy)?;
+                    crate::turns::unresolved(&node, &resident.id, &directory, &mut handover, TurnHow::Interrupted,
+                        "the prior node stopped during a submission; acceptance was not recorded".to_string()).await?;
+                }
+                let waiting = crate::inbox::pending(&directory)?.into_iter().find(|input| input.state == PendingState::Waiting);
+                drop(guard);
+                if resident.about.host.agent.as_str() == "codex" && let Some(input) = waiting {
+                    hand_over(&node, &resident.id, &resident.about, &directory, input).await
+                        .map_err(|error| std::io::Error::other(error.message))?;
+                }
+                crate::turns::pay(&node, &resident.id, &directory).await;
+                Ok::<(), std::io::Error>(())
+            }.await;
+            if let Err(error) = result {
+                node.log.line(format_args!("recovering deliveries for {}: {error}", resident.id));
+            }
+        });
+    }
+}
+
+/// A cancelled handoff reopens delivery of waiting words. Unlike startup
+/// recovery, this never treats an in-flight submission as interrupted.
+pub fn resume(node: &Arc<Node>, runtime: &tokio::runtime::Handle) {
+    for resident in node.residents.everyone() {
+        if resident.removed.is_some() {
+            continue;
+        }
+        if !resident.about.world_started || resident.about.host.agent.as_str() != "codex" {
+            continue;
+        }
+        let node = node.clone();
+        runtime.spawn(async move {
+            let Some(_answering) = node.handoff.call() else { return };
+            let directory = node.world.conversation(&resident.id);
+            let result = async {
+                let speaking = node.residents.speaking(&resident.id).expect("resident on record");
+                let guard = speaking.lock().await;
+                let waiting =
+                    crate::inbox::pending(&directory)?.into_iter().find(|input| input.state == PendingState::Waiting);
+                drop(guard);
+                if let Some(input) = waiting {
+                    hand_over(&node, &resident.id, &resident.about, &directory, input)
+                        .await
+                        .map_err(|error| std::io::Error::other(error.message))?;
+                }
+                Ok::<(), std::io::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                node.log.line(format_args!("resuming delivery for {}: {error}", resident.id));
+            }
+        });
+    }
+}
+
+/// What a told answer came to, for the colleague's `messages`.
+pub fn outcome(landed: &Result<Landed, Failure>) -> Outcome {
+    match landed {
+        Ok(Landed::NewTurn { .. } | Landed::JoinedTurn { .. } | Landed::Handed { .. }) => Outcome::Delivered,
+        Ok(Landed::Waiting { why, .. }) => Outcome::Waiting { why: why.clone() },
+        Ok(Landed::Sent) => Outcome::Sent,
+        Ok(Landed::Uncertain { why }) => Outcome::Failed { reason: why.clone() },
+        Err(failure) => Outcome::Failed { reason: failure.message.clone() },
+    }
+}
+
+/// A new notice id: the time and eight random hex digits.
+pub fn new_id(prefix: &str) -> NoticeId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("notice identity needs system randomness");
+    let at = Timestamp::now().as_millisecond();
+    NoticeId::try_from(format!("{prefix}-{at}-{serial:x}-{:016x}", u64::from_be_bytes(bytes)))
+        .expect("a word, digits and hex")
+}
+
+/// A notice id that is the same whenever it is made from the same parts:
+/// the same thing told again is known for what it is.
+pub fn fixed_id(prefix: &str, parts: &[&str]) -> NoticeId {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    for part in parts {
+        hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    let digest: String = hash.finalize().iter().take(10).map(|byte| format!("{byte:02x}")).collect();
+    NoticeId::try_from(format!("{prefix}-{digest}")).expect("a word and hex")
+}

@@ -1,0 +1,508 @@
+/* The model panel: a solid card risen over the input, the model's name,
+   its list when asked for, the hand-drawn effort slider, the speed switch
+   and the way back to the default. On a phone it rises from the bottom. */
+.model-panel {
+  position: absolute;
+  left: var(--space-3);
+  bottom: calc(100% + var(--space-2));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(320px, calc(100% - var(--space-6)));
+  padding: var(--space-3) var(--space-4) var(--space-3);
+  border-radius: var(--radius-l);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  animation: panel-rise var(--fold) var(--fold-easing) both;
+}
+
+.model-label {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.model-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  margin: 0 calc(-1 * var(--space-2));
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  text-align: left;
+}
+
+.model-name:hover {
+  background: var(--hairline);
+}
+
+.model-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-strong);
+}
+
+.model-name .glyph {
+  color: var(--text-3);
+  transform: rotate(-90deg);
+  transition: transform var(--fold) var(--fold-easing);
+}
+
+.model-name[aria-expanded="true"] .glyph {
+  transform: rotate(0deg);
+}
+
+/* In the controls' place, filling the panel, which keeps the size of the
+   taller face (`model-panel.ts`). */
+.model-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  list-style: none;
+  margin: calc(-1 * var(--space-2)) calc(-1 * var(--space-2)) 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.model-list button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  color: var(--text-2);
+  text-align: left;
+}
+
+.model-list button:hover,
+.model-list button[aria-selected="true"] {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.model-list .glyph {
+  color: var(--accent);
+}
+
+.model-none {
+  padding: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.model-effort {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.model-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 30px;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+
+.model-speed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.model-speeds .segment {
+  min-height: 28px;
+  padding: 3px 12px;
+  font-size: var(--size-small);
+}
+
+.model-default {
+  align-self: flex-start;
+  margin-left: calc(-1 * var(--space-2));
+}
+
+@keyframes panel-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (max-width: 760px) {
+  .model-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    padding: var(--space-4) var(--space-5) calc(var(--space-5) + var(--safe-bottom));
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
+    animation-name: sheet-rise;
+  }
+
+  .model-panel .effort-slider {
+    max-width: none;
+  }
+
+  /* A sheet risen from the bottom lays a shade over the rest, as every
+     sheet on a phone does: a tap on the shade only puts the sheet away. */
+  .composer-dock:has(.model-panel:not([hidden]), .jobs-pop:not([hidden]), .agents-pop:not([hidden]), .usage-pop:not([hidden]))::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+    background: rgba(0, 0, 0, 0.36);
+    animation: sheet-scrim var(--fold) ease both;
+  }
+
+  .model-name,
+  .model-list button,
+  .model-switch,
+  .model-speeds .segment {
+    min-height: 44px;
+  }
+}
+
+:root[data-reduced] .model-panel {
+  animation: none;
+}
+
+/* What the conversation started that still runs: a mark with how many in
+   the input's row, and a small panel of them above it. */
+.composer-jobs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.composer-jobs:hover,
+.composer-jobs[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.composer-jobs .glyph {
+  color: var(--accent);
+  transform: scale(var(--breath-scale));
+  opacity: var(--breath-alpha);
+  animation: ink-breathe 2.6s ease-in-out infinite;
+}
+
+/* The panel of commands still running, as tall as an output needs from
+   the moment it opens, so turning to one moves nothing. */
+.jobs-pop {
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: calc(100% + var(--space-2));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  max-width: 560px;
+  min-height: min(46dvh, 340px);
+  max-height: min(70dvh, 520px);
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-3) var(--space-2);
+  border-radius: var(--radius-l);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  animation: panel-rise var(--fold) var(--fold-easing) both;
+}
+
+.jobs-title {
+  margin: 0 var(--space-1) var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.jobs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.job-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-s);
+}
+
+.job-row:hover {
+  background: var(--hairline);
+}
+
+.job-what {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  text-align: left;
+}
+
+button.job-what {
+  align-self: stretch;
+  align-items: flex-start;
+  justify-content: center;
+  width: 100%;
+  text-align: left;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.job-what[aria-expanded="true"] .job-command {
+  color: var(--text-strong);
+}
+
+/* Turned to a job's output: its row at the top leads back, the others and
+   the title give way, the output fills the rest, read from the machine as
+   it is scrolled, following the end. */
+.job-back {
+  display: none;
+  color: var(--text-3);
+}
+
+.job-back .glyph {
+  transform: rotate(90deg);
+}
+
+.jobs-pop.reading .jobs-title,
+.jobs-pop.reading .job-item:not(.reading) {
+  display: none;
+}
+
+.jobs-pop.reading {
+  overflow: hidden;
+}
+
+.jobs-pop.reading .jobs-list,
+.job-item.reading {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.job-item.reading .job-back {
+  display: inline-grid;
+  grid-area: back;
+  align-self: center;
+}
+
+.job-item.reading .job-what {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "back command"
+    ". where";
+  column-gap: 6px;
+  justify-items: start;
+  align-content: center;
+}
+
+.job-item.reading .job-command {
+  grid-area: command;
+  max-width: 100%;
+}
+
+.job-item.reading .job-where {
+  grid-area: where;
+}
+
+.job-output {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin: 2px var(--space-1) var(--space-1);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.job-output .lv-viewport {
+  flex: 1;
+  min-height: 0;
+}
+
+.job-output.failed {
+  color: var(--wrong);
+}
+
+.job-item.ended .pulse {
+  animation: none;
+  opacity: 0.35;
+}
+
+.job-command {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-code);
+  color: var(--text);
+  text-decoration: none;
+}
+
+button.job-what:hover .job-command {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.jobs-pop .job-where {
+  align-self: flex-start;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.job-stop {
+  color: var(--text-3);
+}
+
+.job-stop:hover {
+  color: var(--wrong);
+}
+
+.jobs-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-1);
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.jobs-confirm > span {
+  flex: 1 1 200px;
+}
+
+@media (max-width: 760px) {
+  .jobs-pop {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    max-width: none;
+    max-height: 60dvh;
+    padding-bottom: calc(var(--space-4) + var(--safe-bottom));
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
+    animation-name: sheet-rise;
+  }
+
+  /* On a phone a command's output is read over the whole screen. */
+  .jobs-pop:has(.job-output) {
+    top: 0;
+    max-height: none;
+    padding-top: calc(var(--space-3) + var(--safe-top));
+    border-radius: 0;
+  }
+
+  .jobs-pop:has(.job-output) .job-output .lv-viewport {
+    height: calc(100dvh - 160px - var(--safe-top) - var(--safe-bottom));
+  }
+}
+
+:root[data-reduced] .composer-jobs .glyph,
+:root[data-reduced] .jobs-pop {
+  animation: none;
+}
+
+.job-row .pulse {
+  width: 6px;
+  height: 6px;
+}
+
+/* Nothing in the panel is text to select: a drag on the slider must not
+   paint the labels around it. */
+.model-panel {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Settling away, the way it rose; on a phone the sheet sinks. */
+.model-panel.popover-leaving,
+.jobs-pop.popover-leaving,
+.usage-pop.popover-leaving {
+  animation: panel-settle var(--fold) var(--fold-easing) both;
+}
+
+@keyframes panel-settle {
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (max-width: 760px) {
+  .model-panel.popover-leaving,
+  .jobs-pop.popover-leaving,
+  .usage-pop.popover-leaving {
+    animation-name: sheet-sink;
+  }
+
+  .composer-dock:has(.popover-leaving)::after {
+    animation: sheet-scrim-out var(--fold) ease both;
+  }
+}
+
+@keyframes sheet-sink {
+  to {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes sheet-scrim-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* A model this conversation has outgrown: quieter, with a small mark. */
+.model-list .model-too-long {
+  color: var(--text-3);
+}
+
+.model-mark {
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.model-mark .glyph {
+  color: var(--text-3);
+}
+
+.effort-slider.dragging {
+  cursor: grabbing;
+}

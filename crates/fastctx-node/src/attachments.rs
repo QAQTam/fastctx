@@ -1,0 +1,953 @@
+//! Verified user uploads, kept in the conversation's home on its host's
+//! machine. Where the user chose another machine for its files other than
+//! images (`world-gui.md`), each is placed on that machine, in the
+//! conversation's guest room there, while the upload kept where it lives
+//! stays the conversation's record; an agent assisting the account cannot
+//! reach the machine it runs on, so for it the user must choose one.
+//!
+//! A receipt keeps the path its file had when it arrived. Where a file is
+//! now always comes from the layout: from the receipt, only the names of its
+//! directory and of the file itself are taken, and only as hints that the
+//! receipt found there must then match.
+
+use std::io::{Read as _, Write as _};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use fastctx_net::data::Stream;
+use fastctx_net::link::Feed;
+use fastctx_platform::FileLock;
+use fastctx_platform::ipc::FrameReader;
+use fastctx_types::access::{Acting, Purpose, Written};
+use fastctx_types::attachments::{Attachment, UPLOAD_CHUNK, UploadFile, UploadStart, UploadTarget, Uploaded};
+use fastctx_types::ipc::Failure;
+use fastctx_types::layout::{ConversationDir, Kind};
+use fastctx_types::remote::{RemoteCall, RemoteReply};
+use fastctx_types::{Address, AgentName, MachineName, ResidentId, TownName};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use tokio::io::AsyncReadExt as _;
+
+use crate::Node;
+
+/// The user's words typed on `from` as a delivery; named by the device's
+/// own `id` for them when it gave one, so the same words said again under
+/// it are known as the same (`world-network.md`, 改变什么的动作都带编号).
+pub fn delivery(
+    from: &MachineName,
+    text: String,
+    attachments: Vec<Attachment>,
+    id: Option<&str>,
+) -> fastctx_types::residents::Delivery {
+    use fastctx_types::residents::{Delivery, Notice};
+    use fastctx_types::session::{Speaker, attachments::AttachedMessage};
+    let id = match id {
+        Some(id) => crate::speech::fixed_id("talk", &[from.as_str(), id]),
+        None => crate::speech::new_id("talk"),
+    };
+    let notice = if attachments.is_empty() {
+        Notice::Words { from: Speaker::User { machine: from.clone() }, text }
+    } else {
+        Notice::Attached { message: AttachedMessage { delivery: id.clone(), from: from.clone(), attachments }, text }
+    };
+    Delivery { id, at: jiff::Timestamp::now(), notice }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Draft {
+    agent: AgentName,
+    town: Option<TownName>,
+}
+
+fn failure(error: impl std::fmt::Display) -> Failure {
+    Failure::new(format!("upload: {error}"))
+}
+
+/// A transport failure of an upload: no answer about the file came, and
+/// the same upload goes again (`world-network.md`, 断开不是结束).
+fn broke(why: impl std::fmt::Display) -> Failure {
+    Failure::unanswered(format!("upload: the connection broke: {why}"))
+}
+
+/// Receives from a dedicated user IPC connection. A remote destination is
+/// fed directly from that connection, with no intermediate file. A shared
+/// input's upload that broke goes on from what its destination holds of it:
+/// the uploader sends the file whole again, and what is held is skipped.
+pub async fn upload(
+    node: &Arc<Node>,
+    target: UploadTarget,
+    machine: Option<MachineName>,
+    file: UploadFile,
+    composer: Option<fastctx_types::composer::UploadScope>,
+    mut source: FrameReader,
+) -> Result<Uploaded, Failure> {
+    let _operation = node.data_operations.read().await;
+    validate_file(&file)?;
+    let machine = match machine {
+        Some(machine) => machine,
+        None if composer.is_some() => match &target {
+            UploadTarget::Resident { resident } if node.residents.about(resident).is_some() => node.machine(),
+            UploadTarget::Resident { resident } => crate::colleagues::find_for(node, &Acting::Here, resident).await?,
+            _ => return Err(failure("a shared composer upload needs an existing resident")),
+        },
+        None => node.machine(),
+    };
+    if node.is_me(&machine) {
+        let (mut arriving, mut guard) =
+            match arrival(node, &node.machine(), target, file, composer.as_ref(), true).await? {
+                Arrival::Ended(uploaded) => return Ok(uploaded),
+                Arrival::Going(arriving, guard) => (arriving, guard),
+            };
+        let mut held = Skipping(arriving.received);
+        let result = async {
+            loop {
+                let piece = source
+                    .recv_up_to(UPLOAD_CHUNK)
+                    .await
+                    .map_err(broke)?
+                    .ok_or_else(|| broke("the uploader disconnected before ending the file"))?;
+                if piece.is_empty() {
+                    return finish(arriving, guard.as_mut()).await;
+                }
+                arriving.write(held.past(&piece))?;
+            }
+        }
+        .await;
+        if let Err(error) = &result
+            && let Some(guard) = guard.as_mut()
+        {
+            guard.fail(error).await;
+        }
+        return result;
+    }
+    // The bytes come once, so the upload is tried for one account.
+    let (link, account) = node.speaking(&Acting::Here, &(&machine).into(), Purpose::Agents).map_err(failure)?;
+    let resumes = composer.is_some() && resumes_there(&link, &machine, &account).await?;
+    let size = file.size;
+    let source_error = Arc::new(Mutex::new(None));
+    let feeding_error = source_error.clone();
+    let feed: Feed = Box::new(move |stream| {
+        Box::pin(async move {
+            if let Err(reason) = forward(source, stream, size, resumes).await {
+                *feeding_error.lock().expect("never poisoned") = Some(reason);
+            }
+            // Keep the destination's verified receipt or explicit failure authoritative.
+            Ok(())
+        })
+    });
+    let upload = RemoteCall::Upload { target, file, composer, resumes };
+    let answer = link.call_with_stream(&machine, &account, Purpose::Agents, upload, feed).await;
+    let result = match answer {
+        Ok(Ok(RemoteReply::Uploaded(attachment))) => return Ok(Uploaded { attachment, composer: None }),
+        Ok(Ok(RemoteReply::ComposerUploaded(result))) => {
+            return Ok(Uploaded { attachment: result.attachment, composer: Some(result.updated) });
+        }
+        Ok(Ok(_)) => failure(format!("{machine} answered something other than an upload")),
+        Ok(Err(error)) => Failure { message: format!("on {machine}: {}", error.message), ..error },
+        Err(error) => broke(error),
+    };
+    match source_error.lock().expect("never poisoned").take() {
+        Some(reason) => Err(Failure { message: format!("{}; source stream: {reason}", result.message), ..result }),
+        None => Err(result),
+    }
+}
+
+/// Whether `machine` keeps what arrived of an upload that broke, and takes
+/// it up from there. A machine that cannot be asked cannot take the upload
+/// either.
+async fn resumes_there(
+    link: &fastctx_net::link::Link,
+    machine: &MachineName,
+    account: &fastctx_types::AccountName,
+) -> Result<bool, Failure> {
+    match link.call(machine, account, Purpose::Look, RemoteCall::Facts).await {
+        Ok(Ok(RemoteReply::Facts(facts))) => Ok(facts.upload_resumes),
+        Ok(_) => Ok(false),
+        Err(error) => Err(broke(error)),
+    }
+}
+
+/// Where an upload stands before its bytes come.
+enum Arrival {
+    /// It went before under its operation and ended, with this answer.
+    Ended(Uploaded),
+    /// Its bytes go here, from `Arriving::received` on.
+    Going(Arriving, Option<crate::composer::uploads::Guard>),
+}
+
+/// Readies the arrival of `file` for `target`, from `from`: a shared
+/// input's upload is known by its operation, and one that broke goes on
+/// from its part when the sender skips what is held (`resume`).
+async fn arrival(
+    node: &Arc<Node>,
+    from: &MachineName,
+    target: UploadTarget,
+    file: UploadFile,
+    scope: Option<&fastctx_types::composer::UploadScope>,
+    resume: bool,
+) -> Result<Arrival, Failure> {
+    use crate::composer::uploads::Prior;
+    let Some(scope) = scope else { return Ok(Arrival::Going(prepare(node, target, file).await?, None)) };
+    let UploadTarget::Resident { resident } = &target else {
+        return Err(failure("a shared composer upload needs an existing resident"));
+    };
+    let resident = resident.clone();
+    match crate::composer::uploads::prior(node, &resident, from, scope, &file).await? {
+        Prior::Ended(result) => {
+            Ok(Arrival::Ended(Uploaded { attachment: result.attachment, composer: Some(result.updated) }))
+        }
+        Prior::Again(attachment, mut guard) => {
+            let directory = Path::new(&attachment.path).parent().map(Path::to_path_buf);
+            let arriving = match directory {
+                Some(directory) => tokio::task::spawn_blocking(move || arriving_in(&directory, attachment, resume))
+                    .await
+                    .map_err(failure)
+                    .and_then(|arriving| arriving),
+                None => Err(failure("the upload's receipt names no directory")),
+            };
+            match arriving {
+                Ok(mut arriving) => {
+                    arriving.keep = true;
+                    Ok(Arrival::Going(arriving, Some(guard)))
+                }
+                Err(error) => {
+                    guard.fail(&error).await;
+                    Err(error)
+                }
+            }
+        }
+        Prior::Fresh => {
+            let mut arriving = prepare(node, target, file).await?;
+            let guard = crate::composer::uploads::begin(node, &resident, from, scope, &arriving.attachment).await?;
+            arriving.keep = true;
+            Ok(Arrival::Going(arriving, Some(guard)))
+        }
+    }
+}
+
+async fn finish(arriving: Arriving, guard: Option<&mut crate::composer::uploads::Guard>) -> Result<Uploaded, Failure> {
+    let attachment = arriving.finish()?;
+    let composer = match guard {
+        Some(guard) => Some(guard.finish(&attachment).await),
+        None => None,
+    };
+    Ok(Uploaded { attachment, composer })
+}
+
+/// The bytes of an upload past those its destination already holds.
+struct Skipping(u64);
+
+impl Skipping {
+    fn past<'a>(&mut self, piece: &'a [u8]) -> &'a [u8] {
+        let skipped = self.0.min(piece.len() as u64);
+        self.0 -= skipped;
+        &piece[skipped as usize..]
+    }
+}
+
+pub fn reply(uploaded: Uploaded) -> fastctx_types::Reply {
+    match uploaded.composer {
+        Some(updated) => fastctx_types::Reply::ComposerUploaded(Box::new(fastctx_types::composer::UploadResult {
+            attachment: uploaded.attachment,
+            updated,
+        })),
+        None => fastctx_types::Reply::Uploaded(uploaded.attachment),
+    }
+}
+
+pub fn remote_reply(uploaded: Uploaded) -> RemoteReply {
+    match uploaded.composer {
+        Some(updated) => RemoteReply::ComposerUploaded(Box::new(fastctx_types::composer::UploadResult {
+            attachment: uploaded.attachment,
+            updated,
+        })),
+        None => RemoteReply::Uploaded(uploaded.attachment),
+    }
+}
+
+async fn forward(mut source: FrameReader, mut stream: Stream, size: u64, resumes: bool) -> Result<(), String> {
+    let mut held = Skipping(if resumes { stream.hear::<UploadStart>().await?.from } else { 0 });
+    let mut received = 0u64;
+    loop {
+        let piece = source
+            .recv_up_to(UPLOAD_CHUNK)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the uploader disconnected before ending the file".to_string())?;
+        if piece.is_empty() {
+            if received != size {
+                return Err(format!("the uploader sent {received} bytes; expected {size}"));
+            }
+            stream.say(&"uploaded").await?;
+            return stream.finish().await;
+        }
+        if piece.len() as u64 > size - received {
+            return Err(format!("the uploader sent more than the declared {size} bytes"));
+        }
+        received += piece.len() as u64;
+        let rest = held.past(&piece);
+        if !rest.is_empty() {
+            stream.send(rest).await?;
+        }
+    }
+}
+
+/// The destination of an authenticated upload call and its data stream.
+/// When the caller `resumes`, it is first told how much of the file is held
+/// here from an earlier try, and sends the rest.
+pub async fn receive(
+    node: &Arc<Node>,
+    from: &MachineName,
+    target: UploadTarget,
+    file: UploadFile,
+    composer: Option<fastctx_types::composer::UploadScope>,
+    resumes: bool,
+    mut stream: Stream,
+) -> Result<Uploaded, Failure> {
+    let _operation = node.data_operations.read().await;
+    validate_file(&file)?;
+    let size = file.size;
+    let (mut arriving, mut guard) = match arrival(node, from, target, file, composer.as_ref(), resumes).await? {
+        Arrival::Ended(uploaded) => return Ok(uploaded),
+        Arrival::Going(arriving, guard) => (arriving, guard),
+    };
+    let result = async {
+        if resumes {
+            stream.say(&UploadStart { from: arriving.received }).await.map_err(broke)?;
+        }
+        let mut refused = None;
+        let taken = stream
+            .take(size - arriving.received, |piece| {
+                arriving.write(piece).map_err(|error| {
+                    let message = error.message.clone();
+                    refused = Some(error);
+                    message
+                })
+            })
+            .await;
+        if let Err(why) = taken {
+            return Err(refused.unwrap_or_else(|| broke(why)));
+        }
+        let end: String = stream.hear().await.map_err(broke)?;
+        if end != "uploaded" {
+            return Err(failure("the uploader did not end the file"));
+        }
+        let uploaded = finish(arriving, guard.as_mut()).await?;
+        stream.done().await.map_err(failure)?;
+        Ok(uploaded)
+    }
+    .await;
+    if let Err(error) = &result
+        && let Some(guard) = guard.as_mut()
+    {
+        guard.fail(error).await;
+    }
+    result
+}
+
+fn validate_file(file: &UploadFile) -> Result<(), Failure> {
+    if file.name.is_empty() || file.media_type.is_empty() {
+        return Err(failure("name and media_type must be supplied"));
+    }
+    if file.sha256.len() != 64 || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        return Err(failure("sha256 must be 64 lowercase hexadecimal digits"));
+    }
+    Ok(())
+}
+
+async fn prepare(node: &Arc<Node>, target: UploadTarget, file: UploadFile) -> Result<Arriving, Failure> {
+    let (resident, town) = match target {
+        UploadTarget::Resident { resident } => {
+            let (_, town) = node
+                .residents
+                .about(&resident)
+                .ok_or_else(|| failure(format!("no resident {resident} lives on {}", node.machine())))?;
+            (resident, town)
+        }
+        UploadTarget::New { agent, town } => {
+            if !matches!(agent.as_str(), "codex" | "claude") {
+                return Err(failure(format!("the World cannot open {agent} sessions")));
+            }
+            if let Some(town) = &town {
+                crate::town::project::spans_here(node, town).await?;
+            }
+            // Drafts are not in the live resident index. Their 128-bit ids
+            // also occupy a different namespace from the ordinary four-hex
+            // allocator, which must never assign an unopened draft's id.
+            let mut identity = [0u8; 16];
+            getrandom::fill(&mut identity).map_err(failure)?;
+            let resident: ResidentId =
+                format!("{agent}-{:032x}", u128::from_be_bytes(identity)).parse().map_err(failure)?;
+            let directory = node.world.conversation(&resident);
+            std::fs::create_dir_all(directory.path()).map_err(failure)?;
+            write_new(&directory.draft(), &Draft { agent, town: town.clone() })?;
+            (resident, town)
+        }
+        UploadTarget::Draft { resident, town } => {
+            let directory = node.world.conversation(&resident);
+            let draft: Draft = read_json(&directory.draft())?;
+            if draft.town != town || node.residents.about(&resident).is_some() {
+                return Err(failure("that upload draft is already open or belongs to another town"));
+            }
+            (resident, town)
+        }
+    };
+    // No resident storage lock may be held while network bytes arrive.
+    let directory = node.world.conversation(&resident).attachments();
+    std::fs::create_dir_all(&directory).map_err(failure)?;
+    let id = crate::speech::new_id("attachment");
+    let directory = directory.join(id.as_str());
+    std::fs::create_dir(&directory).map_err(failure)?;
+    let owner = Address { machine: node.machine(), resident };
+    arriving_in(&directory, Attachment { id, owner, town, path: String::new(), file }, false)
+}
+
+/// An upload arriving into `directory`, its own, for `attachment`, whose
+/// path it gives; going on from the part an earlier try left there when
+/// `resume`, else from nothing.
+fn arriving_in(directory: &Path, mut attachment: Attachment, resume: bool) -> Result<Arriving, Failure> {
+    let directory = std::fs::canonicalize(directory).map_err(failure)?;
+    let temporary = directory.join("upload.part");
+    let kept = if resume { held(&temporary, attachment.file.size)? } else { None };
+    let (output, received, hash) = match kept {
+        Some(kept) => kept,
+        None => {
+            // A try that stopped before its end may have left its part.
+            if let Err(error) = std::fs::remove_file(&temporary)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(failure(error));
+            }
+            let output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary).map_err(failure)?;
+            (output, 0, Sha256::new())
+        }
+    };
+    // The original name is metadata, never a path component. The image
+    // extension also lets native hosts that dispatch by extension open it.
+    let name = match attachment.file.media_type.as_str() {
+        "image/png" => "content.png",
+        "image/jpeg" => "content.jpg",
+        "image/webp" => "content.webp",
+        "image/gif" => "content.gif",
+        _ => "content",
+    };
+    let path = directory.join(name);
+    attachment.path = crate::world::native(&path);
+    Ok(Arriving { attachment, temporary, path, output: Some(output), received, hash, unpublished: false, keep: false })
+}
+
+/// The part at `temporary` an earlier try left, open to go on writing, with
+/// its length and the digest of its bytes; none when there is none or it
+/// is longer than the file.
+fn held(temporary: &Path, size: u64) -> Result<Option<(std::fs::File, u64, Sha256)>, Failure> {
+    let mut part = match std::fs::OpenOptions::new().read(true).append(true).open(temporary) {
+        Ok(part) => part,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(failure(error)),
+    };
+    let length = part.metadata().map_err(failure)?.len();
+    if length > size {
+        return Ok(None);
+    }
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0u8; UPLOAD_CHUNK];
+    let mut read = 0u64;
+    loop {
+        let bytes = part.read(&mut buffer).map_err(failure)?;
+        if bytes == 0 {
+            break;
+        }
+        hash.update(&buffer[..bytes]);
+        read += bytes as u64;
+    }
+    Ok((read == length).then_some((part, length, hash)))
+}
+
+struct Arriving {
+    attachment: Attachment,
+    temporary: PathBuf,
+    path: PathBuf,
+    output: Option<std::fs::File>,
+    received: u64,
+    hash: Sha256,
+    unpublished: bool,
+    /// Whether its part stays when it ends unfinished: a shared input's
+    /// upload that broke goes on from it. Bytes that could never make the
+    /// file are not kept.
+    keep: bool,
+}
+
+impl Arriving {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Failure> {
+        if bytes.len() as u64 > self.attachment.file.size - self.received {
+            self.keep = false;
+            return Err(failure("the uploader sent more than the declared size"));
+        }
+        self.output.as_mut().expect("upload is open").write_all(bytes).map_err(failure)?;
+        self.hash.update(bytes);
+        self.received += bytes.len() as u64;
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Attachment, Failure> {
+        self.keep = false;
+        if self.received != self.attachment.file.size {
+            return Err(failure(format!("received {} bytes; expected {}", self.received, self.attachment.file.size)));
+        }
+        if format!("{:x}", self.hash.clone().finalize()) != self.attachment.file.sha256 {
+            return Err(failure("the file's SHA-256 does not match the uploaded bytes"));
+        }
+        self.output.take().expect("upload is open").sync_all().map_err(failure)?;
+        std::fs::rename(&self.temporary, &self.path).map_err(failure)?;
+        self.unpublished = true;
+        write_new(&self.path.parent().expect("attachment directory").join("receipt.json"), &self.attachment)?;
+        self.unpublished = false;
+        Ok(self.attachment.clone())
+    }
+}
+
+impl Drop for Arriving {
+    fn drop(&mut self) {
+        drop(self.output.take());
+        if self.unpublished
+            && let Err(error) = std::fs::remove_file(&self.path)
+        {
+            eprintln!("removing unpublished upload {}: {error}", self.path.display());
+        }
+        if !self.keep
+            && let Err(error) = std::fs::remove_file(&self.temporary)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("removing incomplete upload {}: {error}", self.temporary.display());
+        }
+    }
+}
+
+/// Lets go of what arrived of the uploads of `resident` taken out of its
+/// words before they finished: their parts, and the directories they leave
+/// empty.
+pub fn forsake(node: &Node, resident: &ResidentId, uploads: &[fastctx_types::NoticeId]) {
+    let attachments = node.world.conversation(resident).attachments();
+    for upload in uploads {
+        let directory = attachments.join(upload.as_str());
+        let removed = match std::fs::remove_file(directory.join("upload.part")) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => match std::fs::read_dir(&directory).map(|mut entries| entries.next().is_none()) {
+                Ok(true) => std::fs::remove_dir(&directory),
+                _ => Ok(()),
+            },
+        };
+        if let Err(error) = removed {
+            node.log.line(format_args!("letting go of the upload {upload} of {resident}: {error}"));
+        }
+    }
+}
+
+fn write_new(path: &std::path::Path, value: &impl Serialize) -> Result<(), Failure> {
+    fastctx_platform::publish_new(
+        path,
+        &serde_json::to_vec(value).map_err(failure)?,
+        fastctx_platform::Permissions::Private,
+    )
+    .map_err(failure)
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T, Failure> {
+    serde_json::from_slice(&std::fs::read(path).map_err(failure)?).map_err(failure)
+}
+
+/// Resolves only server-written receipts and checks the bytes again before
+/// handing their paths to a host. Receipts remain valid across town moves.
+pub async fn resolve(node: &Arc<Node>, resident: &ResidentId, attachments: &[Attachment]) -> Result<(), Failure> {
+    if attachments.is_empty() {
+        return Ok(());
+    }
+    let (node, resident, attachments) = (node.clone(), resident.clone(), attachments.to_vec());
+    tokio::task::spawn_blocking(move || {
+        let mut buffer = vec![0u8; UPLOAD_CHUNK];
+        for attachment in attachments {
+            let kept = kept_here(&node, &resident, &attachment)?;
+            if !holds(&kept, &mut buffer)? {
+                return Err(failure(format!("{} on {} changed after upload", kept.path, kept.owner.machine)));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(failure)?
+}
+
+fn slot_name(attachment: &Attachment) -> Option<&str> {
+    let name = Path::new(&attachment.path).parent()?.file_name()?.to_str()?;
+    let id = attachment.id.as_str();
+    (name == id || name.strip_prefix(id)?.strip_prefix('-')?.parse::<u32>().ok()? >= 2).then_some(name)
+}
+
+/// The upload kept here for `attachment` of `resident`: the one it names, or
+/// the one a copy placed on another machine was made from, known by its id
+/// and its file. What it gives says where the file is now.
+fn kept_here(node: &Node, resident: &ResidentId, attachment: &Attachment) -> Result<Attachment, Failure> {
+    let unknown = || failure(format!("{} was not attached for {resident} on {}", attachment.file.name, node.machine()));
+    if attachment.owner.resident != *resident {
+        return Err(unknown());
+    }
+    let placed = !node.is_me(&attachment.owner.machine);
+    // A work copy can occupy id-2 after an earlier copy changed. The path
+    // supplies only a slot hint under this resident; stored equality below
+    // still authenticates the whole receipt before any bytes are opened.
+    let slot = if placed { attachment.id.as_str() } else { slot_name(attachment).unwrap_or(attachment.id.as_str()) };
+    let load = |room: &ConversationDir| -> Result<Option<Attachment>, Failure> {
+        match std::fs::read(room.attachments().join(slot).join("receipt.json")) {
+            Ok(bytes) => serde_json::from_slice::<Attachment>(&bytes).map(Some).map_err(failure),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(failure(error)),
+        }
+    };
+    let same = |kept: &Attachment| {
+        if placed {
+            kept.id == attachment.id && kept.file == attachment.file
+        } else {
+            kept.id == attachment.id && kept.owner == attachment.owner && kept.file == attachment.file
+        }
+    };
+    // A copy placed here sits in the guest room its path names; an upload
+    // made here, or the original a copy elsewhere was made from, in the
+    // conversation's home. One moved from an older layout may sit in any
+    // room of this resident.
+    let hinted = if placed { None } else { room_named(node, attachment) };
+    let home = node.world.conversation(resident);
+    let mut rooms: Vec<ConversationDir> = hinted.into_iter().chain([home]).collect();
+    let mut found = None;
+    for pass in 0..2 {
+        for room in &rooms {
+            if let Some(kept) = load(room)?.filter(&same) {
+                found = Some((room.clone(), kept));
+                break;
+            }
+        }
+        if found.is_some() || pass == 1 {
+            break;
+        }
+        rooms = node
+            .world
+            .kept()
+            .map_err(failure)?
+            .into_iter()
+            .filter(|kept| kept.kind.resident() == resident)
+            .map(|kept| kept.directory)
+            .collect();
+    }
+    let (room, mut kept) = match found {
+        Some(found) => found,
+        None if rooms.iter().any(|room| load(room).ok().flatten().is_some()) => {
+            return Err(failure("the attachment receipt differs from the stored upload"));
+        }
+        None => return Err(Failure::original_gone()),
+    };
+    let leaf = Path::new(&kept.path).file_name().ok_or_else(|| failure("the stored upload has no filename"))?;
+    kept.path = crate::world::native(&room.attachments().join(slot).join(leaf));
+    Ok(kept)
+}
+
+/// The room a copy placed on this machine names in its path: the guest room
+/// of the conversation it was placed for, when its name says so.
+fn room_named(node: &Node, attachment: &Attachment) -> Option<ConversationDir> {
+    let room = Path::new(&attachment.path).parent()?.parent()?.parent()?.file_name()?.to_str()?;
+    match Kind::of(room)? {
+        Kind::Guest(owner) if owner.resident == attachment.owner.resident => Some(node.world.guest(&owner)),
+        Kind::Unplaced(id) if id == attachment.owner.resident => {
+            Some(ConversationDir::at(&node.world.conversations().join(room)))
+        }
+        _ => None,
+    }
+}
+
+/// Locate an immutable original from its recorded receipt, including when
+/// the resident's directory was archived. No client path selects a file.
+pub(crate) fn verified_original(
+    node: &Node,
+    attachment: &Attachment,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(String, fastctx_platform::file_read::Snapshot), Failure> {
+    let kept = kept_here(node, &attachment.owner.resident, attachment)?;
+    let path = PathBuf::from(&kept.path);
+    let file = fastctx_platform::file_read::open(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound { Failure::original_gone() } else { failure(error) }
+    })?;
+    let metadata = file.metadata().map_err(failure)?;
+    if !metadata.is_file() || metadata.len() != kept.file.size {
+        return Err(failure("the uploaded original changed"));
+    }
+    let before = fastctx_platform::file_read::snapshot(&file, &metadata).map_err(failure)?;
+    let mut reading = (&file).take(before.size);
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0; UPLOAD_CHUNK];
+    let mut received = 0;
+    loop {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(failure("attachment thumbnail was cancelled"));
+        }
+        let bytes = reading.read(&mut buffer).map_err(failure)?;
+        if bytes == 0 {
+            break;
+        }
+        hash.update(&buffer[..bytes]);
+        received += bytes as u64;
+    }
+    let after = fastctx_platform::file_read::snapshot(&file, &file.metadata().map_err(failure)?).map_err(failure)?;
+    if before != after || received != kept.file.size || format!("{:x}", hash.finalize()) != kept.file.sha256 {
+        return Err(failure("the uploaded original changed"));
+    }
+    Ok((crate::world::native(&path), before))
+}
+
+/// Whether the file `kept` names still holds the bytes it was kept with.
+fn holds(kept: &Attachment, buffer: &mut [u8]) -> Result<bool, Failure> {
+    let mut file = std::fs::File::open(&kept.path).map_err(failure)?;
+    let mut hash = Sha256::new();
+    let mut size = 0u64;
+    loop {
+        let read = file.read(buffer).map_err(failure)?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        hash.update(&buffer[..read]);
+    }
+    Ok(size == kept.file.size && format!("{:x}", hash.finalize()) == kept.file.sha256)
+}
+
+/// What the machine a file is placed on says first.
+#[derive(Serialize, Deserialize)]
+struct Need {
+    /// Whether it wants the bytes; when not, it holds that very file.
+    bytes: bool,
+}
+
+/// The user's files for `resident`, of this machine, as its session is
+/// given them, each already resolved: images where it lives, whose host
+/// shows them to the model from here; other files where it lives too, or
+/// on the machine the user chose for them. A copy placed there before is
+/// placed again from the upload kept here.
+pub async fn place(
+    node: &Arc<Node>,
+    resident: &ResidentId,
+    attachments: Vec<Attachment>,
+    files_on: Option<&Written>,
+) -> Result<Vec<Attachment>, Failure> {
+    if attachments.is_empty() {
+        return Ok(attachments);
+    }
+    let assisting = crate::here::assisting(node, resident);
+    // Where they go: where the user chose, else here; an assisting agent
+    // cannot reach here.
+    let goes_to = match files_on {
+        Some(files_on) if node.is_here(files_on) && assisting => {
+            return Err(Failure::not_run(format!(
+                "{files_on} is the computer this agent runs on, which it cannot reach; choose one of your machines for the files"
+            )));
+        }
+        Some(files_on) if node.is_here(files_on) => None,
+        Some(files_on) => Some(files_on.clone()),
+        None => None,
+    };
+    let acting = node.residents.about(resident).map(|(about, _)| about.acting).unwrap_or_default();
+    let mut given = Vec::with_capacity(attachments.len());
+    for attachment in &attachments {
+        let kept = kept_here(node, resident, attachment)?;
+        given.push(match &goes_to {
+            _ if kept.is_image() => kept,
+            Some(goes_to) => send_placed(node, &acting, goes_to, resident, kept).await?,
+            None if assisting && files_on.is_none() => {
+                return Err(Failure::not_run(format!(
+                    "{} cannot stay where this agent runs, a computer it cannot reach; choose one of your machines for the files",
+                    kept.file.name
+                )));
+            }
+            None => kept,
+        });
+    }
+    Ok(given)
+}
+
+/// Places `kept`, an upload of `resident` kept here, on `goes_to`, where
+/// the user chose, for whom it works; answers the copy there.
+async fn send_placed(
+    node: &Arc<Node>,
+    acting: &Acting,
+    goes_to: &Written,
+    resident: &ResidentId,
+    kept: Attachment,
+) -> Result<Attachment, Failure> {
+    let town = match node.speaking(acting, goes_to, Purpose::Hands) {
+        Ok((link, _)) => node.town_across(&link, kept.town.as_ref()),
+        Err(_) => kept.town.clone(),
+    };
+    let call = RemoteCall::Place { resident: resident.clone(), attachment: Attachment { town, ..kept.clone() } };
+    let (path, size) = (PathBuf::from(&kept.path), kept.file.size);
+    let feed = || -> Feed {
+        let path = path.clone();
+        Box::new(move |mut stream: Stream| {
+            Box::pin(async move {
+                let need: Need = stream.hear().await?;
+                if need.bytes {
+                    send_bytes(&mut stream, &path, size).await?;
+                    stream.say(&"placed").await?;
+                }
+                stream.finish().await
+            })
+        })
+    };
+    let refused =
+        |why: String| Failure::new(format!("{} goes to {goes_to} and did not get there: {why}", kept.file.name));
+    let mine = Address { machine: goes_to.name.clone(), resident: resident.clone() };
+    match node.call_with_stream(acting, goes_to, Purpose::Hands, call, feed).await {
+        Ok(Ok(RemoteReply::Uploaded(placed)))
+            if placed.id == kept.id && placed.file == kept.file && placed.owner == mine =>
+        {
+            Ok(placed)
+        }
+        Ok(Ok(_)) => Err(refused(format!("{goes_to} answered something other than the file kept there"))),
+        Ok(Err(failure)) => Err(refused(failure.message)),
+        Err(failure) => Err(refused(failure.to_string())),
+    }
+}
+
+/// Sends the `size` bytes of the file at `path`, and only those: a file
+/// shorter than when it was checked is not sent short.
+async fn send_bytes(stream: &mut Stream, path: &Path, size: u64) -> Result<(), String> {
+    let mut file = tokio::fs::File::open(path).await.map_err(|error| format!("opening {}: {error}", path.display()))?;
+    let mut buffer = vec![0u8; UPLOAD_CHUNK];
+    let mut left = size;
+    while left > 0 {
+        let want = (buffer.len() as u64).min(left) as usize;
+        let read =
+            file.read(&mut buffer[..want]).await.map_err(|error| format!("reading {}: {error}", path.display()))?;
+        if read == 0 {
+            return Err(format!("{} is shorter than when it was attached", path.display()));
+        }
+        stream.send(&buffer[..read]).await?;
+        left -= read as u64;
+    }
+    Ok(())
+}
+
+/// Keeps on this machine a file the user attached for `resident`, of
+/// `from`, which works here, beside its other things here (`world-town.md`),
+/// under the same id; asks for the bytes only when it does not hold that
+/// very file already. A copy changed since, by whatever works here, is left
+/// as it is, and this one is kept beside it.
+pub async fn take_placed(
+    node: &Arc<Node>,
+    from: &MachineName,
+    resident: ResidentId,
+    attachment: Attachment,
+    mut stream: Stream,
+) -> Result<Attachment, Failure> {
+    let _operation = node.data_operations.read().await;
+    validate_file(&attachment.file)?;
+    let origin = Address { machine: from.clone(), resident: resident.clone() };
+    if attachment.owner != origin {
+        return Err(Failure::not_run(format!("{from} places files only of its own sessions")));
+    }
+    let base = node.world.owner(&node.names(), &origin).attachments();
+    let wanted = Attachment { owner: Address { machine: node.machine(), resident }, ..attachment };
+    let (directory, held) = {
+        let wanted = wanted.clone();
+        tokio::task::spawn_blocking(move || slot(&base, &wanted)).await.map_err(failure)??
+    };
+    if let Some(held) = held {
+        stream.say(&Need { bytes: false }).await.map_err(failure)?;
+        stream.done().await.map_err(failure)?;
+        return Ok(held);
+    }
+    stream.say(&Need { bytes: true }).await.map_err(failure)?;
+    let size = wanted.file.size;
+    let mut arriving = arriving_in(&directory, wanted, false)?;
+    stream.take(size, |piece| arriving.write(piece).map_err(|error| error.message)).await.map_err(Failure::new)?;
+    let end: String = stream.hear().await.map_err(failure)?;
+    if end != "placed" {
+        return Err(failure("the sender did not end the file"));
+    }
+    let placed = arriving.finish()?;
+    stream.done().await.map_err(failure)?;
+    Ok(placed)
+}
+
+/// Where under `base` the file `wanted` is kept: its id's directory, or the
+/// first one after it, `<id>-2` and on, that is free, left from a try that
+/// did not finish, or holds that very file, which is then given.
+fn slot(base: &Path, wanted: &Attachment) -> Result<(PathBuf, Option<Attachment>), Failure> {
+    std::fs::create_dir_all(base).map_err(failure)?;
+    let mut buffer = vec![0u8; UPLOAD_CHUNK];
+    for n in 1u32.. {
+        let name = if n == 1 { wanted.id.as_str().to_string() } else { format!("{}-{n}", wanted.id.as_str()) };
+        let directory = base.join(name);
+        match std::fs::create_dir(&directory) {
+            Ok(()) => return Ok((directory, None)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(failure(error)),
+        }
+        match read_json::<Attachment>(&directory.join("receipt.json")) {
+            Ok(kept) if kept.id == wanted.id && kept.owner == wanted.owner && kept.file == wanted.file => {
+                if holds(&kept, &mut buffer).unwrap_or(false) {
+                    return Ok((directory, Some(kept)));
+                }
+            }
+            Ok(_) => {}
+            Err(_) if !directory.join("receipt.json").exists() => return Ok((directory, None)),
+            Err(_) => {}
+        }
+    }
+    unreachable!("some directory is free")
+}
+
+/// A draft reserved for one Open: the lock spans host creation, and once the
+/// conversation is recorded its lock file goes with it.
+pub struct Opening {
+    lock: Option<FileLock>,
+    directory: Option<ConversationDir>,
+}
+
+impl Drop for Opening {
+    fn drop(&mut self) {
+        drop(self.lock.take());
+        if let Some(directory) = &self.directory
+            && directory.about().exists()
+            && let Err(error) = std::fs::remove_file(directory.draft_lock())
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("removing {}: {error}", directory.draft_lock().display());
+        }
+    }
+}
+
+/// Reserves a draft for precisely one Open. The lock spans host creation;
+/// the ordinary resident record prevents reusing the draft after success.
+pub async fn opening(
+    node: &Arc<Node>,
+    agent: &AgentName,
+    town: Option<&TownName>,
+    attachments: &[Attachment],
+) -> Result<(ResidentId, Opening), Failure> {
+    let Some(first) = attachments.first() else {
+        return Ok((node.residents.new_id(agent)?, Opening { lock: None, directory: None }));
+    };
+    let id = first.owner.resident.clone();
+    if !node.is_me(&first.owner.machine) || first.town.as_ref() != town {
+        return Err(failure("the upload draft belongs to another machine or town"));
+    }
+    let directory = node.world.conversation(&id);
+    let draft: Draft = read_json(&directory.draft())?;
+    if draft.agent != *agent || draft.town.as_ref() != town {
+        return Err(failure("the upload draft is for another agent or town"));
+    }
+    let lock = FileLock::try_acquire(&directory.draft_lock())
+        .map_err(failure)?
+        .ok_or_else(|| failure("this upload draft is already being opened"))?;
+    if node.residents.about(&id).is_some() {
+        return Err(failure("this upload draft has already been opened"));
+    }
+    resolve(node, &id, attachments).await?;
+    Ok((id, Opening { lock: Some(lock), directory: Some(directory) }))
+}

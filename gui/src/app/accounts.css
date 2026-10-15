@@ -1,0 +1,493 @@
+/* Accounts and the machines they use (`world-gui.md`, 账号、机器、共享与协助):
+   logging in, the machines page grouped by account with the agents
+   assisting each, the sheets that share a machine, let a login assist and
+   set the relays,
+   the account page, the super administrator's page, and the sidebar's
+   parts, one an account. */
+
+/* A tick with what it means beside it, said in a line under its name. */
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  font-size: var(--size-ui);
+  line-height: var(--leading-ui);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.check-row input {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.check-row > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.check-title {
+  color: var(--text);
+}
+
+.check-row.compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.check-row.compact input {
+  margin: 0;
+}
+
+.check-row.compact .check-title {
+  color: var(--text-2);
+}
+
+a.text-button {
+  text-decoration: none;
+}
+
+.text-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.text-link:hover {
+  color: var(--text-strong);
+}
+
+/* Logging in: the three fields, the ways in beside the button, and, the
+   first time, the way past it, ruled off below. */
+.login-what {
+  margin: var(--space-2) 0 0;
+}
+
+.login-ways {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--space-1);
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.login-ways .login-way {
+  height: 30px;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.login-form .welcome-foot,
+.token-form .welcome-foot {
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.login-form .welcome-foot .sheet-go,
+.token-form .welcome-foot .sheet-go {
+  margin-left: auto;
+}
+
+.login-alone {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin: var(--space-8) 0 0;
+  padding-top: var(--space-5);
+}
+
+.login-alone::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 8px;
+  background: var(--pen-rule);
+  opacity: 0.7;
+  -webkit-mask: var(--pen-rule-2) 0 50% / 100% 100% no-repeat;
+  mask: var(--pen-rule-2) 0 50% / 100% 100% no-repeat;
+}
+
+.login-alone .text-button {
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.machines-alone {
+  margin: var(--space-3) 0 var(--space-8);
+  font-size: var(--size-ui);
+  line-height: var(--leading-prose);
+  color: var(--text-3);
+}
+
+.machines-alone {
+  margin-top: var(--space-6);
+}
+
+.tag.tag-own {
+  background: var(--fill-strong);
+  color: var(--text);
+}
+
+/* A machine of another whose agents may reach the account's machines: a
+   quiet mark in clay, since it is the one thing about it the account
+   itself let happen. */
+.tag.tag-reach {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--accent-wash);
+  color: var(--text);
+}
+
+/* An agent of another's assisting the account, on a machine of theirs:
+   clay, as its ring is on the drawing. */
+.tag.tag-assist {
+  background: var(--accent-wash);
+  color: var(--text);
+}
+
+.tag.tag-reach .glyph {
+  color: var(--accent);
+}
+
+.quiet-button[data-danger] {
+  color: var(--wrong);
+}
+
+.quiet-button[data-danger]:hover {
+  color: color-mix(in srgb, var(--wrong) 80%, var(--text));
+}
+
+/* Giving a machine or one agent's login to other accounts: what it gives
+   and what its owner sees, said with the shield; those it is given to,
+   each with a way to take it back; then whom to give it to. */
+.give-sees {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: var(--space-3) 0 0;
+}
+
+.give-sees .glyph {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.give-list {
+  margin-top: var(--space-5);
+}
+
+.give-list .field-label {
+  margin: 0 0 var(--space-2);
+  font-weight: 400;
+}
+
+.give-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.give-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 40px;
+}
+
+.give-row + .give-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  height: 8px;
+  background: var(--pen-rule);
+  opacity: 0.6;
+  -webkit-mask: var(--pen-rule-3) 0 50% / 100% 100% no-repeat;
+  mask: var(--pen-rule-3) 0 50% / 100% 100% no-repeat;
+}
+
+.give-who {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-small);
+  color: var(--text);
+}
+
+.give-who .glyph {
+  flex: none;
+  color: var(--text-3);
+}
+
+.give-new .field {
+  margin-top: var(--space-4);
+}
+
+.give-after {
+  margin: var(--space-3) 0 0;
+}
+
+/* The relays a machine connects through, in the order it tries them. */
+.relay-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.relay-row {
+  display: grid;
+  grid-template-columns: 22px 8.5em minmax(0, 1fr) 32px;
+  gap: 6px;
+  align-items: center;
+}
+
+.relay-order {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  background: var(--fill-strong);
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+.add-relay {
+  align-self: flex-start;
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.relay-last {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.relay-last .glyph {
+  color: var(--text-3);
+}
+
+@media (max-width: 760px) {
+  .relay-row {
+    grid-template-columns: 22px minmax(0, 1fr) 32px;
+  }
+
+  .relay-row .relay-addresses {
+    grid-column: 2 / 3;
+    grid-row: 2;
+  }
+}
+
+/* The account page and the administrator's: one section a login, its
+   parts each under a small head. */
+.account-title {
+  color: var(--text-2);
+  font-size: var(--size-ui);
+}
+
+.account-title .glyph {
+  flex: none;
+  color: var(--text-3);
+}
+
+/* An account a project is shared with: its name, and the cross that
+   stops sharing. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  padding: 0 4px 0 9px;
+  border-radius: var(--radius-full);
+  background: var(--fill-strong);
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.chip-x {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  color: var(--text-3);
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.chip-x:hover {
+  color: var(--wrong);
+  background: color-mix(in srgb, var(--wrong) 14%, transparent);
+}
+
+/* The sidebar, logged in to more than one account: a part for each, under
+   its hub and name, folded shut on a press. */
+.sidebar-account {
+  margin-top: var(--space-5);
+}
+
+.sidebar-account + .sidebar-account {
+  margin-top: var(--space-4);
+}
+
+.side-account-title {
+  margin: 0;
+  font: inherit;
+}
+
+.side-account-fold {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 2px var(--space-3) 2px calc(var(--space-3) - 4px);
+  border-radius: var(--radius-s);
+  font-size: var(--size-ui);
+  color: var(--text-2);
+  text-align: left;
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.side-account-fold:hover {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.side-account-fold .glyph {
+  flex: none;
+  color: var(--text-3);
+  transition: transform var(--fold) var(--fold-easing);
+}
+
+.sidebar-account.shut .side-account-fold .glyph {
+  transform: rotate(-90deg);
+}
+
+.side-account-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-account-sep {
+  margin: 0 5px;
+  color: var(--text-3);
+}
+
+.side-account-body {
+  margin-left: var(--space-2);
+  padding-left: 2px;
+  border-left: 1px solid var(--hairline);
+}
+
+.side-account-body .sidebar-group {
+  margin-top: var(--space-2);
+}
+
+.side-account-body .side-group-title {
+  padding-left: calc(var(--space-3) - 2px);
+}
+
+/* Whether the agent may ask for colleagues, in the details card. */
+.details-colleagues {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  margin: 0 0 var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.details-colleagues .text-button {
+  height: 28px;
+  font-size: var(--size-small);
+}
+
+/* A sentence set off in the margin, as a reader pencils beside a passage:
+   what the super administrator may do, what an assisting agent cannot touch, what
+   using another's agent lets happen. A ruled line down its left edge, in
+   graphite, or in clay where it asks for care. */
+.machines-note,
+.choice-margin {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: var(--space-3) 0 var(--space-2);
+  padding: 2px 0 2px var(--space-4);
+  font-size: var(--size-small);
+  line-height: var(--leading-ui);
+  color: var(--text-2);
+}
+
+.machines-note::before,
+.choice-margin::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  background: var(--pen-graphite);
+  opacity: 0.55;
+  mix-blend-mode: var(--pen-blend);
+  -webkit-mask: var(--pen-rule-down) 50% 0 / 100% 100% no-repeat;
+  mask: var(--pen-rule-down) 50% 0 / 100% 100% no-repeat;
+}
+
+.machines-note .glyph {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+
+.choice-margin.choice-warn {
+  color: var(--text);
+}
+
+.choice-margin.choice-warn::before {
+  background: var(--pen-clay);
+  opacity: 0.9;
+}
+
+.host-home .home-talk {
+  margin-left: auto;
+  color: var(--accent);
+}
+
+.host-home .home-talk .glyph {
+  margin-right: 2px;
+}

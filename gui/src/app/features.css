@@ -1,0 +1,643 @@
+/* The features: a card for each, and each its own page. A feature's film
+   plays as large as the page allows; settings are solid fields on the
+   paper. */
+.features-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.features-body {
+  flex: 1;
+  width: min(100%, 920px);
+  margin: 0 auto;
+  padding: var(--space-3) var(--gutter) var(--space-12);
+}
+
+.feature-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: var(--space-3);
+}
+
+/* The cards in a row share the tallest one's height. */
+.feature-cards > li {
+  display: flex;
+}
+
+.feature-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-height: 150px;
+  padding: var(--space-4);
+  border-radius: var(--radius-l);
+  background: var(--bg-sunken);
+  color: var(--text-2);
+  text-decoration: none;
+  transition: background-color var(--hover) ease;
+}
+
+.feature-card:hover {
+  background: var(--fill-strong);
+}
+
+.feature-card-art {
+  display: flex;
+  gap: 6px;
+  margin-bottom: var(--space-2);
+  color: var(--text-3);
+}
+
+.feature-card-name {
+  font-family: var(--font-reading);
+  font-size: var(--size-h3);
+  color: var(--text-strong);
+}
+
+.feature-card-line {
+  flex: 1;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.feature-card.coming .feature-card-name {
+  color: var(--text-2);
+}
+
+.feature-coming {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-8);
+  justify-content: center;
+  color: var(--text-3);
+}
+
+.feature-intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-6);
+  padding-top: var(--space-4);
+}
+
+.feature-note {
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* "On", wherever it is said: washed in the theme's accent, so it is told
+   from "Off" at a glance. */
+.tag.feature-tag-on {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-wash);
+  color: var(--text-strong);
+}
+
+.feature-tag-on .glyph {
+  color: var(--accent);
+}
+
+/* On, a feature's page: a still of its film beside what it gave, the
+   settings below, and the light way off at the foot of the page. */
+/* The body already fills what the head leaves; a height of the whole page
+   would push its foot out of sight. */
+.features-body.features-on {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--space-5);
+}
+
+.feature-on {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-5) var(--space-6);
+  padding-top: var(--space-2);
+}
+
+.feature-on .feature-still {
+  flex: 0 1 440px;
+  min-width: 240px;
+}
+
+.feature-on-said {
+  flex: 1 1 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.feature-on-gained {
+  margin: 0;
+  max-width: 34em;
+  font-size: var(--size-ui);
+  line-height: var(--leading-prose);
+  color: var(--text-2);
+}
+
+.feature-on-said .text-button {
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.feature-on.solo {
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-5);
+  text-align: center;
+}
+
+.feature-on.solo .feature-still {
+  flex: none;
+  width: min(100%, 880px, calc((100dvh - 470px) * 16 / 9));
+  min-width: 0;
+}
+
+.feature-on.solo .feature-on-said {
+  flex: none;
+  align-items: center;
+}
+
+.feature-on.solo .feature-on-said .text-button {
+  margin-left: 0;
+}
+
+.feature-off-way {
+  margin-top: auto;
+  padding-top: var(--space-10);
+}
+
+.feature-on.solo + .feature-off-way {
+  margin-top: 0;
+  padding-top: var(--space-4);
+  text-align: center;
+}
+
+.feature-on.solo + .feature-off-way .text-button {
+  margin-left: 0;
+}
+
+.feature-off-way .text-button {
+  margin-left: calc(-1 * var(--space-3));
+  color: var(--text-3);
+  font-size: var(--size-small);
+}
+
+.feature-off-way .text-button:hover {
+  color: var(--text-2);
+}
+
+/* Once a feature is turned on: the same page for every one, over the whole
+   window and under its caption buttons, its top strip moving the window. */
+.feature-done {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-top) + 52px) var(--gutter) calc(var(--safe-bottom) + var(--space-8));
+  background: var(--bg);
+  animation: film-theater-in var(--fold) var(--fold-easing) both;
+}
+
+.feature-done-head {
+  position: absolute;
+  inset: 0 0 auto;
+}
+
+.feature-done-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(100%, 640px);
+  text-align: center;
+}
+
+.feature-done-art {
+  width: min(100%, calc((100dvh - 340px) * 16 / 9));
+  border-radius: var(--radius-l);
+  overflow: hidden;
+}
+
+.feature-done-art .film-caption {
+  display: none;
+}
+
+.feature-done-title {
+  margin: var(--space-6) 0 var(--space-2);
+  font-family: var(--font-emphasis);
+  font-size: var(--size-h2);
+  font-weight: 400;
+  color: var(--text-strong);
+}
+
+.feature-done-gained {
+  margin: 0;
+  font-size: var(--size-ui);
+  color: var(--text-2);
+}
+
+.feature-done-back {
+  min-width: 160px;
+  margin-top: var(--space-8);
+}
+
+.feature-section {
+  margin-top: var(--space-8);
+}
+
+.feature-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-reading);
+  font-weight: 400;
+  font-size: var(--size-h3);
+  color: var(--text-strong);
+}
+
+.feature-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.feature-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-full);
+  background: var(--fill);
+  color: var(--text-2);
+  font-size: var(--size-small);
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.feature-chip:hover {
+  background: var(--fill-strong);
+}
+
+.feature-chip.chosen {
+  background: var(--accent-wash);
+  color: var(--text-strong);
+}
+
+.feature-chip.chosen .glyph {
+  color: var(--accent);
+}
+
+.feature-quiet {
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.callee-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: var(--space-3);
+}
+
+.callee-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-m);
+  background: var(--bg-sunken);
+}
+
+.callee-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.callee-row .callee-field {
+  flex: 1;
+}
+
+.callee-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.callee-field input,
+.callee-field select,
+.feature-text {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--radius-s);
+  outline: 0;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--size-ui);
+}
+
+.callee-name input {
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+}
+
+.feature-text {
+  min-height: 0;
+  padding: var(--space-3);
+  resize: vertical;
+  line-height: var(--leading-prose);
+  font-size: var(--size-small);
+}
+
+.callee-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.callee-add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  min-height: 160px;
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg-sunken) 55%, transparent);
+  color: var(--text-3);
+  font-size: var(--size-small);
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.callee-add:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-sunken);
+}
+
+.feature-now {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.feature-now a {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  color: var(--text-2);
+  text-decoration: none;
+}
+
+.feature-now-for {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.feature-save-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+  padding: var(--space-3) 0 calc(var(--space-3) + var(--safe-bottom));
+  background: var(--bg);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+  transition: opacity var(--hover) ease, transform var(--hover) ease;
+}
+
+.feature-save-bar.shown {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.feature-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.feature-problem {
+  font-size: var(--size-small);
+  color: var(--caution);
+}
+
+/* The effort slider, wherever it stands. */
+.effort-slider {
+  position: relative;
+  width: 100%;
+  max-width: 280px;
+  height: 46px;
+  padding-top: 6px;
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+}
+
+.effort-slider svg {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 40px;
+}
+
+.effort-line {
+  fill: var(--pen-graphite);
+}
+
+.effort-dots {
+  fill: var(--text-2);
+}
+
+.effort-marker {
+  fill: var(--pen-clay);
+  opacity: 0.55;
+}
+
+.effort-knob {
+  fill: var(--accent);
+}
+
+.effort-name {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  font-size: var(--size-small);
+  color: var(--text-strong);
+  white-space: nowrap;
+  transition: left var(--hover) ease-out;
+}
+
+.effort-slider:focus-visible .effort-name {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* Under a finger the slider takes the width it stands in, its notches far
+   enough apart to land on. */
+@media (hover: none) {
+  .effort-slider {
+    max-width: none;
+    height: 52px;
+  }
+}
+
+:root[data-reduced] .effort-name,
+:root[data-reduced] .feature-save-bar {
+  transition: none;
+}
+
+/* Off, a feature's page is its story and its switch, held in the middle of
+   the page rather than stacked at its top with the rest left empty. */
+.features-body:has(> .feature-intro) {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.feature-intro {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-7);
+  gap: var(--space-5);
+}
+
+/* What a feature gives, in a line each under its story. */
+.feature-gives {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3) var(--space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.feature-gives li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: 360px;
+}
+
+.feature-give-mark {
+  flex: none;
+  color: var(--accent);
+  padding-top: 2px;
+}
+
+.feature-trouble {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* A feature's film: as large as the page allows, with room under it for
+   its words and the button that turns the feature on, all on one screen. */
+.features-body.features-film {
+  width: min(100%, 1280px);
+}
+
+.feature-intro .feature-film {
+  width: min(100%, calc((100dvh - var(--film-room, 300px)) * 16 / 9));
+}
+
+.feature-intro.with-gives {
+  --film-room: 400px;
+}
+
+.film[data-shape="tall"] {
+  width: 100%;
+}
+
+/* On, a still of the film, to be watched again over the page. */
+.feature-still {
+  padding: 0;
+  border-radius: var(--radius-l);
+  cursor: pointer;
+}
+
+.feature-still .film-caption {
+  display: none;
+}
+
+.feature-still .film-stage {
+  transition: opacity var(--hover) ease;
+}
+
+.feature-still:hover .film-stage {
+  opacity: 0.85;
+}
+
+.film-theater {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--gutter);
+  background: rgba(0, 0, 0, 0.62);
+  animation: film-theater-in var(--fold) var(--fold-easing) both;
+}
+
+.film-theater-box {
+  width: min(100%, 1280px, calc((100dvh - 160px) * 16 / 9));
+}
+
+.film-theater-close {
+  flex: none;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.film-theater-close:hover {
+  color: #fff;
+}
+
+/* Over the dimmed page the words are light in every theme. */
+.film-theater .film-caption {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+@keyframes film-theater-in {
+  from {
+    opacity: 0;
+  }
+}

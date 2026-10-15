@@ -1,0 +1,1683 @@
+/* The machines page: the account's World drawn by hand on a canvas that
+   moves under the hand, and, when asked for, what is known of the one
+   chosen. On a wide screen the drawing fills the page and the panel opens
+   at its right; on a phone it rises from below. Nothing is outlined: the
+   panel is a quiet fill, each login on it a slip of paper laid on that;
+   what floats beside a ring is a small solid disc. */
+
+.machines-page {
+  container: machines / inline-size;
+}
+
+.machines-layout {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: var(--space-4);
+  padding: 0 var(--gutter) var(--gutter);
+}
+
+.machines-layout[hidden] {
+  display: none;
+}
+
+.machines-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 300px;
+  border-radius: var(--radius-l);
+  overflow: hidden;
+}
+
+/* The details lie over the drawing's right side when opened: the drawing
+   keeps its place and its size, so nothing on it jumps. */
+.machines-layout > .machine-panel {
+  position: absolute;
+  top: 0;
+  right: var(--gutter);
+  bottom: var(--gutter);
+  z-index: 8;
+  width: min(380px, 42%);
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  animation: map-panel-in var(--fold) var(--fold-easing) both;
+}
+
+@keyframes map-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+}
+
+:root[data-reduced] .machines-layout > .machine-panel {
+  animation: none;
+}
+
+/* In no network: the film of what a network is for, as large as the page
+   allows, a sentence on the hub under it, and the two ways into one, all
+   on one screen. */
+.machines-intro {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  padding: var(--space-6) var(--space-5) var(--space-8);
+}
+
+.machines-intro[hidden] {
+  display: none;
+}
+
+.machines-film {
+  width: min(100%, 1040px, calc((100dvh - 300px) * 16 / 9));
+}
+
+.machines-hub-is {
+  margin: 0;
+  max-width: 34em;
+  text-align: center;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.machines-ways {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.machines-ways a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+/* The drawing: graph paper that moves with it, a fine line every step and
+   a firmer one every fourth (their size and offset follow the camera). The
+   same paper under the drawing as a picture on another page. */
+:is(.machines-canvas .machine-map, .machine-map.map-still) {
+  --canvas-ink: var(--text);
+  --canvas-selection: var(--accent);
+  --canvas-paper: var(--bg);
+  --paper-step: 32px;
+  --paper-x: 0px;
+  --paper-y: 0px;
+}
+
+/* The paper fades out toward the edges. */
+:is(.machines-canvas .machine-map, .machine-map.map-still)::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--pen-graphite) 10%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--pen-graphite) 10%, transparent) 1px, transparent 1px),
+    linear-gradient(color-mix(in srgb, var(--pen-graphite) 20%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--pen-graphite) 20%, transparent) 1px, transparent 1px);
+  background-size:
+    var(--paper-step) var(--paper-step),
+    var(--paper-step) var(--paper-step),
+    calc(var(--paper-step) * 4) calc(var(--paper-step) * 4),
+    calc(var(--paper-step) * 4) calc(var(--paper-step) * 4);
+  background-position: var(--paper-x) var(--paper-y);
+  mask-image: radial-gradient(ellipse 70% 72% at 50% 50%, black 45%, transparent 100%);
+}
+
+.machine-map .canvas-ink {
+  mix-blend-mode: var(--pen-blend);
+}
+
+/* The ring chosen is circled in clay by the drawing, not outlined. */
+.machine-map .canvas-object[aria-pressed="true"],
+.machine-map .canvas-object[data-valid="true"],
+.machine-map .canvas-object[data-target="true"] {
+  box-shadow: none;
+}
+
+.machine-map .canvas-object {
+  transition: background-color var(--hover) ease;
+}
+
+.machine-map .canvas-object:hover,
+.machine-map .canvas-object[data-pointed="true"] {
+  background: color-mix(in srgb, var(--fill) 70%, transparent);
+}
+
+/* While a handle is dragged, where it may go is shaded a little, and the
+   one under it more. */
+.machine-map .canvas-object[data-valid="true"] {
+  background: color-mix(in srgb, var(--pen-clay) 10%, transparent);
+}
+
+.machine-map .canvas-object[data-target="true"] {
+  background: color-mix(in srgb, var(--pen-clay) 24%, transparent);
+}
+
+/* The handle on the chosen machine's line: a blot of clay to pull. */
+.machine-map .canvas-handle {
+  display: grid;
+  place-items: center;
+  font-size: 0;
+  color: transparent;
+  cursor: grab;
+}
+
+.machine-map .canvas-handle::after {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border-radius: 46% 54% 43% 57% / 55% 45% 58% 42%;
+  background: var(--pen-clay);
+  transition: transform var(--hover) ease;
+}
+
+.machine-map .canvas-handle:hover::after,
+.machine-map .canvas-handle:focus-visible::after {
+  transform: scale(1.35);
+}
+
+.machine-map .canvas-name {
+  padding: 1px 6px;
+  border-radius: var(--radius-s);
+  /* The paper shows through a little, so a line passing under a name does
+     not run through its letters. */
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  font-family: var(--font-emphasis);
+  font-size: var(--size-ui);
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.machine-map .canvas-name[data-label^="hub:"] {
+  font-family: var(--font-reading);
+  font-size: var(--size-small);
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+
+.machine-map .canvas-name[data-label^="add:"] {
+  font-family: var(--font-reading);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.machine-map .canvas-controls {
+  border-radius: var(--radius-m);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  color: var(--text-2);
+}
+
+/* Drawn live over the ink: the clay circle round the one chosen, drawn in
+   as a hand circles a word; the circle round one just come; strokes moving
+   along a line something works on. */
+.map-live {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.map-live .clay path {
+  fill: var(--pen-clay);
+}
+
+.map-live .chosen {
+  animation: paper-in 0.35s cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+.map-live .arrived {
+  animation: arrived 1.4s cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+/* The machines that can take the server, while its new place is chosen:
+   their clay rings breathe; the rest of the names are faint. */
+.map-live .lit {
+  opacity: 0.6;
+  animation: paper-in 0.35s cubic-bezier(0.33, 1, 0.68, 1) both, lit-breathe 2.4s ease-in-out 0.35s infinite;
+}
+
+.map-live .moons path {
+  fill: var(--text-2);
+}
+
+.map-names .machine-name.unlit {
+  opacity: 0.35;
+}
+
+@keyframes lit-breathe {
+  50% {
+    opacity: 0.95;
+  }
+}
+
+.map-live .flow {
+  fill: none;
+  stroke: var(--pen-clay);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-dasharray: 3 14 6 11;
+  animation: pen-flow 2.8s linear infinite;
+}
+
+/* A way asked for and not yet taken: a pencil line, dashed, still being
+   drawn toward where it was asked to go. */
+.map-live .asked {
+  fill: none;
+  stroke: var(--pen-clay);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-dasharray: 5 9;
+  opacity: 0.85;
+  animation: pen-flow-slow 3.4s linear infinite;
+}
+
+@keyframes pen-flow-slow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+/* The pencil line following a dragged handle; clay over a place it may be
+   dropped. */
+.map-draft {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.map-draft path {
+  fill: var(--pen-graphite);
+  opacity: 0.7;
+}
+
+.map-draft path.over {
+  fill: var(--pen-clay);
+  opacity: 1;
+}
+
+@keyframes paper-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The dash pattern above is 34 long: one length a cycle moves it on. */
+@keyframes pen-flow {
+  to {
+    stroke-dashoffset: -34;
+  }
+}
+
+@keyframes arrived {
+  0% {
+    opacity: 0;
+  }
+  30% {
+    opacity: 1;
+  }
+}
+
+/* What can be done to the one chosen, floating round it. */
+.map-acts {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.map-act {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: paper-in 0.2s ease both;
+}
+
+.map-act:hover,
+.map-act:focus-visible {
+  color: var(--text-strong);
+  background: var(--fill-strong);
+}
+
+.map-act.danger:hover,
+.map-act.danger:focus-visible {
+  color: var(--wrong);
+}
+
+/* A setting that is on, such as open sign-up: washed in clay. */
+.map-act.on {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-wash) 70%, var(--bg-elevated));
+}
+
+/* A change taken back, undone for a moment from the corner. */
+.map-undo {
+  position: absolute;
+  left: var(--space-3);
+  bottom: var(--space-3);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--size-small);
+  color: var(--text-2);
+  animation: paper-in 0.2s ease both;
+}
+
+/* The menu of the right button, or of a long press. */
+.map-menu {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  min-width: 11em;
+  padding: var(--space-1);
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+.map-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--size-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.map-menu-item:hover,
+.map-menu-item:focus-visible {
+  outline: 0;
+  color: var(--text-strong);
+  background: var(--fill);
+}
+
+.map-menu-item.danger:hover,
+.map-menu-item.danger:focus-visible {
+  color: var(--wrong);
+}
+
+/* On a phone the menu rises from below, half the screen at most. */
+.map-menu.as-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  z-index: 20;
+  max-height: 60dvh;
+  padding: var(--space-3) var(--space-3) calc(var(--space-4) + var(--safe-bottom));
+  border-radius: var(--radius-l) var(--radius-l) 0 0;
+  animation: map-sheet-rise 0.22s cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+.map-menu.as-sheet .map-menu-item {
+  min-height: 48px;
+}
+
+/* Whose menu a sheet is, where nothing chosen above it says. */
+.map-menu-head {
+  margin: 0 0 var(--space-2);
+  padding: 0 var(--space-2);
+  font-family: var(--font-reading);
+  font-size: 17px;
+  color: var(--text-strong);
+}
+
+@keyframes map-sheet-rise {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+/* The card shown where a handle is dropped, or where a machine is made a
+   relay: the way before and after, one sentence, details folded away. */
+.map-card {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(320px, calc(100% - 16px));
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  outline: none;
+  animation: paper-in 0.2s ease both;
+}
+
+.map-card.as-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  z-index: 20;
+  width: auto;
+  max-height: 60dvh;
+  overflow: auto;
+  padding: var(--space-4) var(--space-4) calc(var(--space-4) + var(--safe-bottom));
+  border-radius: var(--radius-l) var(--radius-l) 0 0;
+  animation: map-sheet-rise 0.22s cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+.map-card-pictures {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-3);
+}
+
+.map-card-picture {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  overflow: visible;
+}
+
+.map-card-picture .ink {
+  mix-blend-mode: var(--pen-blend);
+}
+
+.map-card-picture .graphite {
+  fill: var(--pen-graphite);
+  opacity: 0.9;
+}
+
+.map-card-picture .clay {
+  fill: var(--pen-clay);
+}
+
+.map-card-picture text {
+  fill: var(--text-3);
+  font-family: var(--font-reading);
+  font-size: 9px;
+}
+
+/* What a card says once its change is made, such as where a person just
+   added logs in: names in a column, values beside them. */
+.map-card-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 6px var(--space-4);
+  margin: 0;
+  font-size: var(--size-ui);
+}
+
+.map-card-facts dt {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.map-card-facts dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.map-card-said,
+.map-card-title {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--size-ui);
+}
+
+.map-card-wrong {
+  margin: 0;
+  color: var(--wrong);
+  font-size: var(--size-small);
+}
+
+.map-card-more {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.map-card-more summary {
+  cursor: pointer;
+  width: max-content;
+}
+
+.map-card-more p {
+  margin: var(--space-1) 0 0;
+  line-height: 1.55;
+}
+
+.map-card-acts {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.map-card-go {
+  color: var(--text-strong);
+}
+
+@media (pointer: coarse) {
+  .map-card-acts .text-button,
+  .map-card-more summary {
+    min-height: 44px;
+  }
+}
+
+@media (pointer: coarse) {
+  .map-act {
+    width: 44px;
+    height: 44px;
+  }
+
+  .map-menu-item {
+    min-height: 44px;
+  }
+}
+
+.machines-layout .panel-close {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+}
+
+/* What is known of the one pointed at. */
+.machine-panel {
+  min-height: 0;
+  padding: var(--space-5);
+  border-radius: var(--radius-l);
+  background: var(--fill);
+}
+
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px var(--space-2);
+}
+
+.panel-head .dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-full);
+  background: var(--text-2);
+}
+
+.panel-head.offline .dot,
+.panel-head.unknown .dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.4px var(--text-3);
+}
+
+.panel-head.assist .dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.8px var(--accent);
+}
+
+.panel-head .knot {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: var(--radius-full);
+  box-shadow: inset 0 0 0 2px var(--text-2);
+}
+
+.panel-title {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+  font-size: var(--size-h2);
+  line-height: var(--leading-heading);
+  color: var(--text-strong);
+}
+
+.panel-head .tag {
+  align-self: center;
+}
+
+.panel-state {
+  flex-basis: 100%;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.panel-head.offline .panel-state {
+  color: var(--caution);
+}
+
+.panel-facts,
+.panel-what,
+.panel-home {
+  margin: var(--space-2) 0 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.panel-home {
+  display: flex;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: 2px;
+}
+
+.panel-home code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  color: var(--text-2);
+}
+
+.panel-hubs {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+}
+
+.panel-hub {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.panel-hub-name {
+  color: var(--text-2);
+}
+
+.panel-hub.stopped,
+.panel-hub.stopped .panel-hub-name {
+  color: var(--caution);
+}
+
+/* Whom it is shared with, or whom a login of it assists, each a pill
+   ended with its cross, and the way to give it to another at the end. */
+.given-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--space-3);
+}
+
+.given-label {
+  margin-right: 2px;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.given-row .quiet-button,
+.host-home .given-row .text-button {
+  height: 24px;
+  margin-left: 0;
+  padding: 0 var(--space-2);
+}
+
+.panel-said {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-3) 0 0;
+  font-size: var(--size-small);
+  color: var(--text-2);
+  cursor: default;
+}
+
+.panel-said .glyph {
+  flex: none;
+  color: var(--accent);
+}
+
+.panel-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: var(--space-4) 0 0 calc(-1 * var(--space-3));
+}
+
+/* Inside the panel the parts of a machine stand flush, not set in under
+   a dot as on a list. */
+.machine-panel .machine-agents,
+.machine-panel .machine-hosts,
+.machine-panel .machine-jobs,
+.machine-panel .machine-hosts-asking,
+.machine-panel .machine-note {
+  padding-left: 0;
+}
+
+.machine-panel .machine-agents {
+  margin-top: var(--space-4);
+}
+
+.machine-panel .machine-hosts {
+  margin-top: var(--space-5);
+  gap: var(--space-4);
+}
+
+.machine-panel .host-homes {
+  gap: 6px;
+}
+
+/* Each login a slip laid on the panel. */
+.machine-panel .host-home {
+  gap: 4px;
+  padding: var(--space-3);
+  border-left: 0;
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+}
+
+.machine-panel .host-home .given-row {
+  margin-top: 4px;
+}
+
+.machine-panel .home-add-open {
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.machine-panel .home-add {
+  padding-left: 0;
+}
+
+
+/* A hub: the account's level there, who administers it, and the ways to
+   let a device in or manage its accounts, a slip for each login on it. */
+.panel-logins {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+}
+
+.panel-login {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+}
+
+.panel-login-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.panel-login-name .glyph {
+  color: var(--text-3);
+}
+
+.panel-login .panel-said {
+  margin-top: 0;
+}
+
+.panel-login-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.panel-login-acts a.text-button {
+  text-decoration: none;
+}
+
+/* A narrow page (a phone, or a tablet with the sidebar open): the drawing
+   above, a little under half the height, the panel scrolling in what is
+   left. */
+@container machines (max-width: 860px) {
+  .machines-layout {
+    gap: var(--space-2);
+    padding: 0 var(--space-4) var(--space-4);
+  }
+
+  /* What is known of the one chosen rises from below, over the drawing. */
+  .machines-layout > .machine-panel {
+    position: fixed;
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 15;
+    width: auto;
+    max-height: 60dvh;
+    padding: var(--space-4) var(--space-4) calc(var(--space-5) + var(--safe-bottom));
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
+    box-shadow: var(--shadow-pop);
+    animation: map-sheet-rise 0.24s cubic-bezier(0.33, 1, 0.68, 1) both;
+  }
+
+  /* Solid, so the drawing beneath does not show through. */
+  .machines-layout > .machine-panel {
+    padding-top: var(--space-5);
+    background: var(--bg-elevated);
+  }
+
+  /* The grip the sheet is pulled up or down by. */
+  .sheet-grip {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 88px;
+    height: 28px;
+    transform: translateX(-50%);
+    display: grid;
+    place-items: center;
+    touch-action: none;
+  }
+
+  .sheet-grip::before {
+    content: "";
+    width: 36px;
+    height: 4px;
+    border-radius: var(--radius-full);
+    background: var(--text-3);
+    opacity: 0.6;
+  }
+
+  /* The actions are a row in the sheet; the panel's own buttons for them
+     and the way to the agents would say them twice. */
+  .machine-panel .panel-acts,
+  .machine-panel .panel-agents {
+    display: none;
+  }
+
+  /* Pulled down, the sheet is the name and the actions. */
+  .machine-panel.peek .panel-facts,
+  .machine-panel.peek .panel-home,
+  .machine-panel.peek .panel-hubs,
+  .machine-panel.peek .panel-give,
+  .machine-panel.peek .panel-logins,
+  .machine-panel.peek .panel-said,
+  .machine-panel.peek .machine-agents,
+  .machine-panel.peek .machine-jobs {
+    display: none;
+  }
+
+  .sheet-acts {
+    display: grid;
+    grid-template-columns: repeat(var(--acts, 5), minmax(0, 1fr));
+    gap: 2px;
+    margin: var(--space-3) 0 var(--space-2);
+  }
+
+  .sheet-act {
+    display: grid;
+    justify-items: center;
+    align-content: center;
+    gap: 5px;
+    min-height: 60px;
+    padding: var(--space-2) 2px;
+    border-radius: var(--radius-m);
+    color: var(--text-2);
+    font-size: var(--size-small);
+    line-height: 1.3;
+    text-align: center;
+    background: none;
+  }
+
+  .sheet-act:active {
+    background: var(--hairline);
+  }
+
+  .sheet-act span {
+    white-space: nowrap;
+  }
+
+  /* A setting, or what cannot be taken back: a whole row each, a solid
+     fill a shade off the sheet, the switch or nothing at its end. */
+  .sheet-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: var(--space-1) 0 var(--space-3);
+  }
+
+  .sheet-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: 48px;
+    padding: 0 var(--space-4);
+    border-radius: var(--radius-m);
+    background: var(--fill);
+    color: var(--text);
+    font-size: var(--size-ui);
+    text-align: left;
+  }
+
+  .sheet-row:active {
+    background: var(--fill-strong);
+  }
+
+  .sheet-row .glyph {
+    color: var(--text-2);
+  }
+
+  .sheet-row-label {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sheet-row.danger,
+  .sheet-row.danger .glyph {
+    color: var(--wrong);
+  }
+
+  /* While the sheet is up the zoom bar would sit on it; two fingers zoom. */
+  .machines-layout:has(> .machine-panel:not([hidden])) .canvas-controls {
+    display: none;
+  }
+}
+
+:root[data-reduced] .map-live .flow,
+:root[data-reduced] .map-live .chosen,
+:root[data-reduced] .map-live .arrived,
+:root[data-reduced] .map-live .asked,
+:root[data-reduced] .map-act,
+:root[data-reduced] .map-menu.as-sheet,
+:root[data-reduced] .map-card,
+:root[data-reduced] .map-card.as-sheet,
+:root[data-reduced] .machines-layout > .machine-panel {
+  animation: none;
+}
+
+/* The ways a chosen machine tries in turn, when the one it is on fails: a
+   faint dashed line each, and a number on each line; a relay's number is
+   dragged onto another's to swap them. */
+.map-live .fallback {
+  fill: none;
+  stroke: var(--pen-graphite);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-dasharray: 2 7;
+  opacity: 0.55;
+}
+
+.map-orders {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.map-order {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  font-size: var(--size-small);
+  font-variant-numeric: tabular-nums;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+}
+
+.map-order.current {
+  background: var(--pen-clay);
+  color: var(--bg);
+}
+
+.map-order:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.map-order.dragging {
+  z-index: 1;
+  cursor: grabbing;
+  box-shadow: var(--shadow-pop), 0 0 0 3px color-mix(in srgb, var(--pen-clay) 35%, transparent);
+}
+
+.map-card-was {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--size-small);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-3) 60%, transparent);
+}
+
+@media (pointer: coarse) {
+  .map-order {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+/* The hub's record of changes: a disc in the drawing's top corner, and the
+   list it opens; on a phone the list rises from below. */
+.map-log-open {
+  position: absolute;
+  left: var(--space-3);
+  top: var(--space-3);
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+.map-log-open:hover,
+.map-log-open[aria-expanded="true"] {
+  color: var(--text);
+}
+
+@media (pointer: coarse) {
+  .map-log-open {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.map-log {
+  position: absolute;
+  left: var(--space-3);
+  top: calc(var(--space-3) + 44px);
+  z-index: 4;
+  width: min(380px, calc(100% - 2 * var(--space-3)));
+  max-height: min(70%, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  border-radius: var(--radius-m);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+.map-log.as-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: auto;
+  bottom: 0;
+  z-index: 21;
+  width: auto;
+  max-height: 64dvh;
+  padding-bottom: calc(var(--space-4) + var(--safe-bottom));
+  border-radius: var(--radius-l) var(--radius-l) 0 0;
+  animation: map-sheet-rise 0.22s cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+.map-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.map-log-logins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 var(--space-2);
+}
+
+.map-log-logins .chip.current {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.map-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.map-log-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  column-gap: var(--space-2);
+  row-gap: 2px;
+  padding: var(--space-2) 0;
+}
+
+.map-log-row + .map-log-row {
+  border-top: 1px solid var(--divider);
+}
+
+.map-log-mark {
+  grid-row: span 2;
+  padding-top: 2px;
+  color: var(--text-3);
+}
+
+.map-log-said {
+  font-size: var(--size-ui);
+  color: var(--text);
+}
+
+.map-log-by {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.map-log-row.refused .map-log-mark,
+.map-log-row.refused .map-log-said {
+  color: var(--accent);
+}
+
+.map-log-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.map-log-note.wrong {
+  color: var(--wrong);
+}
+
+.map-log-earlier {
+  margin-top: var(--space-2);
+}
+
+:root[data-reduced] .map-log.as-sheet {
+  animation: none;
+}
+
+/* The addresses a machine may be reached at, chosen as solid pills; the
+   chosen ones washed in clay. */
+.map-card-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.map-card-field legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.map-card-choice {
+  cursor: pointer;
+}
+
+.map-card-choice input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.map-card-choice:has(input:checked) {
+  color: var(--text-strong);
+  background: var(--accent-wash);
+}
+
+.map-card-choice:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.map-card-port input {
+  width: 7em;
+}
+
+.map-card-wrong.quiet {
+  color: var(--text-3);
+}
+
+/* One small drawing on its own keeps to the size of two side by side. */
+.map-card-pictures > .map-card-picture:only-child {
+  flex: 0 1 60%;
+}
+
+/* A machine's group: its owner's groups as solid pills, the one it is in
+   washed in clay, and a field below that names a new one. */
+.group-choices {
+  margin-top: var(--space-1);
+}
+
+.map-card .group-new,
+.map-card .group-rename {
+  margin-top: var(--space-1);
+}
+
+/* Machines framed together: each a row to open it by, solid, no lines. */
+.framed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: var(--space-3) 0;
+  padding: 0;
+  list-style: none;
+}
+
+.framed-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-m);
+  background: var(--fill);
+  color: var(--text);
+  font-size: var(--size-ui);
+  text-align: left;
+}
+
+.framed-row:hover {
+  background: var(--fill-strong);
+}
+
+.framed-row .dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--text-2);
+}
+
+.framed-row.offline .dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.4px var(--text-3);
+}
+
+.framed-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.framed-sub {
+  flex: none;
+  color: var(--text-3);
+  font-size: var(--size-small);
+}
+
+/* A machine's direct links in its details: the ones up, then those down
+   with why, quieter; where others connect to it, under them. Its label
+   keeps its own column, the list wraps in the next. */
+.panel-direct {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px var(--space-2);
+  margin: var(--space-3) 0 0;
+  font-size: var(--size-ui);
+}
+
+.panel-direct-list {
+  min-width: 0;
+  color: var(--text-2);
+}
+
+.panel-direct .direct-down {
+  color: var(--text-3);
+}
+
+.panel-direct .sep {
+  margin: 0 6px;
+  color: var(--text-3);
+}
+
+.panel-direct-at {
+  grid-column: 2;
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* The machines drawing writes its names on the paper, where they zoom with
+   it; the canvas keeps its own only for those who hear the drawing. */
+.machine-map .canvas-name {
+  display: none;
+}
+
+.map-boxes,
+.map-names {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* A group's box, as a comment box in a blueprint: a wash for the body, a
+   deeper one for the title strip, no line round either. */
+.map-boxes .box-body {
+  fill: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.map-boxes .box-title {
+  fill: color-mix(in srgb, var(--text) 9%, transparent);
+}
+
+.map-boxes .mine .box-body {
+  fill: color-mix(in srgb, var(--pen-clay) 7%, transparent);
+}
+
+.map-boxes .mine .box-title {
+  fill: color-mix(in srgb, var(--pen-clay) 16%, transparent);
+}
+
+.map-boxes .assist .box-body {
+  fill: color-mix(in srgb, var(--pen-clay) 4%, transparent);
+}
+
+.map-boxes .assist .box-title {
+  fill: color-mix(in srgb, var(--pen-clay) 9%, transparent);
+}
+
+/* A group's band across its owner's box: over the body's wash, lighter
+   than the title strip, so the box stays one with its groups in it. */
+.map-boxes .box-band {
+  fill: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
+.map-boxes .mine .box-band {
+  fill: color-mix(in srgb, var(--pen-clay) 9%, transparent);
+}
+
+/* A person who is locked: their box faint. */
+.map-boxes .locked {
+  opacity: 0.45;
+}
+
+.map-names text {
+  font-family: var(--font-reading);
+}
+
+.map-names .hub-name {
+  fill: var(--text-strong);
+  font-size: 15px;
+}
+
+.map-names .hub-sub {
+  fill: var(--text-3);
+  font-size: 11px;
+}
+
+.map-names .box-name {
+  fill: var(--text-strong);
+  font-size: 14px;
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+}
+
+.map-names .box-count {
+  fill: var(--text-3);
+  font-size: 12px;
+  font-family: var(--font-reading);
+  font-weight: 400;
+}
+
+.map-names .box-name.band {
+  font-size: 13px;
+}
+
+.map-names .box-name.locked {
+  fill: var(--text-3);
+}
+
+/* The dashed box that adds a person says so in the quiet hand of the dashed
+   ring that adds a machine. */
+.map-names .box-name.adding {
+  fill: var(--text-3);
+  font-family: var(--font-reading);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+/* A person's "⋯" at the end of their box's strip, and the lock before it
+   while they are locked. */
+.map-names .box-more circle {
+  fill: var(--text-2);
+}
+
+.map-names .box-lock {
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+}
+
+/* The "⋯" is pressed over the strip that folds the box: it lies above it. */
+.machines-canvas .machine-map .canvas-object[data-item^="who:"],
+.machines-canvas .machine-map .canvas-object[data-item^="gm:"] {
+  z-index: 1;
+}
+
+/* The arrow before a box's name: down while it is open, right while it is
+   folded to its strip. */
+.map-names .box-arrow {
+  fill: none;
+  stroke: var(--text-2);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The whole strip is what folds the box: under the pointer it deepens as
+   one piece, its own shape, never a disc. */
+.machines-canvas .machine-map .canvas-object[data-kind="group"]:hover,
+.machines-canvas .machine-map .canvas-object[data-kind="group"][data-pointed="true"] {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.map-names .machine-name {
+  fill: var(--text);
+  font-size: 13px;
+}
+
+.map-names .machine-name.quiet {
+  fill: var(--text-3);
+}
+
+.map-names .machine-sub {
+  fill: var(--text-3);
+  font-size: 10.5px;
+}
+
+/* Drawn small as a picture on another page, the names grow back by
+   --name-grow to stay readable (`machine-map.ts`). */
+.machine-map.map-still .map-names .hub-name { font-size: calc(15px * var(--name-grow, 1)); }
+.machine-map.map-still .map-names .hub-sub { font-size: calc(11px * var(--name-grow, 1)); }
+.machine-map.map-still .map-names .box-name { font-size: calc(14px * var(--name-grow, 1)); }
+.machine-map.map-still .map-names .box-count { font-size: calc(12px * var(--name-grow, 1)); }
+.machine-map.map-still .map-names .machine-name { font-size: calc(13px * var(--name-grow, 1)); }
+.machine-map.map-still .map-names .machine-sub { font-size: calc(10.5px * var(--name-grow, 1)); }
+
+.machine-map.map-still .canvas-object {
+  cursor: pointer;
+}
+
+/* Choosing the server's new place: a strip over the bottom of the drawing,
+   what to do and the other ways, and why a machine pressed cannot. */
+.map-choose {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--space-4) + var(--safe-bottom));
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: calc(100% - 2 * var(--space-3));
+  padding: 8px 8px 8px 16px;
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  font-size: var(--size-small);
+  transform: translateX(-50%);
+}
+
+.map-choose-said {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-choose-said.why {
+  color: var(--caution);
+}
+
+/* The server's move in its details: the steps ticked as on the removal
+   list, what waits for someone, and the old place. */
+.move-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.move-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font: inherit;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.move-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.move-steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.move-steps li.now {
+  color: var(--text);
+}
+
+.move-error {
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--caution);
+}
+
+.move-command {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.move-command code {
+  padding: 4px 8px;
+  border-radius: var(--radius-s);
+  background: var(--field);
+  font-size: var(--size-small);
+}
+
+.move-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.move-carries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 var(--space-3);
+}
+
+.move-sleeps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+/* In a network, the film of what one is for, again: the last word of the
+   line of hints under the drawing, as quiet as they are. */
+.canvas-hints .machines-film-again {
+  min-height: 0;
+  height: 18px;
+  margin-left: var(--space-2);
+  padding: 0 4px;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.canvas-hints .machines-film-again:hover {
+  color: var(--text);
+}

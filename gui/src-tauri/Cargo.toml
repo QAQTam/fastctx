@@ -1,0 +1,89 @@
+[package]
+name = "fastctx-gui"
+description = "The World's graphical interface: a Tauri shell around the web front end, reaching the World through the core's client"
+version = "1.0.1-beta.1"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+publish = false
+
+# Its own workspace: the shell's dependencies stay out of the core's builds
+# and tests, and the core is reached by path.
+[workspace]
+
+[patch.crates-io]
+pdf_oxide = { path = "../../vendor/pdf_oxide" }
+
+[features]
+page-sandbox-probe = ["tauri-plugin-world-pages/probe"]
+
+[lib]
+name = "fastctx_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+fastctx-client = { path = "../../crates/fastctx-client" }
+# Async commands with their bodies on the heap: see the crate.
+fastctx-gui-command = { path = "command" }
+fastctx-net = { path = "../../crates/fastctx-net" }
+fastctx-platform = { path = "../../crates/fastctx-platform" }
+fastctx-types = { path = "../../crates/fastctx-types" }
+jiff = "0.2"
+serde = { version = "1", features = ["derive"] }
+# A watched conversation is kept as the JSON the page reads (`transcript.rs`).
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+# Links leave the app for the system's browser, on a computer and a phone.
+tauri-plugin-opener = "2.7"
+tauri-plugin-world-pages = { path = "page-sandbox" }
+tokio = { version = "1", features = ["sync", "fs", "io-util"] }
+tempfile = "3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
+# Joining a World, founding a hub and putting the World's tools into the
+# hosts happen on a computer, never on a phone.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+fastctx-hub = { path = "../../crates/fastctx-hub" }
+fastctx-install = { path = "../../crates/fastctx-install" }
+# The window opens where and as large as it was left.
+tauri-plugin-window-state = "2.5"
+# New versions of the app come from the project's GitHub releases, signed.
+tauri-plugin-updater = "2.13"
+# A World made on a server is made over SSH from here: ring, as the rest of
+# the World's TLS, so no second crypto library is built.
+russh = { version = "0.64.1", default-features = false, features = ["ring", "rsa", "flate2"] }
+
+[target.'cfg(windows)'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1", features = ["net", "io-util"] }
+uuid = { version = "1", features = ["v4"] }
+windows = { version = "0.62", features = [
+  "Data_Xml_Dom", "Foundation", "UI_Notifications",
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
+  "Win32_Graphics_Dwm", "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Environment",
+  "Win32_System_Diagnostics_ToolHelp", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Registry",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Ole", "Win32_System_SystemServices",
+  "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_Controls", "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging",
+] }
+windows-registry = "0.6"
+windows-core = "0.62"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.12.3", default-features = false, features = ["tokio"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"

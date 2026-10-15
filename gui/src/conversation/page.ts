@@ -1,0 +1,2005 @@
+// A conversation's page: who it is with and what they are doing, the
+// conversation itself in a region that scrolls on its own, and the words
+// the user is about to send, always at the foot.
+
+import { layerOpened } from "../app/back";
+import { FocusPanel, focusSummary, type FocusPlace } from "../app/focus-panel";
+import type { ComposerWords, FocusWords } from "../app/words";
+import { sameFocus, type Focus, type Folders } from "../world/focus";
+import type { Words } from "../words";
+import type { Control, Controlled, Offers } from "../world/control";
+import type { Attachment } from "../world/attachments";
+import type { AttachmentSource } from "../world/files";
+import type { Decoding } from "../world/remote-lines";
+import type { ResidentDetail, ResidentNow } from "../world/world";
+import { AttachTray, type AttachSeam, type AttachWords, type Attached } from "./attach";
+import { SendQueue, type Queued } from "./queue";
+import { bindComposer, type ComposerSession, type ComposerSessionState } from "./composer";
+import type { ComposerSnapshot, ComposerUpdated } from "../world/composer";
+import { NodeQueue } from "./node-queue";
+import { NodeTray, type AssistantFiles } from "./node-tray";
+import { Menu, commandFor, commandRow, commandsOf, usageOf, type MenuCommand } from "./commands";
+import { ModelPanel, enModelPanel, zhModelPanel } from "./model-panel";
+import { effortLabel } from "./effort-slider";
+import { fileRow, mentionAt, mentioned, type FileWords, type FoundFile } from "./mention";
+import type { Details } from "./details";
+import { FileLinks } from "./file-links";
+import { JobsPanel, type Job, type OutputLines } from "./jobs-panel";
+import { AgentsPanel } from "./agents-panel";
+import type { AgentActivity, Tool } from "../world/events";
+import { Pictures, type PictureSeams } from "./pictures";
+import type { HeldRead } from "../world/reads";
+import { glyph } from "./glyphs";
+import type { Conversation, Held } from "./conversation";
+import type { Entry, Gap } from "./model";
+import { escape, render } from "./prose";
+import { shownOf, skillsHtml } from "./said";
+import { Finder } from "./find";
+import { FarFind } from "./find-far";
+import { UsageBadge, ring } from "./usage-badge";
+import { UsagePop } from "./usage-pop";
+import { ContextSheet } from "./context-sheet";
+import type { CallSpan } from "./context-steps";
+import { headline } from "./tool";
+import { ConversationView, modelName } from "./view";
+import { departureOf } from "./flight";
+import { detailOf } from "../app/problem";
+import { DraftFit } from "./fit-draft";
+import { Popover } from "./popover";
+import { Steady } from "../app/steady";
+
+/** How many events the page holds at most, and how many its latest part
+ *  holds before what comes before its newest turns is let go, down to how
+ *  many (`ConversationPage.bound`). */
+const HELD_MOST = 6000;
+/** How many screens from what is in view a part may be and still be held,
+ *  whatever the page holds: the reader goes on into it. */
+const KEEP_SCREENS = 3;
+const LATEST_MOST = 2400;
+const LATEST_KEPT = 800;
+
+export interface Someone {
+  /** "Claude" or "Codex": the agent by the name it goes by. */
+  agent: string;
+  /** The machine it lives on. */
+  machine: string;
+  /** Whose agent it is, for one of another account assisting the user: it
+   *  works on no machine by default, each command naming one. */
+  assistFrom?: string | null;
+  /** The machines and folders it is pointed at; null for a conversation
+   *  the user cannot point, one they did not open from here. */
+  focus?: Focus | null;
+  model: string | null;
+  /** The project it is in, by the name the user gave it. */
+  project: string | null;
+}
+
+/** What came of words sent: a turn this conversation will see end; taken,
+ *  but into a turn whose end it will not see (delivery uncertain, or a host
+ *  that tells the World nothing of its turns); or not taken. */
+export type Sent = "turn" | "unseen" | "failed";
+
+export interface PageOptions {
+  words: Words;
+  here: string;
+  someone: Someone;
+  /** The head every page has: the way back to the sidebar where it is
+   *  hidden, a title, and actions. */
+  head(title: string, actions?: string): string;
+  /** Where another resident's conversation opens. */
+  link?: (address: { resident: string; machine: string }) => string;
+  /** Opening the files an agent's links name, where the World can bring
+   *  them here; showing one in its folder, where this is a computer. */
+  opening?: {
+    open(machine: string, path: string, held: HeldRead): Promise<void>;
+    openAttachment?: ((attachment: AttachmentSource, held: HeldRead) => Promise<void>) | undefined;
+    reveal?: ((path: string) => Promise<void>) | undefined;
+  };
+  /** The conversation's pictures, from the machines holding them. */
+  pictures?: PictureSeams;
+  conversation: Conversation;
+  /** Pointing it at machines and folders, from the strip at the top. */
+  focus?: {
+    words: FocusWords;
+    places(): FocusPlace[];
+    folders(machine: string, path: string | null): Promise<Folders>;
+    /** Resolves with what was not done of it, in the user's words. */
+    set(focus: Focus): Promise<string[]>;
+  };
+  /** What the user does to the conversation, from the "⋯" in its head
+   *  (`app/talk-menu.ts`): opening that menu, and bringing it back when it
+   *  is archived. */
+  manage?: {
+    words: { more: string; archived: string; restore: string; deleted: string };
+    open(anchor: HTMLElement): void;
+    restore(): void;
+  };
+  /** What the World knows of the agent, shown in a card opened from the
+   *  head, and how to ask for it. */
+  details?: {
+    card: Details;
+    label: string;
+    look(): Promise<ResidentDetail | null>;
+    colleagues(): ResidentNow[];
+  };
+  /** What the conversation offers, and doing it: its commands, its
+   *  model, its usage. */
+  controls?: {
+    words: ComposerWords;
+    offers(): Promise<Offers>;
+    control(what: Control): Promise<Controlled>;
+    /** A fork was made: where it lives. */
+    forked(resident: { resident: string; machine: string }): void;
+    /** Opens a link in the system's browser. */
+    open(url: string): Promise<void>;
+  };
+  /** Where the words being written are kept between visits. */
+  draftKey?: string;
+  /** The input shared by every device with this conversation open, its
+   *  words and queue kept by the node of the agent's machine; where it
+   *  cannot be opened (a node of an older version), the page keeps its own. */
+  composer?: () => Promise<ComposerSession>;
+  /** Attaching files to the words, where the World can carry them. */
+  attach?: {
+    words: AttachWords;
+    seam: AttachSeam;
+    /** Files dropped onto the window, by path, where the shell gives
+     *  them so; returns how to stop listening. */
+    drops?(on: { over(over: boolean): void; dropped(paths: string[]): void }): () => void;
+    /** For an agent assisting the user, which has no machine it works on:
+     *  the machine of the user's its files other than images go to. */
+    filesOn?: AssistantFiles;
+  };
+  /** Files on the agent's machine, found as the user types `@` and a few
+   *  letters; the one chosen goes into the words as its path. */
+  files?: {
+    words: FileWords;
+    find(query: string): Promise<FoundFile[]>;
+    /** Why there is nowhere to look, when there is not: it is in no
+     *  project, or its project lists no place on its machine. */
+    nowhere?(): "outside" | "unlisted" | null;
+  };
+  /** Sends the user's words, and what arrived of what was attached;
+   *  resolves with what came of them. */
+  send(text: string, attached: { refs: unknown[]; shown: Attached[]; filesOn?: string | null }): Promise<Sent> | void;
+  /** Asks the agent to stop; resolves whether a turn was running to stop. */
+  stop(): Promise<boolean> | void;
+  /** Stops one job it started, on the machine it runs on. */
+  stopJob?: ((job: string, machine: string) => Promise<void>) | undefined;
+  /** A job's output as lines from the machine running it, read as it
+   *  grows. */
+  jobOutput?: ((job: Job) => Promise<OutputLines>) | undefined;
+  /** Lines of a file or a job's output on the machine holding them: what a
+   *  write changed, a command's whole output. */
+  lines?: ((machine: string, path: string, decoding: Decoding) => Promise<OutputLines>) | undefined;
+  /** One of the host's own agents' own record, read from the
+   *  conversation's machine as its box opens. */
+  agentRecord?: ((agent: string) => Promise<AgentActivity>) | undefined;
+}
+
+export class ConversationPage {
+  readonly element: HTMLElement;
+  private view: ConversationView;
+  private state: HTMLElement;
+  private context: HTMLElement;
+  /** The conversation's measure in the input's row, and what opens from
+   *  it; where the host offers no controls, the context's share alone. */
+  private badge: UsageBadge | null = null;
+  private usagePop: UsagePop | null = null;
+  /** Its button opens it and closes it; a press outside closes it, as the
+   *  model's panel does; it keeps the size it opened at. */
+  private usagePopover: Popover | null = null;
+  private usageSteady: Steady | null = null;
+  private steps: ContextSheet | null = null;
+  /** What the open pop-up was last drawn from. */
+  private usageDrawn = "";
+  private input: HTMLTextAreaElement;
+  private fitter: DraftFit;
+  private action: HTMLButtonElement;
+  private scroller: HTMLElement;
+  private name: HTMLElement;
+  private looking = 0;
+  private following = true;
+  /** A stop was asked for and the turn has not ended yet. */
+  private stopping = false;
+  /** Words of the shared queue on their way into the turn, by queue item,
+   *  as the conversation shows them meanwhile. */
+  private readonly onTheirWay = new Map<string, string>();
+  private gone: string | null = null;
+  /** Why the watch ended or broke, in the kernel's words, for the hover. */
+  private goneWhy = "";
+  private offered: Offers | null = null;
+  private wasMoving = false;
+  private commandMenu: Menu<MenuCommand> | null = null;
+  private modelPanel: ModelPanel | null = null;
+  private fileMenu: Menu<FoundFile> | null = null;
+  /** The latest `@` question; an answer to an earlier one is not shown. */
+  private mentionAsked = 0;
+  private note: HTMLElement;
+  /** What the note says on hover, worked out when the pointer comes to it,
+   *  for a line that says how long something has been so. */
+  private noteDetail: (() => string) | null = null;
+  /** The links to files and the pictures, whose reads go with the page. */
+  private fileLinks: FileLinks | null = null;
+  private pictures: Pictures | null = null;
+  private chip: HTMLButtonElement;
+  private finder: Finder;
+  private far: FarFind;
+  /** Ctrl+F finds in the conversation while its page is shown. */
+  private readonly findKey = (event: KeyboardEvent) => {
+    if (!this.element.isConnected || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f" || event.altKey) return;
+    event.preventDefault();
+    this.finder.show();
+  };
+
+  constructor(private readonly options: PageOptions) {
+    const { words, someone } = options;
+    this.element = document.createElement("div");
+    this.element.className = "conversation-page";
+    this.element.innerHTML = `
+      ${options.head(
+        `<div class="who">
+        <h1 class="who-name">${escape(someone.agent)}<span class="who-at"> · ${escape(someone.machine)}</span></h1>
+        <div class="who-state"></div>
+      </div>`,
+        `<button class="icon-button find-toggle" type="button" aria-label="${escape(words.find.find)}" title="${escape(words.find.find)}">${glyph("search", 18)}</button>${
+          options.details
+            ? `<button class="icon-button details-toggle" type="button" aria-expanded="false" aria-label="${escape(options.details.label)}" title="${escape(options.details.label)}">${glyph("info", 18)}</button>`
+            : ""
+        }${
+          options.manage
+            ? `<button class="icon-button talk-menu-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="${escape(options.manage.words.more)}">${glyph("more", 20)}</button>`
+            : ""
+        }`,
+      )}
+      <div class="talk-scroller scroller"><div class="conversation"></div></div>
+      <footer class="composer-dock">
+        <button class="to-latest" type="button" hidden aria-label="${escape(words.toLatest)}" title="${escape(words.toLatest)}">${glyph("chevron", 18)}</button>
+        <div class="steps-back" hidden><button class="steps-back-go" type="button">${glyph("chevron", 14)}<span></span></button><button class="steps-back-x" type="button">${glyph("close", 12)}</button></div>
+        <p class="composer-gone" hidden></p>
+        <div class="composer-queue"></div>
+        <form class="composer">
+          <div class="composer-menus"><div class="composer-menu usage-pop" hidden></div><div class="composer-menu said-pop" role="dialog" hidden></div><div class="jobs-pop" role="dialog" hidden></div><div class="agents-pop" role="dialog" hidden></div></div>
+          <div class="composer-confirm" hidden></div>
+          <div class="composer-tray"></div>
+          <textarea rows="1" enterkeyhint="send" placeholder="${escape(words.sendPlaceholder(someone.agent))}" aria-label="${escape(words.sendPlaceholder(someone.agent))}"></textarea>
+          <div class="composer-row">
+            <div class="composer-tools"><button class="icon-button composer-attach" type="button" hidden></button><input class="composer-pick" type="file" multiple hidden><button class="icon-button composer-photo" type="button" hidden></button><input class="composer-shot" type="file" accept="image/*" capture="environment" hidden><button class="composer-chip" type="button" hidden></button><button class="composer-agents" type="button" hidden></button><button class="composer-jobs" type="button" hidden></button></div>
+            <span class="composer-note" aria-live="polite"></span>
+            <button class="composer-context" type="button" hidden></button>
+            <button class="composer-action" type="submit" aria-label="${escape(words.send)}"></button>
+          </div>
+        </form>
+      </footer>`;
+    this.scroller = this.element.querySelector<HTMLElement>(".talk-scroller")!;
+    const transcript = this.element.querySelector<HTMLElement>(".conversation")!;
+    this.finder = new Finder(
+      transcript,
+      this.scroller,
+      words.find,
+      () => {
+        this.following = false;
+      },
+      {
+        findChanges: () => this.view.findChanges(),
+        revealFind: (match) => this.view.revealFind(match),
+        findRange: (match) => this.view.findRange(match),
+        // What the page does not hold is found by the shell, from text the
+        // page reads aside once (`find-far.ts`).
+        far: {
+          search: (query) => this.far.search(query),
+          get more() {
+            return far().more;
+          },
+          get grown() {
+            return far().grown;
+          },
+          held: () => options.conversation.bounds().join(";"),
+          reach: async (at) => {
+            await options.conversation.reach(at);
+            cancelAnimationFrame(this.frame);
+            this.render();
+          },
+          close: () => this.far.close(),
+        },
+      },
+    );
+    const far = () => this.far;
+    this.far = new FarFind(options.conversation, (block) => this.view.findParts(block), () => this.finder.refresh());
+    this.scroller.before(this.finder.element);
+    if (options.focus) {
+      this.focusStrip(options.focus);
+      this.drawFocus();
+    }
+    this.element.querySelector(".find-toggle")!.addEventListener("click", () => (this.finder.open ? this.finder.close() : this.finder.show()));
+    document.addEventListener("keydown", this.findKey);
+    this.name = this.element.querySelector<HTMLElement>(".who-name")!;
+    // The title is renamed in place, where the conversation takes a name.
+    this.name.addEventListener("click", () => this.rename());
+    this.name.addEventListener("keydown", (event) => {
+      if ((event.key === "Enter" || event.key === " ") && !this.renaming && event.target === this.name) {
+        event.preventDefault();
+        this.rename();
+      }
+    });
+    if (options.manage) {
+      const { manage } = options;
+      const toggle = this.element.querySelector<HTMLButtonElement>(".talk-menu-toggle")!;
+      toggle.addEventListener("click", () => manage.open(toggle));
+      this.element.querySelector(".composer-gone")!.addEventListener("click", (event) => {
+        if ((event.target as HTMLElement).closest(".composer-restore")) manage.restore();
+      });
+    }
+    if (options.details) {
+      const { card } = options.details;
+      this.element.append(card.element);
+      const toggle = this.element.querySelector<HTMLButtonElement>(".details-toggle")!;
+      toggle.addEventListener("click", () => this.toggleDetails(!card.open));
+      this.element.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && card.open) this.toggleDetails(false);
+      });
+    }
+    const main = this.element.querySelector<HTMLElement>(".conversation")!;
+    this.state = this.element.querySelector<HTMLElement>(".who-state")!;
+    this.state.addEventListener("pointerenter", () => {
+      if (this.interrupted) this.drawState();
+    });
+    this.spoken = document.createElement("p");
+    this.spoken.className = "spoken";
+    this.spoken.setAttribute("role", "status");
+    this.element.append(this.spoken);
+    this.context = this.element.querySelector<HTMLElement>(".composer-context")!;
+    if (options.controls) {
+      this.badge = new UsageBadge(this.context, options.controls.words.usage);
+      const usagePop = this.element.querySelector<HTMLElement>(".usage-pop")!;
+      this.usagePop = new UsagePop(usagePop, options.controls.words.usage, () => this.openSteps());
+      this.usageSteady = new Steady(usagePop);
+      this.usagePopover = new Popover(usagePop, this.context, () => this.usageSteady?.free());
+    }
+    this.input = this.element.querySelector("textarea")!;
+    this.fitter = new DraftFit(this.input);
+    this.action = this.element.querySelector<HTMLButtonElement>(".composer-action")!;
+    this.note = this.element.querySelector<HTMLElement>(".composer-note")!;
+    this.note.addEventListener("pointerover", () => {
+      if (this.noteDetail) this.note.title = this.noteDetail();
+    });
+    this.queue = new SendQueue(options.draftKey ?? "", words.queue, {
+      now: (item) => this.sendQueued(item, true),
+      changed: () => this.drawAction(),
+    });
+    this.element.querySelector(".composer-queue")!.replaceWith(this.queue.element);
+    this.chip = this.element.querySelector<HTMLButtonElement>(".composer-chip")!;
+    this.input.value = this.draft() ?? "";
+    if (options.controls) this.menus();
+    if (options.files) this.fileMenuOf();
+    this.context.addEventListener("click", () => this.toggleUsage());
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !this.element.querySelector<HTMLElement>(".said-pop")!.hidden) {
+        this.hideSaid();
+        return;
+      }
+      const pop = this.element.querySelector<HTMLElement>(".usage-pop")!;
+      if (event.key !== "Escape" || !this.usagePopover?.open) return;
+      const inside = pop.contains(document.activeElement) || document.activeElement === this.context;
+      this.usagePopover.hide();
+      if (inside) this.context.focus({ preventScroll: true });
+    });
+    if (options.attach) this.attaching(options.attach);
+    if (options.composer) void this.share(options.composer);
+    const controls = options.controls;
+    this.view = new ConversationView(main, options.conversation, {
+      words,
+      english: words.english,
+      scroller: this.scroller,
+      reading: () => {
+        this.following = false;
+      },
+      following: () => this.following,
+      // Turns not held are read as the reader comes near them.
+      near: (gap, side) => void this.fillGap(gap, side),
+      // Words being sent leave from where they were typed.
+      departure: () => departureOf(this.input),
+      questions: {
+        words: words.questions,
+        // Answers go in at once, into the turn if one runs: they never wait
+        // in the queue.
+        answer: async (text) => {
+          const came = await this.options.send(text, { refs: [], shown: [] });
+          if (came === "failed") throw new Error(words.notSent(""));
+        },
+      },
+      here: options.here,
+      residentMachine: someone.machine,
+      link: options.link,
+      asks: controls && {
+        words: controls.words.asks,
+        answer: async (request, answer) => {
+          await controls.control({ do: "answer", request, answer });
+        },
+        open: controls.open,
+        settled: () => this.update(),
+      },
+      turnAct: controls && ((act, turn, words, kept) => this.turnAct(act, turn, words, kept)),
+      lines: options.lines,
+      agentRecord: options.agentRecord,
+    });
+    // The host's own agents as one picture (`agents-panel.ts`): a lane
+    // pressed brings the row of the call that started it into view.
+    this.agents = new AgentsPanel(this.element.querySelector<HTMLButtonElement>(".composer-agents")!, this.element.querySelector<HTMLElement>(".agents-pop")!, {
+      words,
+      show: (run) => {
+        if (this.view.openAgent(run.id)) this.following = false;
+      },
+    });
+    // For how long a way has been broken, and why, as the note says it.
+    const broken = (since: number, why: string) => words.brokenFor(words.took(Date.now() - since), why);
+    if (options.opening) {
+      this.fileLinks = new FileLinks(main, {
+        words: words.files,
+        here: options.here,
+        machine: someone.machine,
+        open: options.opening.open,
+        openAttachment: options.opening.openAttachment,
+        reveal: options.opening.reveal,
+        say: (text) => this.say(text),
+        note: (text, detail) => {
+          this.say(text, detail?.() ?? "");
+          this.noteDetail = detail;
+        },
+        unsay: (text) => {
+          if (this.note.textContent === text) this.say("");
+        },
+        broken,
+      });
+    }
+    if (options.pictures) {
+      this.pictures = new Pictures(main, {
+        words: words.pictures,
+        here: options.here,
+        machine: someone.machine,
+        seams: options.pictures,
+        say: (text) => this.say(text),
+        broken,
+      });
+    }
+
+    // What was read of the conversation from the shell is drawn as it comes.
+    options.conversation.changed = () => this.update({ read: true });
+    this.latest = this.element.querySelector<HTMLButtonElement>(".to-latest")!;
+    this.latest.addEventListener("click", () => this.toLatest());
+    // The way back to each step's context, after one of its rows was
+    // opened here: the page as it was left.
+    const back = this.element.querySelector<HTMLElement>(".steps-back")!;
+    back.querySelector(".steps-back-go")!.addEventListener("click", () => {
+      back.hidden = true;
+      this.openSteps(true);
+    });
+    back.querySelector(".steps-back-x")!.addEventListener("click", () => (back.hidden = true));
+
+    const form = this.element.querySelector("form")!;
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      this.submit();
+    });
+    this.input.addEventListener("input", () => {
+      this.fit();
+      this.drawAction();
+      this.keepDraft();
+      this.slash();
+      this.mention();
+    });
+    this.input.addEventListener("blur", () => {
+      this.commandMenu?.hide();
+      this.fileMenu?.hide();
+    });
+    this.input.addEventListener("keydown", (event) => {
+      for (const menu of [this.fileMenu, this.commandMenu]) {
+        if (menu?.key(event)) {
+          event.preventDefault();
+          return;
+        }
+      }
+      // Enter sends where there is a keyboard; on a touch screen it is a new
+      // line, and the button sends.
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !matchMedia("(pointer: coarse)").matches) {
+        event.preventDefault();
+        this.submit();
+      }
+    });
+    // Whatever grows after it is drawn (fonts, formulas, diagrams, a card
+    // being answered) keeps the newest in view while the reader follows.
+    // The region itself shrinks when the composer grows (an attachment, a
+    // longer draft): the same holds.
+    const keep = new ResizeObserver(() => {
+      if (this.following) this.scroller.scrollTop = this.scroller.scrollHeight;
+    });
+    keep.observe(main);
+    keep.observe(this.scroller);
+    // Only a scroll the reader made says whether they still follow: one
+    // that comes with the region or its content changing size (the
+    // browser keeping the view anchored) does not.
+    let sized = { client: 0, content: 0 };
+    this.scroller.addEventListener("scroll", () => {
+      const { scrollTop, clientHeight, scrollHeight } = this.scroller;
+      this.element.classList.toggle("scrolled", scrollTop > 0);
+      if (clientHeight !== sized.client || scrollHeight !== sized.content) {
+        sized = { client: clientHeight, content: scrollHeight };
+        if (this.following) this.scroller.scrollTop = scrollHeight;
+        return;
+      }
+      this.following = scrollTop + clientHeight >= scrollHeight - 48;
+      this.drawLatest();
+    });
+  }
+
+  /** The way back to the newest, shown when the reader is far from it: more
+   *  than a screen above the foot, or with turns not held between. */
+  private latest: HTMLButtonElement;
+
+  private drawLatest(): void {
+    const { scrollTop, clientHeight, scrollHeight } = this.scroller;
+    const far = !this.following && (scrollHeight - scrollTop - clientHeight > clientHeight || this.options.conversation.gaps().some((gap) => !gap.first));
+    if (this.latest.hidden === !far) return;
+    this.latest.hidden = !far;
+  }
+
+  /** Back to the newest: at once, however far. */
+  private toLatest(): void {
+    this.following = true;
+    this.render();
+    this.scroller.scrollTop = this.scroller.scrollHeight;
+    this.drawLatest();
+  }
+
+  /** Reads the turns of a gap the reader came near, then draws them. */
+  private async fillGap(gap: Gap, side: "end" | "start"): Promise<void> {
+    await this.options.conversation.fill(gap, side);
+    this.update({ read: true });
+  }
+
+  /** The page holds a few thousand events of a conversation at most
+   *  (`conversation.ts`): past that, it lets go of the parts farthest from
+   *  the reader, and of what its latest part holds before its newest turns
+   *  while the reader keeps to the newest. Each costs the page about as
+   *  much as the events in it; these bounds hold several parts, a few
+   *  screens each, and stay well within what a phone's web view gives a
+   *  page. */
+  private bound(): void {
+    const conversation = this.options.conversation;
+    if (!conversation.windowed) return;
+    const parts = conversation.held();
+    const latest = parts[parts.length - 1]!;
+    // A turn is never cut in two: where the latest turn alone is longer,
+    // it is asked again only once that much more has come.
+    if (latest.end < this.trimmedAt) this.trimmedAt = 0;
+    if (this.following && latest.end - latest.start > LATEST_MOST && !this.trimming && latest.end - this.trimmedAt > LATEST_KEPT) {
+      this.trimming = true;
+      this.trimmedAt = latest.end;
+      void conversation.trim(LATEST_KEPT).finally(() => {
+        this.trimming = false;
+        this.update({ read: true });
+      });
+    }
+    let events = parts.reduce((sum, part) => sum + (part.end - part.start), 0);
+    if (events <= HELD_MOST) return;
+    // Only parts well away from what is in view go, the farthest first:
+    // what the reader is near stays, however much it holds.
+    const far = new Map<Held, number>();
+    for (const part of parts) {
+      if (part === latest) continue;
+      const blocks = part.fold.blocks();
+      const first = blocks[0];
+      const last = blocks[blocks.length - 1];
+      const screens = first && last ? this.view.screensFrom(first.key, last.key) : null;
+      if (screens !== null && screens > KEEP_SCREENS) far.set(part, screens);
+    }
+    let changed = false;
+    for (const [part] of [...far].sort((a, b) => b[1] - a[1])) {
+      if (events <= HELD_MOST) break;
+      conversation.release(part);
+      events -= part.end - part.start;
+      changed = true;
+    }
+    if (changed) this.update({ read: true });
+  }
+  private trimming = false;
+  /** Where the latest part ended when it was last cut, or tried. */
+  private trimmedAt = 0;
+
+  /** Brings the page up to the conversation: what does not wait for the
+   *  screen at once, and the drawing on the next frame, however many
+   *  changes came before it. Words streaming in at any rate are drawn at
+   *  most once a frame. `read` says history came (a reading of what came
+   *  before, not things happening now): what it adds is drawn as the
+   *  reader comes to it, and nothing of it makes an entrance. */
+  update(how: { read?: boolean } = {}): void {
+    if (how.read) this.read = true;
+    // The commands it offers changed (a plugin loaded, a description came).
+    if (this.options.conversation.takeOffersChanged()) void this.askOffers();
+    // A host that keeps a checkpoint per turn (Claude) has one more once a
+    // turn ends; nothing else it offers changes with a turn, and what does
+    // change is said by the host (commands, above).
+    const moving = this.options.conversation.moving();
+    if (this.wasMoving && !moving && this.offered?.checkpoints) void this.askOffers();
+    this.wasMoving = moving;
+    this.releaseQueued();
+    if (!this.frame) this.frame = requestAnimationFrame(() => this.render());
+  }
+
+  private frame = 0;
+  private read = false;
+
+  /** Draws the page as the conversation now stands; keeps the newest in
+   *  view when the reader was already there. A page not in view is drawn
+   *  when it is shown again. */
+  private render(): void {
+    this.frame = 0;
+    if (!this.element.isConnected) return;
+    const follow = this.following;
+    this.view.update(this.read);
+    this.read = false;
+    this.drawAgents();
+    this.drawTurnActs();
+    this.finder.refresh();
+    this.drawState();
+    this.drawAction();
+    if (follow) this.scroller.scrollTop = this.scroller.scrollHeight;
+    this.drawLatest();
+    this.bound();
+  }
+
+  private agents: AgentsPanel;
+  private agentsSeen = "";
+
+  /** The host's own agents, as the conversation now knows them, to their
+   *  picture whenever one of them moved or the parts held changed. */
+  private drawAgents(): void {
+    const conversation = this.options.conversation;
+    const seen = `${conversation.agentStamp}|${conversation.bounds().join(";")}`;
+    if (seen === this.agentsSeen) return;
+    this.agentsSeen = seen;
+    this.agents.update(conversation.agents());
+  }
+
+  /** Where the reader was, kept while the page is out of view: following
+   *  the newest, or a block and how far down it they were. */
+  private place: { key: string; offset: number } | null = null;
+
+  /** The page goes out of view and stays alive, its conversation still
+   *  followed. */
+  suspend(): void {
+    this.place = this.following ? null : this.view.anchor();
+  }
+
+  /** The page is shown again, as it was left and as the conversation now
+   *  stands. */
+  resume(): void {
+    this.render();
+    if (this.following) this.scroller.scrollTop = this.scroller.scrollHeight;
+    else if (this.place && !this.view.restore(this.place)) this.toLatest();
+  }
+
+  /** What is held is read again (`conversation.ts`): the reader stays
+   *  where they were, the turns they read read again where they are no
+   *  longer held. */
+  reopened(apply: () => void): void {
+    const place = this.following ? null : this.view.anchor();
+    const turn = place ? this.turnOf(place.key) : null;
+    apply();
+    this.update({ read: true });
+    if (!place) return;
+    cancelAnimationFrame(this.frame);
+    this.render();
+    if (this.view.restore(place)) return;
+    if (!turn) return;
+    void this.options.conversation.reachTurn(turn).then((reached) => {
+      this.render();
+      if (!reached || !this.view.restore(place)) this.toLatest();
+    });
+  }
+
+  /** The turn a block is in. */
+  private turnOf(key: string): string | null {
+    const entry = this.options.conversation.get(key);
+    if (entry && "turn" in entry && typeof entry.turn === "string" && entry.turn) return entry.turn;
+    const block = this.options.conversation.blocks().find((one) => one.key === key);
+    return block?.kind === "activity-group" ? block.turn : null;
+  }
+
+  /** Going back to a turn or forking from it, only where the host says it
+   *  can: some turns cannot be reached again (one compacted away, the very
+   *  first of a conversation it cannot empty). */
+  private drawTurnActs(): void {
+    const checkpoints = this.offered?.checkpoints;
+    for (const button of this.element.querySelectorAll<HTMLElement>("[data-turn-act][data-turn]")) {
+      const act = button.dataset.turnAct === "fork" ? "fork" : "rewind";
+      const point = checkpoints?.find((one) => one.turn === button.dataset.turn);
+      button.hidden = !!checkpoints && !point?.[act];
+    }
+  }
+
+  /** Stops what the page keeps asking for. */
+  leave(): void {
+    clearTimeout(this.looking);
+    cancelAnimationFrame(this.frame);
+    this.view.destroy();
+    this.badge?.dispose();
+    this.agents.destroy();
+    this.finder.destroy();
+    this.looking = -1;
+    this.left = true;
+    document.removeEventListener("keydown", this.findKey);
+    this.stopDrops?.();
+    this.unbindShared?.();
+    this.fileLinks?.release();
+    this.pictures?.release();
+    void this.session?.close();
+  }
+
+  private left = false;
+  /** The node's shared input, once open. */
+  private session: ComposerSession | null = null;
+  private sharedState: ComposerSessionState | null = null;
+  private unbindShared: (() => void) | null = null;
+  private nodeQueue: NodeQueue | null = null;
+  private nodeTray: NodeTray | null = null;
+  /** This device's last send of the shared words, until the node answers. */
+  private sendingShared: Promise<unknown> = Promise.resolve();
+
+  /** Opens the shared input: the words typed here before it opened go into
+   *  it, the queue and what is attached become the node's. */
+  private async share(open: () => Promise<ComposerSession>): Promise<void> {
+    let session: ComposerSession;
+    try {
+      session = await open();
+    } catch (error) {
+      console.warn("the shared input could not be opened; this page keeps its own", error);
+      return;
+    }
+    if (this.left) {
+      void session.close();
+      return;
+    }
+    this.session = session;
+    const typed = this.input.value;
+    const caret = this.input.selectionStart ?? typed.length;
+    try {
+      if (this.options.draftKey) localStorage.removeItem(this.options.draftKey);
+    } catch {
+      // Nothing was kept here.
+    }
+    this.unbindShared = bindComposer(this.input, session.draft);
+    if (typed.trim() && !this.input.value.trim()) this.setWords(typed, caret);
+    const say = (why: string) => this.say(why, why, true);
+    const assistantFiles = this.options.attach?.filesOn ?? null;
+    this.nodeQueue = new NodeQueue(this.options.words.queue, this.options.attach?.words ?? null, session, say, assistantFiles, (id, text, attachments, sending) => {
+      // Sent now, they are said at once; the node takes them into the turn.
+      this.onItsWay(id, text, attachments);
+      this.update();
+      sending.catch(() => {
+        const key = this.onTheirWay.get(id);
+        if (key) this.options.conversation.unsend(key);
+        this.onTheirWay.delete(id);
+        this.update();
+      });
+    });
+    this.queue.element.replaceWith(this.nodeQueue.element);
+    if (this.options.attach && this.tray) {
+      this.nodeTray = new NodeTray(this.options.attach.words, session, session.draft, say, assistantFiles);
+      this.tray.element.replaceWith(this.nodeTray.element);
+    }
+    session.subscribe((state) => {
+      this.sharedState = state;
+      this.showOnTheirWay(state.composer);
+      this.nodeQueue?.draw(state);
+      this.nodeTray?.draw(state);
+      this.fit();
+      this.drawAction();
+    });
+  }
+
+  /** Shows words of the queue on their way as said, once each. */
+  private onItsWay(id: string, text: string, attachments: readonly { name: string; size: number; media_type: string }[]): void {
+    if (this.onTheirWay.has(id)) return;
+    const shown = attachments.map((one) => ({ name: one.name, size: one.size, image: one.media_type.startsWith("image/"), preview: null }));
+    this.onTheirWay.set(id, this.options.conversation.sending(text, this.options.here || null, shown));
+  }
+
+  /** Words the node sends from the shared queue, whoever asked, are said
+   *  in the conversation until the agent hears them; words back in the
+   *  queue, or whose arrival nobody can tell, leave it. */
+  private showOnTheirWay(composer: ComposerSnapshot | undefined): void {
+    if (!composer) return;
+    for (const item of composer.queue) if (item.sending) this.onItsWay(item.id, item.draft.text, item.draft.attachments);
+    for (const [id, key] of this.onTheirWay) {
+      if (composer.queue.some((item) => item.id === id && item.sending)) continue;
+      const back = composer.queue.some((item) => item.id === id) || composer.unobserved.some((item) => item.id === id);
+      if (back) this.options.conversation.unsend(key);
+      this.onTheirWay.delete(id);
+    }
+    this.update();
+  }
+
+  /** Asks the agent to stop: the button says it is stopping until the turn
+   *  ends. A World that says no turn runs is believed: what still looked
+   *  under way here had ended. */
+  private stop(): void {
+    const asked = this.options.stop();
+    if (!asked) return;
+    this.stopping = true;
+    this.drawAction();
+    asked.then(
+      (stopped) => {
+        if (stopped) return;
+        this.stopping = false;
+        this.options.conversation.noTurnRuns();
+        this.update();
+      },
+      (error: unknown) => {
+        this.stopping = false;
+        const why = error instanceof Error ? error.message : String(error);
+        this.say(this.options.words.turnNotStopped(why), why, true);
+        this.drawAction();
+      },
+    );
+  }
+
+  /** Puts words into the input as if typed, so the shared input has them. */
+  private setWords(value: string, caret = value.length): void {
+    this.input.value = value;
+    this.input.setSelectionRange(caret, caret);
+    this.input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  private attachFiles(files: Iterable<File>): void {
+    if (this.nodeTray) this.nodeTray.addFiles(files);
+    else this.tray?.addFiles(files);
+  }
+
+  private attachPaths(paths: string[]): void {
+    if (this.nodeTray) this.nodeTray.addPaths(paths);
+    else this.tray?.addPaths(paths);
+  }
+
+  /** Sends the shared words: the node sends them now, or queues them while
+   *  a turn is under way. What goes now is shown at once. */
+  private sendShared(session: ComposerSession, text: string): void {
+    const { conversation, here } = this.options;
+    const draft = this.sharedState?.composer;
+    // While the shared input is not connected, the words wait here, shown
+    // as waiting to send; the node says once they go whether they queue.
+    const connected = session.state.connected;
+    const queued = connected && this.queues();
+    const shown = (draft?.draft.attachments ?? []).map((one) => ({ name: one.name, size: one.size, image: one.media_type.startsWith("image/"), preview: null }));
+    const key = queued ? null : conversation.sending(text, here || null, shown);
+    if (key && !connected) conversation.sent(key, { state: "waiting", why: session.state.error?.message ?? "" });
+    this.update();
+    // Words sent here while the last ones are still on their way go once
+    // the node has those, as the next draft rather than the one already sent.
+    // Nothing is sent when those took everything the input held.
+    const sent = this.sendingShared.then(() => {
+      const draft = session.draft;
+      const left = draft.view.characters.some((one) => /\S/u.test(one.text)) || draft.attachments.length > 0 || draft.uploads.length > 0;
+      return left ? session.send() : null;
+    });
+    this.sendingShared = sent.catch(() => {});
+    if (key) this.quiet(sent);
+    this.follow(key, sent);
+  }
+
+  /** Words sent from the shared input are not shown in it a second time
+   *  while they rise: the node empties the input once it has them, and the
+   *  reply that says so arrives with the emptied draft already applied. */
+  private quiet(sent: Promise<unknown>): void {
+    const input = this.input;
+    input.classList.add("words-going");
+    const done = () => {
+      input.classList.remove("words-going");
+      input.removeEventListener("input", done);
+    };
+    input.addEventListener("input", done);
+    sent.then(done, done);
+  }
+
+  /** Words shown below the turn's line while on their way: where they
+   *  landed, or that they failed, as the node answers. */
+  private follow(key: string | null, sending: Promise<ComposerUpdated | null>): void {
+    const { conversation } = this.options;
+    sending.then(
+      (updated) => {
+        if (!key) return;
+        if (!updated) {
+          conversation.unsend(key);
+          this.update();
+          return;
+        }
+        const landed = updated.landed;
+        if (!landed) conversation.unsend(key);
+        else if (landed.kind === "waiting" || landed.kind === "sent" || landed.kind === "uncertain") {
+          conversation.sent(key, { state: "landed", how: landed.kind, machine: this.options.someone.machine, why: "why" in landed ? landed.why : null });
+        }
+        this.update();
+      },
+      (error: unknown) => {
+        const why = error instanceof Error ? error.message : String(error);
+        // Words that did not go are where the node keeps them, back in the
+        // input or still in the queue: they leave the conversation, and the
+        // reason is said by the input.
+        if (key) conversation.unsend(key);
+        this.say(this.options.words.notSent(why), why, true);
+        this.update();
+      },
+    );
+  }
+
+  /** Whether words sent now wait in the queue: only while the agent works,
+   *  a turn just released has not ended, or other words are on their way,
+   *  as the node decides; with it idle they go straight on. */
+  private queues(): boolean {
+    const composer = this.sharedState?.composer;
+    return this.options.conversation.busy() || !!composer?.awaiting_turn || !!composer?.queue.some((item) => item.sending);
+  }
+
+  private toggleDetails(open: boolean): void {
+    const details = this.options.details;
+    if (!details) return;
+    const toggle = this.element.querySelector<HTMLElement>(".details-toggle");
+    const inside = details.card.element.contains(document.activeElement);
+    if (open && !details.card.open) layerOpened({ isOpen: () => details.card.open && this.element.isConnected, close: () => this.toggleDetails(false) });
+    details.card.open = open;
+    toggle?.setAttribute("aria-expanded", String(open));
+    clearTimeout(this.looking);
+    if (open) {
+      details.card.element.focus({ preventScroll: true });
+      void this.lookAgain();
+    } else if (inside) {
+      toggle?.focus({ preventScroll: true });
+    }
+  }
+
+  /** Asks the World about the agent while the card is open, every few
+   *  seconds, as the front page asks about everyone. */
+  private async lookAgain(): Promise<void> {
+    const details = this.options.details;
+    if (!details || !details.card.open || this.looking === -1) return;
+    try {
+      const detail = await details.look();
+      if (detail) details.card.show(detail, details.colleagues(), new Date());
+      else details.card.unknown(null);
+    } catch (error) {
+      details.card.unknown(String(error));
+    }
+    if (details.card.open && this.looking !== -1) this.looking = window.setTimeout(() => void this.lookAgain(), 3000);
+  }
+
+  private submit(): void {
+    const text = this.input.value.trim();
+    if (!this.session && this.tray?.sending) {
+      this.say(this.options.attach!.words.wait);
+      return;
+    }
+    const session = this.session;
+    const files = session ? (this.nodeTray?.files ?? 0) : (this.tray?.files ?? 0);
+    const assistant = this.options.attach?.filesOn;
+    const placing = !!assistant && files > 0 && assistant.assisting();
+    const filesOn = !placing ? null : this.nodeTray ? this.nodeTray.chosen : assistant!.place();
+    if (placing && !filesOn) {
+      this.say(assistant!.nowhere);
+      return;
+    }
+    const attached = !session && this.tray?.count ? { ...this.tray.take(), filesOn } : { refs: [], shown: [], filesOn: null };
+    if (!text && !attached.refs.length && !(session && this.nodeTray?.count)) {
+      if (this.options.conversation.busy()) this.stop();
+      return;
+    }
+    if (this.options.controls && text.startsWith("/")) {
+      const space = text.indexOf(" ");
+      const name = (space < 0 ? text.slice(1) : text.slice(1, space)).trim();
+      const args = space < 0 ? "" : text.slice(space + 1).trim();
+      const command = commandFor(commandsOf(this.offered, this.options.controls.words.commands, this.options.conversation.moving()), name, args);
+      if (command?.arguments === "required" && !args) {
+        this.say(this.options.controls.words.commands.needsArgs(usageOf(command)));
+        return;
+      }
+      if (command) {
+        this.clear();
+        void this.run(command, args);
+        return;
+      }
+      if (this.offered) {
+        this.say(this.options.controls.words.unknown(name));
+        return;
+      }
+    }
+    // What the last command did is behind the conversation now.
+    this.say("");
+    this.hideSaid();
+    this.following = true;
+    if (session) {
+      this.commandMenu?.hide();
+      this.nodeTray?.settle();
+      this.sendShared(session, text);
+      return;
+    }
+    this.clear();
+    // While a turn is under way, or a queued one is on its way, words wait
+    // their turn instead of cutting into it.
+    if (this.options.conversation.busy() || this.released !== null) {
+      this.queue.add(text, attached);
+      return;
+    }
+    // Words the user sends while the queue waits on them: once their turn
+    // ends as it should, the queue goes on.
+    this.failed = null;
+    void this.options.send(text, attached);
+  }
+
+  /** Sends what waits: the first, once a turn has ended as it should and
+   *  nothing else is on its way; a turn stopped or failed holds them. */
+  private releaseQueued(): void {
+    // The node releases what waits in a shared input.
+    if (this.session) return;
+    const conversation = this.options.conversation;
+    // The one sent last is on its way until a turn after it has ended.
+    if (this.released !== null && conversation.ended() > this.released) this.released = null;
+    const last = conversation.lastEnd();
+    const idle = !conversation.busy() && !conversation.waiting();
+    const stopped = idle && last !== null && last.how !== "completed";
+    this.queue.hold(this.failed ?? (stopped ? "stopped" : null));
+    if (!idle || this.released !== null || this.failed || stopped) return;
+    const head = this.queue.head();
+    if (head && this.queue.take(head.key)) this.sendQueued(head, false);
+  }
+
+  /** Sends one that waited: `now` when the user asked, into the turn under
+   *  way; otherwise as the next turn. */
+  private sendQueued(item: Queued, now: boolean): void {
+    const conversation = this.options.conversation;
+    if (!now) this.released = conversation.ended();
+    this.failed = null;
+    this.following = true;
+    const sent = this.options.send(item.text, item.attached);
+    void Promise.resolve(sent).then((came) => {
+      // No turn to wait for: the rest wait for the user, said above them.
+      if (came === "failed" || came === "unseen") {
+        this.released = null;
+        this.failed = came === "failed" ? "not_taken" : "unsure";
+      }
+      this.update();
+    });
+    this.update();
+  }
+
+  private clear(): void {
+    if (this.session) this.setWords("");
+    else this.input.value = "";
+    this.fit();
+    this.keepDraft();
+    this.commandMenu?.hide();
+    this.drawAction();
+  }
+
+  /** A line beside the composer: what a command did, or that it did not,
+   *  with the host's own words on hover. */
+  private say(text: string, detail = "", refused = false): void {
+    this.note.textContent = text;
+    this.note.title = detail;
+    this.noteDetail = null;
+    this.note.classList.toggle("refused", refused);
+  }
+
+  /** What a command answered at length, in a panel above the composer
+   *  until it is closed or the user sends something. */
+  private showSaid(title: string, html: string): void {
+    const pop = this.element.querySelector<HTMLElement>(".said-pop")!;
+    const close = this.options.controls!.words.said.close;
+    pop.innerHTML = `<div class="said-head"><span class="usage-title">${escape(title)}</span><button class="icon-button said-close" type="button" aria-label="${escape(close)}" title="${escape(close)}">${glyph("close", 16)}</button></div><div class="said-body">${html}</div>`;
+    pop.setAttribute("aria-label", title);
+    if (pop.hidden) layerOpened({ isOpen: () => !pop.hidden && pop.isConnected, close: () => this.hideSaid() });
+    pop.hidden = false;
+    pop.querySelector(".said-close")!.addEventListener("click", () => this.hideSaid(), { once: true });
+  }
+
+  private hideSaid(): void {
+    const pop = this.element.querySelector<HTMLElement>(".said-pop")!;
+    pop.hidden = true;
+    pop.innerHTML = "";
+  }
+
+  private draft(): string | null {
+    if (!this.options.draftKey) return null;
+    try {
+      return localStorage.getItem(this.options.draftKey);
+    } catch {
+      return null;
+    }
+  }
+
+  private keepDraft(): void {
+    if (!this.options.draftKey || this.session) return;
+    try {
+      if (this.input.value) localStorage.setItem(this.options.draftKey, this.input.value);
+      else localStorage.removeItem(this.options.draftKey);
+    } catch {
+      // Not kept: the words are lost if the page is left.
+    }
+  }
+
+  private menus(): void {
+    const holder = this.element.querySelector<HTMLElement>(".composer-menus")!;
+    this.commandMenu = new Menu<MenuCommand>("commands", (command) => commandRow(command), (command) => {
+      this.commandMenu!.hide();
+      if (command.arguments === "required" || (command.arguments === "optional" && !command.control)) {
+        if (this.session) this.setWords(`/${command.name} `);
+        else this.input.value = `/${command.name} `;
+        this.input.focus();
+        this.drawAction();
+        if (command.args) this.say(usageOf(command));
+      } else {
+        this.clear();
+        void this.run(command, "");
+      }
+    }, this.input);
+    holder.append(this.commandMenu.element);
+    this.modelPanel = new ModelPanel(this.chip, this.options.words.english ? enModelPanel : zhModelPanel, this.options.words.english, {
+      model: (model, effort) => this.setModel(model, effort),
+      tier: (id) => this.setTier(id),
+    });
+    holder.append(this.modelPanel.element);
+    void this.askOffers();
+  }
+
+  private renaming = false;
+
+  /** Renames the conversation in its title, as from its "⋯". */
+  startRename(): void {
+    this.rename();
+  }
+
+  /** Renames the conversation: its title becomes a field, Enter keeps the
+   *  new name, Escape or leaving it keeps the old. */
+  private rename(): void {
+    const controls = this.options.controls;
+    if (this.renaming || !controls || !this.offered?.controls.includes("rename")) return;
+    this.renaming = true;
+    const field = document.createElement("input");
+    field.className = "who-rename";
+    field.value = this.options.conversation.title ?? "";
+    field.placeholder = `${this.options.someone.agent} · ${this.options.someone.machine}`;
+    field.setAttribute("aria-label", controls.words.commands.rename);
+    this.name.replaceChildren(field);
+    field.focus();
+    field.select();
+    let done = false;
+    const finish = (keep: boolean) => {
+      if (done) return;
+      done = true;
+      const name = field.value.trim();
+      this.renaming = false;
+      if (keep && name && name !== this.options.conversation.title) {
+        // Shown at once; the host's own report of the title follows, and a
+        // name the host did not take gives way to the one it has.
+        const before = this.options.conversation.title;
+        this.options.conversation.title = name;
+        void this.run({ name: "rename", description: "", args: null, arguments: "none", control: "rename", source: null }, "", { do: "rename", name }).then((done) => {
+          if (!done && this.options.conversation.title === name) {
+            this.options.conversation.title = before;
+            this.drawState();
+          }
+        });
+      }
+      this.name.innerHTML = "";
+      this.drawState();
+    };
+    field.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        finish(true);
+        this.name.focus();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(false);
+        this.name.focus();
+      }
+    });
+    field.addEventListener("blur", () => finish(true));
+  }
+  private tray: AttachTray | null = null;
+  private queue!: SendQueue;
+  /** How many turns had ended when the last queued words were sent. */
+  private released: number | null = null;
+  /** The last queued words were not taken, or went where their turn's end
+   *  will not be seen: the rest wait for the user. */
+  private failed: "not_taken" | "unsure" | null = null;
+  private stopDrops: (() => void) | null = null;
+
+  /** Files come with the words: picked with the paperclip, pasted, or
+   *  dropped anywhere on the page. */
+  private attaching(attach: NonNullable<PageOptions["attach"]>): void {
+    const tray = new AttachTray(attach.words, attach.seam, () => this.drawAction());
+    this.tray = tray;
+    this.element.querySelector(".composer-tray")!.replaceWith(tray.element);
+    const button = this.element.querySelector<HTMLButtonElement>(".composer-attach")!;
+    const pick = this.element.querySelector<HTMLInputElement>(".composer-pick")!;
+    button.hidden = false;
+    button.innerHTML = glyph("attach", 18);
+    button.setAttribute("aria-label", attach.words.attach);
+    button.title = attach.words.attach;
+    button.addEventListener("click", () => pick.click());
+    pick.addEventListener("change", () => {
+      if (pick.files) this.attachFiles(pick.files);
+      pick.value = "";
+      this.input.focus();
+    });
+    // On a phone the camera is one tap away. Elsewhere an input that asks
+    // for a capture is only another file picker, so it is not offered.
+    if (matchMedia("(pointer: coarse)").matches) {
+      const photo = this.element.querySelector<HTMLButtonElement>(".composer-photo")!;
+      const shot = this.element.querySelector<HTMLInputElement>(".composer-shot")!;
+      photo.hidden = false;
+      photo.innerHTML = glyph("camera", 18);
+      photo.setAttribute("aria-label", attach.words.photo);
+      photo.title = attach.words.photo;
+      photo.addEventListener("click", () => shot.click());
+      shot.addEventListener("change", () => {
+        if (shot.files) this.attachFiles(shot.files);
+        shot.value = "";
+        this.input.focus();
+      });
+    }
+    this.input.addEventListener("paste", (event) => {
+      const files = [...(event.clipboardData?.files ?? [])];
+      if (!files.length) return;
+      // Pasted files are attached; pasted words still go into the words.
+      if (!event.clipboardData?.getData("text/plain")) event.preventDefault();
+      this.attachFiles(files);
+    });
+    const veil = document.createElement("div");
+    veil.className = "drop-veil";
+    veil.hidden = true;
+    veil.innerHTML = `<div class="drop-card">${glyph("attach", 22)}<span>${escape(attach.words.drop(this.options.someone.agent))}</span></div>`;
+    this.element.append(veil);
+    // In a browser, files dragged over the page; in the shell, the window
+    // takes the drop and gives their paths.
+    let depth = 0;
+    this.element.addEventListener("dragenter", (event) => {
+      if (!event.dataTransfer?.types.includes("Files")) return;
+      depth += 1;
+      veil.hidden = false;
+    });
+    this.element.addEventListener("dragleave", () => {
+      depth = Math.max(0, depth - 1);
+      if (!depth) veil.hidden = true;
+    });
+    this.element.addEventListener("dragover", (event) => {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    });
+    this.element.addEventListener("drop", (event) => {
+      depth = 0;
+      veil.hidden = true;
+      if (!event.dataTransfer?.files.length) return;
+      event.preventDefault();
+      this.attachFiles(event.dataTransfer.files);
+    });
+    this.stopDrops =
+      attach.drops?.({
+        over: (over) => {
+          if (this.element.isConnected && !document.querySelector("dialog[open]")) veil.hidden = !over;
+        },
+        dropped: (paths) => {
+          veil.hidden = true;
+          // A sheet open over the conversation takes what is dropped on it.
+          if (this.element.isConnected && !document.querySelector("dialog[open]")) this.attachPaths(paths);
+        },
+      }) ?? null;
+  }
+
+  private async askOffers(): Promise<void> {
+    const controls = this.options.controls;
+    if (!controls) return;
+    try {
+      this.offered = await controls.offers();
+    } catch {
+      this.offered = null;
+    }
+    this.drawChip();
+    this.drawState();
+    // What the conversation takes decides which of its turns' actions show.
+    const can = new Set(this.offered?.controls ?? []);
+    const transcript = this.element.querySelector(".conversation")!;
+    transcript.classList.toggle("can-rewind", can.has("rewind"));
+    // Forking from a turn is forking and then cutting the new history at
+    // that turn: a host that cannot rewind (Claude) forks only the whole
+    // conversation, from the command menu.
+    transcript.classList.toggle("can-fork", can.has("fork") && can.has("rewind"));
+    this.drawTurnActs();
+  }
+
+  /** What the conversation has used, as its host says: its context, the
+   *  account's limits and when they reset, what it cost. */
+  private toggleUsage(): void {
+    const popover = this.usagePopover;
+    if (!popover) return;
+    if (popover.open) return popover.hide();
+    void this.showUsage(popover);
+  }
+
+  /** Opens the pop-up whole: what the host pushed since the page last
+   *  asked comes first, waited for a moment so the pop-up does not open
+   *  and then grow; nothing is read afresh from the provider for this. */
+  private async showUsage(popover: Popover): Promise<void> {
+    const asked = this.askOffers();
+    await Promise.race([asked, new Promise((done) => setTimeout(done, 150))]);
+    if (popover.open || !this.fillUsage()) return;
+    popover.show();
+    this.usageSteady?.hold();
+    void asked.then(() => {
+      if (popover.open) this.fillUsage();
+    });
+  }
+
+  /** Each step's context on a page of its own, over the conversation: what
+   *  the page holds of its requests and its calls (`context-sheet.ts`). A
+   *  call's row, or a step on the drawing, brings that call into view. */
+  private openSteps(again = false): void {
+    const controls = this.options.controls;
+    if (!controls) return;
+    this.usagePopover?.hide();
+    this.element.querySelector<HTMLElement>(".steps-back")!.hidden = true;
+    this.steps ??= new ContextSheet(controls.words.usage, (key) => {
+      if (this.view.openRow(key)) this.following = false;
+      this.offerStepsBack();
+    });
+    const { conversation, words } = this.options;
+    const calls: CallSpan[] = [];
+    const tools = new Map<string, Extract<Entry, { kind: "tool" }>>();
+    for (const part of conversation.held()) {
+      for (const entry of part.fold.entries) {
+        if (entry.kind !== "tool") continue;
+        tools.set(entry.key, entry);
+        calls.push({ key: entry.key, item: entry.item, turn: entry.turn, ended: entry.ended?.at ?? null, size: returnedSize(entry.tool) });
+      }
+    }
+    this.steps.show(
+      {
+        requests: conversation.requests,
+        calls,
+        named: (key) => {
+          const entry = tools.get(key);
+          if (!entry) return null;
+          const line = headline(entry.tool, entry.ended, words, () => null, true);
+          return { glyph: line.glyph, action: line.action, object: line.object };
+        },
+      },
+      again,
+    );
+  }
+
+  /** Over the composer, the way back to each step's context. */
+  private offerStepsBack(): void {
+    const controls = this.options.controls;
+    if (!controls) return;
+    const { usage } = controls.words;
+    const back = this.element.querySelector<HTMLElement>(".steps-back")!;
+    back.querySelector(".steps-back-go span")!.textContent = usage.steps;
+    const close = back.querySelector<HTMLElement>(".steps-back-x")!;
+    close.setAttribute("aria-label", usage.close);
+    close.title = usage.close;
+    back.hidden = false;
+  }
+
+  /** Draws the usage pop-up from what the page holds. */
+  private fillUsage(): boolean {
+    if (!this.usagePop) return false;
+    const { conversation } = this.options;
+    const requests = conversation.requests;
+    this.usageDrawn = `${requests.length}:${requests[requests.length - 1]?.at}:${conversation.context?.used}`;
+    return this.usagePop.fill({ context: conversation.context ?? this.offered?.usage?.context ?? null, usage: this.offered?.usage ?? null, requests });
+  }
+
+  /** Starting again from the user's words, or forking from a turn: said
+   *  plainly first, done once the user agrees. */
+  private turnAct(act: "rewind" | "regenerate" | "fork", turn: string, words: string | null, kept: Attachment[]): void {
+    const controls = this.options.controls;
+    if (!controls) return;
+    const said = controls.words;
+    const confirm = this.element.querySelector<HTMLElement>(".composer-confirm")!;
+    const ask = act === "rewind" ? said.rewindAsk : act === "regenerate" ? said.regenerateAsk : said.forkAsk;
+    const go = act === "rewind" ? said.rewindGo : act === "regenerate" ? said.regenerateGo : said.forkGo;
+    confirm.innerHTML = `<p>${escape(ask)}</p><div class="composer-confirm-acts"><button type="button" class="ask-button ask-primary" data-go>${escape(go)}</button><button type="button" class="ask-button" data-never>${escape(said.never)}</button></div>`;
+    const close = () => {
+      confirm.hidden = true;
+      confirm.innerHTML = "";
+      confirm.onkeydown = null;
+    };
+    layerOpened({ isOpen: () => !confirm.hidden && confirm.isConnected, close });
+    confirm.hidden = false;
+    confirm.querySelector("[data-never]")!.addEventListener("click", close, { once: true });
+    confirm.onkeydown = (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      close();
+      this.input.focus();
+    };
+    confirm.querySelector<HTMLElement>("[data-go]")!.focus();
+    confirm.querySelector("[data-go]")!.addEventListener(
+      "click",
+      () => {
+        close();
+        if (act === "rewind" || act === "regenerate") {
+          void this.run({ name: "rewind", description: "", args: null, arguments: "none", control: "rewind", source: null }, "", { do: "rewind", from: turn }).then((rewound) => {
+            // Not back before that turn: nothing is sent again or put back,
+            // and the line beside the composer says why.
+            if (!rewound) return;
+            // Asking again sends the same words, with what came with them,
+            // as soon as the conversation is back before that turn.
+            if (act === "regenerate" && words !== null) {
+              this.following = true;
+              void this.options.send(words, kept.length ? { refs: kept, shown: [] } : { refs: [], shown: [] });
+              return;
+            }
+            if (words !== null && !this.input.value.trim()) {
+              if (this.session) this.setWords(words);
+              else this.input.value = words;
+              // What came with the words comes back with them.
+              if (this.session && kept.length && !this.nodeTray?.count) {
+                for (const attachment of kept) void this.session.attach(attachment as Attachment).catch((error: unknown) => this.say(String(error)));
+              } else if (kept.length && this.tray && !this.tray.count) this.tray.restore(kept);
+              this.fit();
+              this.drawAction();
+              this.keepDraft();
+              this.input.focus();
+            }
+          });
+        } else {
+          void this.run({ name: "fork", description: "", args: null, arguments: "none", control: "fork", source: null }, "", { do: "fork", through: turn });
+        }
+      },
+      { once: true },
+    );
+  }
+
+  private drawChip(): void {
+    this.modelPanel?.update(this.offered);
+  }
+
+  /** Opens the command menu while the words are a command being typed. */
+  private slash(): void {
+    const menu = this.commandMenu;
+    if (!menu || !this.options.controls) return;
+    const typed = /^\/(\S*)$/.exec(this.input.value);
+    if (!typed) return menu.hide();
+    const prefix = typed[1]!.toLowerCase();
+    const found = commandsOf(this.offered, this.options.controls.words.commands, this.options.conversation.moving()).filter((command) =>
+      command.name.toLowerCase().startsWith(prefix),
+    );
+    menu.show(found, this.options.controls.words.commands.noCommands);
+  }
+
+  private fileMenuOf(): void {
+    this.fileMenu = new Menu<FoundFile>("files", (file) => fileRow(file), (file) => {
+      this.fileMenu!.hide();
+      const caret = this.input.selectionStart ?? this.input.value.length;
+      const at = mentionAt(this.input.value, caret);
+      if (!at) return;
+      const put = mentioned(file);
+      const value = this.input.value.slice(0, at.from) + put + this.input.value.slice(caret);
+      const end = at.from + put.length;
+      if (this.session) this.setWords(value, end);
+      else {
+        this.input.value = value;
+        this.input.setSelectionRange(end, end);
+      }
+      this.fit();
+      this.drawAction();
+      this.keepDraft();
+    }, this.input);
+    this.element.querySelector<HTMLElement>(".composer-menus")!.append(this.fileMenu.element);
+  }
+
+  /** Asks for files while a `@` mention is being typed. */
+  private mention(): void {
+    const files = this.options.files;
+    const menu = this.fileMenu;
+    if (!files || !menu) return;
+    const at = mentionAt(this.input.value, this.input.selectionStart ?? this.input.value.length);
+    if (!at) return menu.hide();
+    const nowhere = files.nowhere?.() ?? null;
+    if (nowhere) return menu.show([], nowhere === "outside" ? files.words.outside : files.words.nowhere);
+    if (!at.query) return menu.show([], files.words.hint);
+    const asked = ++this.mentionAsked;
+    if (!menu.open) menu.show([], files.words.searching);
+    files.find(at.query).then(
+      (found) => {
+        if (asked === this.mentionAsked && menu.open) menu.show(found, files.words.none);
+      },
+      (error: unknown) => {
+        if (asked === this.mentionAsked && menu.open) menu.show([], String(error));
+      },
+    );
+  }
+
+  /** A choice in the model panel is shown at once with what the next turn
+   *  runs with; the host only keeps it for that turn, and a refusal takes
+   *  it back. */
+  private async setModel(model: string | null, effort: string | null): Promise<void> {
+    const before = this.offered;
+    if (before) this.choose({ ...before, model: model ?? before.model, effort: effort ?? before.effort });
+    const done = await this.run({ name: "model", description: "", args: null, arguments: "optional", control: "model", source: null }, "", { do: "model", model, effort }, true);
+    if (!done && before) this.unchoose(before);
+  }
+
+  private async setTier(id: string): Promise<void> {
+    const before = this.offered;
+    if (before) this.choose({ ...before, service_tier: id });
+    const done = await this.run({ name: "tier", description: "", args: null, arguments: "optional", control: null, source: null }, id, { do: "command", name: "tier", args: id }, true);
+    if (!done && before) this.unchoose(before);
+  }
+
+  private choose(next: Offers): void {
+    this.offered = next;
+    this.drawChip();
+    this.sayNextTurn();
+  }
+
+  private unchoose(before: Offers): void {
+    this.offered = before;
+    this.drawChip();
+  }
+
+  /** What the next turn runs with, said under the input once the host took
+   *  a choice made in the model panel: the model, the effort and a speed
+   *  other than the standard one, in the panel's own words. */
+  private sayNextTurn(): void {
+    const offered = this.offered;
+    const words = this.options.controls?.words.said;
+    if (!offered || !words) return;
+    const model = offered.models.find((one) => one.id === offered.model);
+    const tier = offered.service_tier && offered.service_tier !== "default" ? (model?.service_tiers.find((one) => one.id === offered.service_tier)?.name ?? offered.service_tier) : null;
+    const effort = offered.effort ? effortLabel(offered.effort, this.options.words.english) : null;
+    this.say(words.model(model?.name ?? offered.model ?? "", [effort, tier].filter(Boolean).join(" · ") || null));
+  }
+
+  /** Does a command, the World's own control or the host's; says whether
+   *  it was done. A choice made in the model panel is `quiet`: the panel
+   *  shows it at once, so under the input only a refusal is said. */
+  private async run(command: MenuCommand, args: string, given?: Control, quiet = false): Promise<boolean> {
+    const controls = this.options.controls;
+    if (!controls) return false;
+    const words = controls.words;
+    if (command.control === "stop") {
+      this.stop();
+      return true;
+    }
+    if (command.control === "model" && !given && !args) {
+      this.modelPanel?.show(true);
+      return false;
+    }
+    // What the interface already holds is shown from here, not asked for.
+    if (command.source === "codex" && !given && !args) {
+      if (command.name === "status" || command.name === "usage") {
+        this.say("");
+        if (!this.usagePopover?.open) this.toggleUsage();
+        return true;
+      }
+      if (command.name === "skills") {
+        this.say("");
+        this.showSaid(`/${command.name}`, skillsHtml(this.offered, words.said));
+        return true;
+      }
+    }
+    const what: Control =
+      given ??
+      (command.control === "compact"
+        ? { do: "compact" }
+        : command.control === "model"
+          ? { do: "model", model: args, effort: null }
+          : command.control === "rename"
+            ? { do: "rename", name: args }
+            : command.control === "fork"
+              ? { do: "fork", through: null }
+              : { do: "command", name: command.name, args, ...(command.path ? { path: command.path } : {}) });
+    if (!quiet) this.say(words.running(command.name));
+    try {
+      const done = await controls.control(what);
+      // A choice kept for the next turn: the caller already shows it, and
+      // nothing else changed for it to be asked again.
+      if (quiet && (done.kind === "done" || done.kind === "reported" || done.kind === "selected")) return true;
+      if (done.kind === "forked") {
+        this.say(words.done(command.name));
+        controls.forked(done.resident);
+        return true;
+      }
+      // The fork exists but not all of it came over: it opens, and why is said.
+      if (done.kind === "fork_incomplete") {
+        this.say(words.forkIncomplete, done.why, true);
+        controls.forked(done.resident);
+        return true;
+      }
+      if (done.kind === "side_answer") {
+        const reply = done.reply !== null && typeof done.reply === "object" && !Array.isArray(done.reply) ? done.reply : {};
+        const text = typeof reply.text === "string" ? reply.text : JSON.stringify(done.reply, null, 2);
+        this.say("");
+        this.showSaid(`/${command.name}`, `<div class="prose">${render(text)}</div>`);
+        return true;
+      }
+      if (done.kind === "agents" || done.kind === "agent_messages") return true;
+      if (done.kind === "model_menu") {
+        this.say("");
+        if (this.offered) this.offered = { ...this.offered, models: done.models, model: done.model, effort: done.effort, service_tier: done.service_tier };
+        this.drawChip();
+        this.modelPanel?.show(true);
+        return true;
+      }
+      if (done.kind === "refused") {
+        this.say(done.current_model ? words.refusedOn(done.said, done.current_model) : done.said, "", true);
+        void this.askOffers();
+        return false;
+      }
+      if (done.kind === "reported") {
+        const shown = done.said === null ? null : shownOf(command.name, what, done.said, words.said);
+        if (shown?.kind === "panel") {
+          this.say("");
+          this.showSaid(shown.title, shown.html);
+        } else this.say(shown?.text || words.reported(command.name));
+        void this.askOffers();
+        return true;
+      }
+      const model = what.do === "model" ? this.offered?.models.find((m) => m.id === what.model) : undefined;
+      const said = done.kind === "done" ? done.said : null;
+      const shown = shownOf(command.name, what.do === "model" && model ? { ...what, model: model.name ?? model.id } : what, said, words.said);
+      if (shown?.kind === "panel") {
+        this.say("");
+        this.showSaid(shown.title, shown.html);
+      } else this.say(shown?.text ?? words.done(command.name));
+      void this.askOffers();
+      return true;
+    } catch (error) {
+      this.say(words.failed(detailOf(error)), detailOf(error), true);
+      return false;
+    }
+  }
+
+  private fit(): void {
+    this.fitter.fit();
+  }
+
+  private jobs: JobsPanel | null = null;
+
+  /** What the resident started that still runs (`jobs-panel.ts`). */
+  running(jobs: Job[], now: Date): void {
+    const { words } = this.options;
+    this.jobs ??= new JobsPanel(this.element.querySelector<HTMLButtonElement>(".composer-jobs")!, this.element.querySelector<HTMLElement>(".jobs-pop")!, {
+      words: {
+        title: words.stillRunning,
+        stop: words.stop,
+        stopAsk: words.stopJobAsk,
+        notStopped: words.notStopped,
+        cancel: this.options.controls?.words.never ?? words.cancel,
+        output: words.jobOutput,
+        loading: words.jobOutputLoading,
+        failed: words.jobOutputFailed,
+        interrupted: words.watchInterrupted(null),
+        ended: words.jobOver,
+        lasted: (ms) => lasted(ms, words),
+      },
+      stop: this.options.stopJob,
+      output: this.options.jobOutput,
+      detail: detailOf,
+    });
+    this.jobs.update(jobs, now);
+  }
+
+  private away: "removed" | "deleted" | null = null;
+
+  /** Whether the user archived it, or deleted it, as the World last listed
+   *  it. Archived, it is kept to read and can be brought back where the
+   *  composer was; deleted, what is shown is all that is left of it here. */
+  presence(away: "removed" | "deleted" | null): void {
+    if (this.away === away) return;
+    this.away = away;
+    this.element.querySelector<HTMLElement>(".composer")!.hidden = away !== null;
+    const gone = this.element.querySelector<HTMLElement>(".composer-gone")!;
+    gone.hidden = away === null;
+    const manage = this.options.manage;
+    gone.innerHTML =
+      away === "removed"
+        ? manage
+          ? `${glyph("archive", 16)}<span>${escape(manage.words.archived)}</span><button class="text-button composer-restore" type="button">${glyph("unarchive", 16)}<span>${escape(manage.words.restore)}</span></button>`
+          : escape(this.options.words.removedNote)
+        : away === "deleted"
+          ? `${glyph("trash", 16)}<span>${escape(manage?.words.deleted ?? this.options.words.removedNote)}</span>`
+          : "";
+    this.element.querySelector<HTMLElement>(".talk-menu-toggle")?.toggleAttribute("hidden", away === "deleted");
+    this.drawState();
+    this.drawFocus();
+  }
+
+  /** Who it is, as the World lists it: a conversation opened before then,
+   *  as one just started, goes by its agent's id until this; its project
+   *  and model follow it when they change. */
+  identify(who: Someone): void {
+    // A change being kept stands until the World lists it.
+    if (this.focusSaving) who = { ...who, focus: this.options.someone.focus ?? null };
+    Object.assign(this.options.someone, who);
+    const said = this.options.words.sendPlaceholder(who.agent);
+    this.input.placeholder = said;
+    this.input.setAttribute("aria-label", said);
+    this.drawState();
+    this.drawFocus();
+  }
+
+  private focusPanel: FocusPanel | null = null;
+  /** What the panel holds while it is open. */
+  private focusDraft: Focus | null = null;
+  private focusSaving = false;
+
+  /** The strip under the head: the machines and folders it is pointed at,
+   *  which open the panel to change them; a change is kept, and told to
+   *  the agent, as the panel closes. */
+  private focusStrip(focus: NonNullable<PageOptions["focus"]>): void {
+    const strip = document.createElement("div");
+    strip.className = "focus-strip";
+    strip.hidden = true;
+    strip.innerHTML = `<button type="button" class="talk-chip focus-chip" aria-haspopup="dialog" aria-expanded="false"></button><span class="focus-state" aria-live="polite"></span><div class="focus-pop" role="dialog" hidden></div>`;
+    this.element.querySelector(".page-head")?.after(strip);
+    const chip = strip.querySelector<HTMLButtonElement>(".focus-chip")!;
+    const pop = strip.querySelector<HTMLElement>(".focus-pop")!;
+    chip.addEventListener("click", () => (pop.hidden ? this.openFocus(focus) : this.closeFocus(focus)));
+    document.addEventListener("pointerdown", (event) => {
+      if (pop.hidden || !this.element.isConnected) return;
+      const target = event.target as HTMLElement;
+      if (!pop.contains(target) && !chip.contains(target)) this.closeFocus(focus);
+    });
+    strip.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || pop.hidden) return;
+      event.stopPropagation();
+      this.closeFocus(focus);
+      chip.focus({ preventScroll: true });
+    });
+  }
+
+  /** The machines and folders keep the size they opened at, growing only
+   *  as a folder is walked to (`../app/steady`). */
+  private focusSteady: Steady | null = null;
+
+  private openFocus(focus: NonNullable<PageOptions["focus"]>): void {
+    const current = this.options.someone.focus;
+    if (!current || this.focusSaving) return;
+    const strip = this.element.querySelector<HTMLElement>(".focus-strip")!;
+    const pop = strip.querySelector<HTMLElement>(".focus-pop")!;
+    this.focusSteady ??= new Steady(pop, true);
+    this.focusDraft = structuredClone(current);
+    this.focusPanel ??= new FocusPanel(
+      {
+        words: focus.words,
+        places: focus.places,
+        folders: focus.folders,
+        changed: (next) => {
+          this.focusDraft = next;
+        },
+        done: () => this.closeFocus(focus),
+      },
+      current,
+    );
+    this.focusPanel.set(current);
+    pop.replaceChildren(this.focusPanel.element);
+    pop.hidden = false;
+    this.focusSteady.hold();
+    this.focusSteady.watch();
+    strip.querySelector(".focus-chip")!.setAttribute("aria-expanded", "true");
+    layerOpened({ isOpen: () => !pop.hidden && this.element.isConnected, close: () => this.closeFocus(focus) });
+  }
+
+  private closeFocus(focus: NonNullable<PageOptions["focus"]>): void {
+    const strip = this.element.querySelector<HTMLElement>(".focus-strip")!;
+    const pop = strip.querySelector<HTMLElement>(".focus-pop")!;
+    if (pop.hidden) return;
+    pop.hidden = true;
+    this.focusSteady?.free();
+    strip.querySelector(".focus-chip")!.setAttribute("aria-expanded", "false");
+    const before = this.options.someone.focus;
+    const next = this.focusDraft;
+    this.focusDraft = null;
+    if (!before || !next || sameFocus(before, next)) return;
+    const state = strip.querySelector<HTMLElement>(".focus-state")!;
+    this.focusSaving = true;
+    this.options.someone.focus = next;
+    this.drawFocus();
+    state.textContent = focus.words.saving;
+    state.classList.remove("refused");
+    focus
+      .set(next)
+      .then((unfinished) => {
+        state.textContent = unfinished.join(" · ");
+      })
+      .catch((error: unknown) => {
+        this.options.someone.focus = before;
+        state.textContent = focus.words.failed(error instanceof Error ? error.message : String(error));
+        state.classList.add("refused");
+      })
+      .finally(() => {
+        this.focusSaving = false;
+        this.drawFocus();
+      });
+  }
+
+  /** The strip as the conversation stands: shown where the user may point
+   *  it, and while it is not removed. */
+  private drawFocus(): void {
+    const words = this.options.focus?.words;
+    const strip = this.element.querySelector<HTMLElement>(".focus-strip");
+    if (!words || !strip) return;
+    const focus = this.options.someone.focus;
+    strip.hidden = !focus || this.away !== null;
+    if (!focus) return;
+    const chip = strip.querySelector<HTMLButtonElement>(".focus-chip")!;
+    const summary = focusSummary(focus, words);
+    const html = `${glyph("machine", 16)}${summary ? summary.html : `<span class="talk-chip-name">${escape(words.none)}</span>`}${glyph("chevron", 12)}`;
+    if (chip.innerHTML !== html) chip.innerHTML = html;
+    chip.classList.toggle("quiet", !summary);
+    chip.title = summary ? `${words.title} · ${summary.said}` : words.title;
+    chip.disabled = this.focusSaving;
+  }
+
+  /** The watch on the session is over: what is shown stays, and the bar
+   *  says it is no longer live. */
+  lost(why: string | null): void {
+    this.view.unfollowed();
+    this.gone = this.options.words.watchEnded(why);
+    this.goneWhy = why ?? "";
+    this.interrupted = false;
+    this.drawState();
+  }
+
+  /** The live stream broke and is being read again: what is shown stays,
+   *  and the bar says it is reconnecting; on hover, why and for how long. */
+  broken(why: string | null, since: Date): void {
+    this.gone = this.options.words.watchInterrupted(why);
+    this.brokenWhy = why;
+    this.brokenSince = since;
+    this.interrupted = true;
+    this.drawState();
+  }
+
+  /** The stream came back after it broke. */
+  resumed(): void {
+    if (!this.interrupted) return;
+    this.interrupted = false;
+    this.gone = null;
+    this.goneWhy = "";
+    this.brokenWhy = null;
+    this.brokenSince = null;
+    this.drawState();
+  }
+
+  private interrupted = false;
+  /** Why the live stream broke, and since when, while it is broken. */
+  private brokenWhy: string | null = null;
+  private brokenSince: Date | null = null;
+
+  /** The state last said, and where it is said to a screen reader. */
+  private said: string | null = null;
+  private spoken!: HTMLElement;
+
+  private drawState(): void {
+    const { words, someone, conversation } = this.options;
+    // The host's own title for the conversation, once it gives one, with
+    // who and where in the line under it.
+    const title = conversation.title;
+    const name = title
+      ? `${escape(title)}`
+      : `${escape(someone.agent)}<span class="who-at"> · ${escape(someone.machine)}</span>`;
+    if (!this.renaming && this.name.innerHTML !== name) this.name.innerHTML = name;
+    const renamable = !!this.offered?.controls.includes("rename");
+    this.name.classList.toggle("renamable", renamable);
+    if (renamable) {
+      this.name.tabIndex = 0;
+      this.name.title = this.options.controls?.words.commands.rename ?? "";
+    } else {
+      this.name.removeAttribute("tabindex");
+      this.name.removeAttribute("title");
+    }
+    // Archived or deleted, it is not said to work or wait.
+    const waiting = !this.gone && this.away === null && conversation.waiting();
+    // Working for the whole of a turn, not only while something shows.
+    const working = !this.gone && this.away === null && !waiting && conversation.busy();
+    const now =
+      this.gone ??
+      (this.away !== null
+        ? this.away === "deleted"
+          ? (this.options.manage?.words.deleted ?? words.removed)
+          : words.removed
+        : waiting
+          ? words.waitingForYou
+          : working
+            ? words.working
+            : words.idle);
+    // A screen reader hears the conversation change state, once each time:
+    // its words as they stream would be too many to hear.
+    if (this.said !== null && this.said !== now) this.spoken.textContent = `${someone.agent} · ${now}`;
+    this.said = now;
+    // Under the title, where it lives, and whose agent assists.
+    const facts = [
+      now,
+      title ? `${someone.agent} · ${someone.machine}` : null,
+      someone.assistFrom ? words.assistFrom(someone.assistFrom) : null,
+      someone.project,
+      // The model that answered, by its name rather than its id.
+      this.options.conversation.answeredBy ? modelName(this.options.conversation.answeredBy) : someone.model,
+    ].filter(Boolean) as string[];
+    const mark = waiting ? `<span class="ask-mark" aria-hidden="true"></span>` : working ? `<span class="pulse" aria-hidden="true"></span>` : "";
+    // Waiting for the user is said in the accent; the rest stays quiet.
+    const [first, ...rest] = facts.map(escape);
+    this.state.innerHTML = `${mark}<span><span class="who-first">${first}</span>${rest.map((fact) => ` · ${fact}`).join("")}</span>`;
+    this.state.classList.toggle("working", working);
+    this.state.classList.toggle("waiting", waiting);
+    this.state.classList.toggle("gone", this.gone !== null);
+    // How long it has been broken is as of when the pointer comes to it.
+    const why = this.interrupted && this.brokenSince
+      ? words.brokenFor(words.took(Date.now() - this.brokenSince.getTime()), this.brokenWhy)
+      : this.goneWhy;
+    if (why) this.state.title = why;
+    else this.state.removeAttribute("title");
+    // How much of the context is used: the host's latest report, from the
+    // conversation's events, or from what it offers when it says; with it
+    // how the cache served the last request and how long it stays.
+    const used = conversation.context ?? this.offered?.usage?.context ?? null;
+    if (this.badge) {
+      const requests = conversation.requests;
+      this.badge.draw(used, requests);
+      // Without anything to measure, the limits still have a way in.
+      this.context.hidden = !this.badge.shows && !this.offered?.usage?.limits.length;
+      // The pop-up open follows each new request.
+      const pop = this.element.querySelector<HTMLElement>(".usage-pop")!;
+      if (!pop.hidden && this.usageDrawn !== `${requests.length}:${requests[requests.length - 1]?.at}:${conversation.context?.used}`) this.fillUsage();
+    } else if (used && used.window) {
+      const share = Math.min(1, used.used / used.window);
+      const percent = Math.round(share * 100);
+      const label = this.options.controls
+        ? this.options.controls.words.context(percent, used.used, used.window)
+        : words.context(percent);
+      this.context.innerHTML = `${ring(share)}<span class="context-share">${percent}%</span>`;
+      this.context.title = label;
+      this.context.setAttribute("aria-label", label);
+      this.context.classList.toggle("full", share >= 0.85);
+      this.context.hidden = false;
+    } else {
+      this.context.innerHTML = "";
+      this.context.removeAttribute("title");
+      this.context.removeAttribute("aria-label");
+      // Without a context to show, the limits still have a way in.
+      this.context.hidden = !this.offered?.usage?.limits.length;
+      if (!this.context.hidden) this.context.textContent = this.options.controls?.words.usage.title ?? "";
+    }
+  }
+
+  private drawAction(): void {
+    const { words, conversation } = this.options;
+    const typed = this.input.value.trim() !== "" || ((this.session ? this.nodeTray?.count : this.tray?.count) ?? 0) > 0;
+    const busy = conversation.busy();
+    if (!busy) this.stopping = false;
+    const stop = !typed && busy;
+    this.action.innerHTML = glyph(stop ? "stop" : "send", 18);
+    const waits = this.released !== null || (this.session ? this.queues() : busy);
+    const label = stop ? (this.stopping ? words.stopping : words.stop) : typed && waits ? words.queue.queue : words.send;
+    this.action.setAttribute("aria-label", label);
+    this.action.title = label;
+    this.action.classList.toggle("stop", stop);
+    this.action.classList.toggle("stopping", stop && this.stopping);
+    this.action.disabled = !typed && !stop;
+  }
+}
+
+/** A span of time as the interface says it elsewhere: minutes, hours. */
+function lasted(ms: number, words: Words): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  return minutes < 60 ? words.minutes(minutes) : words.hours(Math.floor(minutes / 60), minutes % 60);
+}
+
+/** What a call returned to the model, in characters: its text, and about a
+ *  page's worth for each picture. */
+function returnedSize(tool: Tool): number {
+  return tool.output.reduce((size, part) => size + (part.type === "text" ? part.text.length : 1_600), 0);
+}

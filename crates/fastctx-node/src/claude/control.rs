@@ -1,0 +1,648 @@
+//! Conversation controls and pending human requests for the Claude bridge.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use fastctx_hosts::claude::control::{self as files, Answer, Host, Waiting};
+use fastctx_types::ResidentId;
+use fastctx_types::ipc::Failure;
+use fastctx_types::session::control::{Control, ControlKind, Controlled, Offers};
+use fastctx_types::session::{Happened, SessionChange, SessionEvent};
+use jiff::Timestamp;
+use serde_json::{Value, json};
+use tokio::sync::oneshot;
+
+use crate::Node;
+
+#[derive(Default)]
+pub struct Bridge {
+    calls: Mutex<HashMap<String, Invocation>>,
+    requests: Mutex<HashMap<String, Request>>,
+    observed: Mutex<HashSet<(String, String, fastctx_types::ProcessIdentity)>>,
+}
+
+struct Invocation {
+    host: Host,
+    sender: oneshot::Sender<Result<Value, String>>,
+}
+
+#[derive(Clone)]
+struct Request {
+    resident: ResidentId,
+    directory: PathBuf,
+    waiting: Waiting,
+    completed: Arc<tokio::sync::watch::Sender<Option<Answer>>>,
+}
+
+pub async fn control(node: &Arc<Node>, resident: &ResidentId, control: Control) -> Result<Controlled, Failure> {
+    match control {
+        Control::Fork { through } => super::fork::fork(node, resident, through).await,
+        Control::Answer { request, answer } => answer_request(node, resident, request, answer).await,
+        Control::Rewind { from } => {
+            super::history::wait_stored(
+                node,
+                &node
+                    .residents
+                    .about(resident)
+                    .and_then(|(about, _)| about.session)
+                    .ok_or_else(|| Failure::new("Claude has not identified this conversation"))?,
+            )
+            .await
+            .map_err(Failure::new)?;
+            let result = invoke(node, resident, json!({"do":"rewind", "from":from})).await?;
+            if result["kind"] == "rewound" {
+                super::rewind::finish(node, resident, &result, Some(&from)).await?
+            }
+            serde_json::from_value(result).map_err(|error| Failure::new(format!("Claude control reply: {error}")))
+        }
+        // A choice for a session that is not running now is kept where its
+        // mod reads it when the session runs again: the session is not woken
+        // for it.
+        Control::Model { model, effort } if !running(node, resident)? => keep_selection(node, resident, model, effort),
+        control => {
+            let result = invoke(node, resident, serde_json::to_value(control).expect("control serializes")).await?;
+            serde_json::from_value(result).map_err(|error| Failure::new(format!("Claude control reply: {error}")))
+        }
+    }
+}
+
+/// Whether the session's mod runs now with the control contract this node
+/// speaks.
+fn running(node: &Node, resident: &ResidentId) -> Result<bool, Failure> {
+    let (about, _) = node.residents.about(resident).ok_or_else(|| Failure::new("unknown resident"))?;
+    let Some(session) = &about.session else { return Ok(false) };
+    let directory = files::directory(node.world.path(), session);
+    match files::host(&directory).map_err(failure)? {
+        Some(host) => Ok(files::active(&directory, &host).map_err(failure)?
+            && host.command_contract == Some(files::COMMAND_CONTRACT)),
+        None => Ok(false),
+    }
+}
+
+/// The reasoning efforts Claude Code takes, as its mod checks them.
+const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+fn keep_selection(
+    node: &Node,
+    resident: &ResidentId,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<Controlled, Failure> {
+    if model.as_deref().is_some_and(|model| model.trim().is_empty()) {
+        return Err(Failure::new("a model cannot be empty"));
+    }
+    if let Some(effort) = &effort
+        && !EFFORTS.contains(&effort.as_str())
+    {
+        return Err(Failure::new(format!("unknown Claude reasoning effort: {effort}")));
+    }
+    let (about, _) = node.residents.about(resident).ok_or_else(|| Failure::new("unknown resident"))?;
+    let session = about.session.ok_or_else(|| Failure::new("Claude has not identified this conversation yet"))?;
+    let directory = files::directory(node.world.path(), &session);
+    let mut selection = files::read::<Value>(&directory.join("selection.json")).map_err(failure)?.unwrap_or(json!({}));
+    if !selection.is_object() {
+        selection = json!({});
+    }
+    if let Some(model) = &model {
+        selection["model"] = json!(model);
+    }
+    if let Some(effort) = &effort {
+        selection["effort"] = json!(effort);
+    }
+    let write = |name: &str, value: &Value| {
+        fastctx_platform::ensure_private_dir(&directory)
+            .and_then(|()| {
+                fastctx_platform::publish(
+                    &directory.join(name),
+                    &serde_json::to_vec(value).map_err(std::io::Error::other)?,
+                    fastctx_platform::Permissions::Private,
+                )
+            })
+            .map_err(failure)
+    };
+    write("selection.json", &selection)?;
+    // A model chosen by the user stops following the engine's own routing,
+    // as the mod does when it takes the choice itself.
+    if model.is_some() {
+        write("routing.json", &Value::Null)?;
+    }
+    Ok(Controlled::Selected {
+        model: selection["model"].as_str().map(str::to_owned),
+        effort: selection["effort"].as_str().map(str::to_owned),
+    })
+}
+
+pub async fn offers(node: &Arc<Node>, resident: &ResidentId) -> Result<Offers, Failure> {
+    let (about, _) = node.residents.about(resident).ok_or_else(|| Failure::new("unknown resident"))?;
+    let mut running = false;
+    if let Some(session) = &about.session {
+        let directory = files::directory(node.world.path(), session);
+        if let Some(host) = files::host(&directory).map_err(failure)? {
+            running = files::active(&directory, &host).map_err(failure)?
+                && host.command_contract == Some(files::COMMAND_CONTRACT);
+        }
+    }
+    let mut offers = if running {
+        let value = invoke(node, resident, json!({"do":"offers"})).await?;
+        let mut offers =
+            serde_json::from_value::<Offers>(value).map_err(|error| Failure::new(format!("Claude offers: {error}")))?;
+        // The mod lists the aliases this login's Claude Code offers; the
+        // World offers its own table's rows of those families.
+        let aliases: Vec<String> = offers.models.drain(..).map(|model| model.id).collect();
+        offers.models = fastctx_hosts::claude::models::model_offers(Some(&aliases));
+        offers
+    } else {
+        let selected = about
+            .session
+            .as_ref()
+            .map(|session| files::read::<Value>(&files::directory(node.world.path(), session).join("selection.json")))
+            .transpose()
+            .map_err(failure)?
+            .flatten();
+        let initial = crate::session_options::read(node, resident)?;
+        let checkpoints = about
+            .session
+            .as_ref()
+            .map(|session| files::read_message(&files::directory(node.world.path(), session).join("checkpoints.json")))
+            .transpose();
+        let checkpoints = match checkpoints {
+            Ok(value) => value.filter(|value| value["full"] == true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(failure(error)),
+        };
+        Offers {
+            checkpoints: checkpoints.as_ref().map(|value| {
+                value["turns"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(turn, point)| fastctx_types::session::control::TurnCheckpoint {
+                        turn: turn.clone(),
+                        rewind: false,
+                        fork: point["after"].as_u64().is_some_and(|count| count > 0) && point["after_uuid"].is_string(),
+                    })
+                    .collect()
+            }),
+            history_limits: Some(fastctx_types::session::control::HistoryLimits {
+                files_restored: false,
+                compacted_turns_reachable: false,
+                empty_prefix_allowed: false,
+                complete_prefix: checkpoints.is_some(),
+            }),
+            model: selected
+                .as_ref()
+                .and_then(|value| value["model"].as_str())
+                .map(str::to_owned)
+                .or(initial.model)
+                .or(about.model),
+            effort: selected
+                .as_ref()
+                .and_then(|value| value["effort"].as_str())
+                .map(str::to_owned)
+                .or(initial.reasoning_effort),
+            models: fastctx_hosts::claude::models::model_offers(None),
+            ..Default::default()
+        }
+    };
+    if about.session.is_some() && super::command(node, about.home.as_deref()).is_ok() {
+        offers.controls.push(ControlKind::Fork);
+    }
+    if node.claude.bridge.requests.lock().expect("never poisoned").values().any(|request| &request.resident == resident)
+    {
+        offers.controls.push(ControlKind::Answer);
+    }
+    Ok(offers)
+}
+
+fn live_host(node: &Node, resident: &ResidentId) -> Result<(PathBuf, Host), Failure> {
+    let (about, _) = node.residents.about(resident).ok_or_else(|| Failure::new("unknown resident"))?;
+    let session = about.session.ok_or_else(|| Failure::new("Claude has not identified this conversation yet"))?;
+    let directory = files::directory(node.world.path(), &session);
+    let host = files::host(&directory).map_err(failure)?.ok_or_else(|| {
+        Failure::new("this Claude session has no active World control bridge; reopen it with the current plugin")
+    })?;
+    if !files::active(&directory, &host).map_err(failure)? {
+        return Err(Failure::new("this Claude session is not running; reopen it before controlling it"));
+    }
+    if host.command_contract != Some(files::COMMAND_CONTRACT) {
+        return Err(Failure::new(
+            "this Claude session's World mod still has the old terminal command contract; reload it before using conversation controls",
+        ));
+    }
+    Ok((directory, host))
+}
+
+pub(super) async fn selection(
+    node: &Arc<Node>,
+    resident: &ResidentId,
+    running: bool,
+) -> Result<fastctx_types::agents::SessionOptions, Failure> {
+    let initial = crate::session_options::read(node, resident)?;
+    let selected = if running {
+        Some(invoke(node, resident, json!({"do":"selection"})).await?)
+    } else {
+        let (about, _) = node.residents.about(resident).ok_or_else(|| Failure::new("unknown resident"))?;
+        about
+            .session
+            .as_ref()
+            .map(|session| files::read::<Value>(&files::directory(node.world.path(), session).join("selection.json")))
+            .transpose()
+            .map_err(failure)?
+            .flatten()
+    };
+    Ok(fastctx_types::agents::SessionOptions {
+        model: selected.as_ref().and_then(|value| value["model"].as_str()).map(str::to_owned).or(initial.model),
+        reasoning_effort: selected
+            .as_ref()
+            .and_then(|value| value["effort"].as_str())
+            .map(str::to_owned)
+            .or(initial.reasoning_effort),
+    })
+}
+
+pub(super) async fn invoke(node: &Arc<Node>, resident: &ResidentId, control: Value) -> Result<Value, Failure> {
+    let (directory, host) = live_host(node, resident)?;
+    let key = crate::speech::new_id("control").to_string();
+    let path = directory.join("inbox").join(format!("{key}.json"));
+    let (sender, receiver) = oneshot::channel();
+    node.claude
+        .bridge
+        .calls
+        .lock()
+        .expect("never poisoned")
+        .insert(key.clone(), Invocation { host: host.clone(), sender });
+    struct Pending<'a> {
+        node: &'a Node,
+        key: &'a str,
+    }
+    impl Drop for Pending<'_> {
+        fn drop(&mut self) {
+            let mut calls = self.node.claude.bridge.calls.lock().expect("never poisoned");
+            calls.remove(self.key);
+            if calls.is_empty() {
+                *calls = HashMap::new();
+            }
+        }
+    }
+    let _pending = Pending { node, key: &key };
+    let result = fastctx_platform::current_identity().and_then(|controller| {
+        files::write_message(&path, &json!({"instance":host.instance,"controller":controller,"control":control}))
+    });
+    if let Err(error) = result {
+        node.claude.bridge.calls.lock().expect("never poisoned").remove(&key);
+        return Err(failure(error));
+    }
+    // The activation's process stream also ends when its plugin unloads.
+    // Its exit, a clear or reload, or the reply settles this one-shot.
+    let reply = receiver.await.map_err(|_| Failure::new("the Claude control bridge stopped"))?;
+    collect_invocation(&directory, &key).map_err(failure)?;
+    reply.map_err(Failure::new)
+}
+
+async fn answer_request(
+    node: &Node,
+    resident: &ResidentId,
+    address: Value,
+    answer: Value,
+) -> Result<Controlled, Failure> {
+    let request = node
+        .claude
+        .bridge
+        .requests
+        .lock()
+        .expect("never poisoned")
+        .get(&address.to_string())
+        .filter(|request| &request.resident == resident)
+        .cloned()
+        .ok_or_else(|| Failure::new("this Claude request is no longer waiting, or belongs to another resident"))?;
+    let mut completed = request.completed.subscribe();
+    let question = &request.waiting.question;
+    let directory = files::directory(node.world.path(), &question.host.session);
+    if !files::active(&directory, &question.host).map_err(failure)?
+        || !fastctx_platform::is_alive(&request.waiting.process).map_err(failure)?
+        || request.directory.join("resolved.json").exists()
+        || request.directory.join("cancel.json").exists()
+    {
+        return Err(Failure::new("Claude already finished or cancelled this request"));
+    }
+    files::validate_answer(question, &answer).map_err(Failure::new)?;
+    files::answer(&request.directory, &Answer::Answer { answer: answer.clone() }).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Failure::new("this Claude request already has an answer")
+        } else {
+            failure(error)
+        }
+    })?;
+    loop {
+        if let Some(resolution) = completed.borrow_and_update().clone() {
+            return match resolution {
+                Answer::Answer { answer: received } if received == answer => Ok(Controlled::Done { said: None }),
+                Answer::Pass { reason } => {
+                    Err(Failure::new(format!("Claude stopped waiting before taking this answer: {reason}")))
+                }
+                _ => Err(Failure::new("Claude took a different answer")),
+            };
+        }
+        completed.changed().await.map_err(|_| Failure::new("the Claude request bridge stopped"))?;
+    }
+}
+
+/// Called by the existing session-directory watcher, after pairing. No
+/// control response is interpreted as a transcript or as a new model turn.
+pub async fn look(node: &Arc<Node>, resident: &ResidentId, session_directory: &Path) -> std::io::Result<()> {
+    let directory = session_directory.join("control");
+    let Some(host) = files::host(&directory)? else { return Ok(()) };
+    if !session_present(node, session_directory)? {
+        ended(node, &host.session);
+        return Ok(());
+    }
+    observe_activation(node, &host, session_directory);
+    {
+        let mut calls = node.claude.bridge.calls.lock().expect("never poisoned");
+        let keys: Vec<_> =
+            calls.iter().filter(|(_, call)| call.host.session == host.session).map(|(key, _)| key.clone()).collect();
+        for key in keys {
+            let path = directory.join("replies").join(format!("{key}.json"));
+            let result = if path.with_extension("done").exists() {
+                let reply = files::read_message(&path)?;
+                Some(if let Some(error) = reply.get("error").and_then(Value::as_str) {
+                    Err(error.to_string())
+                } else {
+                    reply.get("ok").cloned().ok_or_else(|| "Claude control reply has neither ok nor error".to_string())
+                })
+            } else if calls[&key].host != host || !files::active(&directory, &host)? {
+                Some(Err("the Claude activation ended before confirming the control; it will not be repeated".into()))
+            } else {
+                None
+            };
+            if let Some(result) = result {
+                let call = calls.remove(&key).expect("held invocation");
+                let _ = call.sender.send(result);
+            }
+        }
+    }
+    for path in crate::retention::entries(&directory.join("replies"))? {
+        if path.extension().is_some_and(|extension| extension == "done")
+            && let Some(key) = path.file_stem().and_then(|key| key.to_str())
+            && !node.claude.bridge.calls.lock().expect("never poisoned").contains_key(key)
+        {
+            collect_invocation(&directory, key)?;
+        }
+    }
+    let entries = match std::fs::read_dir(directory.join("requests")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(waiting) = files::read::<Waiting>(&path.join("request.json"))? else { continue };
+        if waiting.question.directory(&directory)? != path {
+            return Err(std::io::Error::other("Claude request directory does not match its address"));
+        }
+        let key = waiting.question.address().to_string();
+        if let Some(resolution) = files::read::<Answer>(&path.join("resolved.json"))? {
+            resolved(node, &key, resolution)?;
+            if !fastctx_platform::is_alive(&waiting.process)? {
+                fastctx_platform::owned_directory::delete(&path)?;
+            }
+            continue;
+        }
+        if waiting.question.host != host
+            || !files::active(&directory, &host)?
+            || !fastctx_platform::is_alive(&waiting.process)?
+        {
+            resolved(node, &key, Answer::Pass { reason: "the Claude request's process or activation ended".into() })?;
+            continue;
+        }
+        let (completed, _) = tokio::sync::watch::channel(None);
+        let request = Request { resident: resident.clone(), directory: path, waiting, completed: Arc::new(completed) };
+        let fresh = {
+            let mut requests = node.claude.bridge.requests.lock().expect("never poisoned");
+            if requests.contains_key(&key) {
+                false
+            } else {
+                requests.insert(key.clone(), request.clone());
+                true
+            }
+        };
+        if fresh {
+            changed(
+                node,
+                &request,
+                SessionChange::Request {
+                    id: request.waiting.question.address(),
+                    request: request.waiting.question.request.clone(),
+                    params: request.waiting.question.params.clone(),
+                },
+            );
+            waiting_state(node, resident)?;
+            supervise(node, key, request);
+        }
+    }
+    waiting_state(node, resident)
+}
+
+pub(super) fn collect_invocation(directory: &Path, key: &str) -> std::io::Result<()> {
+    for side in ["inbox", "replies"] {
+        for extension in ["json", "done", "parts"] {
+            match fastctx_platform::owned_directory::delete(&directory.join(side).join(format!("{key}.{extension}"))) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn observe_activation(node: &Arc<Node>, host: &Host, directory: &Path) {
+    let key = (host.session.clone(), host.instance.clone(), host.process.clone());
+    if !node.claude.bridge.observed.lock().expect("never poisoned").insert(key.clone()) {
+        return;
+    }
+    let process = host.process.clone();
+    let host = host.clone();
+    let node = node.clone();
+    let directory = directory.to_path_buf();
+    tokio::spawn(async move {
+        let exited = fastctx_platform::host_process::exited(&process);
+        tokio::pin!(exited);
+        let result = loop {
+            let changed = node.claude.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let removed = node
+                .residents
+                .resident_of_thread(&host.session)
+                .is_some_and(|resident| node.residents.removed(&resident).is_some());
+            match session_present(&node, &directory) {
+                Ok(false) => break Ok(()),
+                Ok(true) => {}
+                Err(error) => break Err(error),
+            }
+            match files::active(&files::directory(node.world.path(), &host.session), &host) {
+                Ok(false) => break Ok(()),
+                Ok(true) if removed => break Ok(()),
+                Ok(true) => {}
+                Err(error) => break Err(error),
+            }
+            tokio::select! { result = &mut exited => break result, () = changed => {} }
+        };
+        match result {
+            Ok(()) => super::look(&node, &directory).await,
+            result => node.log.line(format_args!("observing Claude's control activation: {result:?}")),
+        }
+        let mut observed = node.claude.bridge.observed.lock().expect("never poisoned");
+        observed.remove(&key);
+        if observed.is_empty() {
+            *observed = HashSet::new();
+        }
+    });
+}
+
+fn session_present(node: &Node, directory: &Path) -> std::io::Result<bool> {
+    match fastctx_hosts::claude::exchange::registration(directory)? {
+        Some(registration) => super::pairing::present(node, &registration),
+        None => Ok(false),
+    }
+}
+
+fn supervise(node: &Arc<Node>, key: String, request: Request) {
+    let node = node.clone();
+    tokio::spawn(async move {
+        let process = request.waiting.process.clone();
+        let exited = fastctx_platform::host_process::exited(&process);
+        let mut completed = request.completed.subscribe();
+        tokio::pin!(exited);
+        tokio::select! {
+            _ = async { let _ = completed.wait_for(Option::is_some).await; } => return,
+            result = &mut exited => {
+                if let Err(error) = result {
+                    node.log.line(format_args!("observing Claude's answer helper: {error}"));
+                }
+            }
+            () = node.watchers.unwatched(&request.resident), if !request.waiting.question.native_wait => {
+                let pass = Answer::Pass { reason: "no one is watching this conversation in the World".into() };
+                if let Err(error) = files::answer(&request.directory, &pass)
+                    && error.kind() != std::io::ErrorKind::AlreadyExists {
+                    node.log.line(format_args!("returning Claude's request to its host: {error}"));
+                }
+                tokio::select! {
+                    result = &mut exited => if let Err(error) = result {
+                        node.log.line(format_args!("observing Claude's answer helper: {error}"));
+                    },
+                    _ = async { let _ = completed.wait_for(Option::is_some).await; } => return,
+                }
+            }
+        }
+        let result = files::read::<Answer>(&request.directory.join("resolved.json"))
+            .map(|answer| answer.unwrap_or(Answer::Pass { reason: "Claude stopped waiting for this request".into() }))
+            .and_then(|answer| resolved(&node, &key, answer));
+        if let Err(error) = result {
+            node.log.line(format_args!("settling Claude's request: {error}"));
+        }
+    });
+}
+
+fn resolved(node: &Node, key: &str, answer: Answer) -> std::io::Result<()> {
+    let request = {
+        let mut requests = node.claude.bridge.requests.lock().expect("never poisoned");
+        let request = requests.remove(key);
+        if requests.is_empty() {
+            *requests = HashMap::new();
+        }
+        request
+    };
+    if let Some(request) = request {
+        request.completed.send_replace(Some(answer.clone()));
+        changed(
+            node,
+            &request,
+            SessionChange::Resolved {
+                id: request.waiting.question.address(),
+                resolution: serde_json::to_value(answer).expect("answer serializes"),
+            },
+        );
+        waiting_state(node, &request.resident)?;
+    }
+    Ok(())
+}
+
+/// Whether the resident waits on the user, and for what: the latest of its
+/// requests still open.
+fn waiting_state(node: &Node, resident: &ResidentId) -> std::io::Result<()> {
+    let requests = node.claude.bridge.requests.lock().expect("never poisoned");
+    let latest =
+        requests.values().filter(|request| &request.resident == resident).max_by_key(|request| request.waiting.at);
+    let waiting = latest.is_some();
+    let asked = latest.and_then(|request| {
+        let question = &request.waiting.question;
+        crate::asked::of_request(&question.address(), &question.request, &question.params, request.waiting.at)
+    });
+    let now = node.residents.now(resident);
+    let asked = match asked {
+        Some(asked) => Some(asked),
+        // A question asked without waiting is not settled by a request.
+        None => now.as_ref().and_then(|now| now.asked.clone()).filter(|asked| !asked.waits),
+    };
+    if now.is_some_and(|now| now.waiting_for_user == waiting && now.asked == asked) {
+        return Ok(());
+    }
+    node.residents.change_now(&node.world, resident, |now| {
+        now.waiting_for_user = waiting;
+        now.asked = asked;
+    })
+}
+
+fn changed(node: &Node, request: &Request, change: SessionChange) {
+    node.watchers.publish(
+        &request.resident,
+        &SessionEvent {
+            at: Timestamp::now(),
+            happened: Happened::Changed { turn: request.waiting.question.turn.clone(), change },
+        },
+    );
+}
+
+pub fn ended(node: &Node, session: &str) {
+    node.claude.changed.notify_waiters();
+    let mut calls = node.claude.bridge.calls.lock().expect("never poisoned");
+    let keys: Vec<_> =
+        calls.iter().filter(|(_, call)| call.host.session == session).map(|(key, _)| key.clone()).collect();
+    for key in keys {
+        let call = calls.remove(&key).expect("held invocation");
+        let _ = call
+            .sender
+            .send(Err("the Claude session ended before confirming the control; it will not be repeated".into()));
+    }
+    drop(calls);
+    let requests: Vec<_> = node
+        .claude
+        .bridge
+        .requests
+        .lock()
+        .expect("never poisoned")
+        .iter()
+        .filter(|(_, request)| request.waiting.question.host.session == session)
+        .map(|(key, request)| (key.clone(), request.clone()))
+        .collect();
+    for (key, request) in requests {
+        let answer = Answer::Pass { reason: "the Claude conversation ended".into() };
+        if let Err(error) = files::answer(&request.directory, &answer)
+            && error.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            node.log.line(format_args!("releasing Claude's answer helper: {error}"));
+        }
+        if let Err(error) = resolved(node, &key, answer) {
+            node.log.line(format_args!("settling Claude's interrupted request: {error}"));
+        }
+    }
+}
+
+fn failure(error: std::io::Error) -> Failure {
+    Failure::new(error.to_string())
+}

@@ -1,0 +1,70 @@
+[package]
+name = "fastctx-install"
+description = "Putting the World's tools into the user's own Codex and Claude Code sessions, taking them out, and taking over what an old fastctx left"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[test]]
+name = "apply_health"
+harness = false
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+fastctx-hands = { path = "../fastctx-hands" }
+fastctx-client = { path = "../fastctx-client" }
+fastctx-hosts = { path = "../fastctx-hosts" }
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-types = { path = "../fastctx-types" }
+getrandom = { version = "0.3", features = ["std"] }
+jiff.workspace = true
+jsonc-parser = { version = "0.33.1", features = ["serde"] }
+regex-lite = "0.1"
+roxmltree = "0.21"
+ryu-js = "1"
+serde.workspace = true
+serde_json.workspace = true
+semver = "1"
+sha2 = "0.10"
+thiserror.workspace = true
+toml = "0.9"
+toml_edit = "0.25"
+tokio = { workspace = true, features = ["rt", "time"] }
+x509-parser = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+xattr = "1"
+
+[target.'cfg(windows)'.dependencies]
+which = "=8.0.0"
+windows-registry = "0.6"
+windows-service = "0.8.1"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Services",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+tempfile = "3"

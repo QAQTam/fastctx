@@ -1,0 +1,95 @@
+.map-canvas {
+  --canvas-ink: currentColor;
+  --canvas-selection: currentColor;
+  --canvas-paper: transparent;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  user-select: none;
+  background: var(--canvas-paper);
+  cursor: default;
+}
+.map-canvas[data-panning="true"] { cursor: grabbing; }
+/* A picture in a page that scrolls: a finger moving over it moves the page. */
+.map-canvas.map-still { touch-action: pan-x pan-y; }
+/* The frame the left button draws round several: a light wash, no line. */
+.canvas-marquee {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--canvas-selection) 14%, transparent);
+}
+.canvas-marquee[hidden] { display: none; }
+/* How to zoom and move the drawing, for a mouse only. */
+.canvas-hints {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 16px;
+  color: var(--text-3, currentColor);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: none;
+}
+.canvas-hint { display: inline-flex; align-items: center; gap: 5px; }
+.canvas-hint kbd {
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--fill-strong, transparent);
+  font: inherit;
+  font-size: 11px;
+}
+.canvas-plus { opacity: 0.7; }
+.canvas-mouse { width: 11px; height: 16px; flex: none; }
+.canvas-mouse-wheel { fill: var(--pen-clay, currentColor); }
+.canvas-hints > :not(.canvas-hint) { pointer-events: auto; }
+@media not ((hover: hover) and (pointer: fine)) {
+  .canvas-hint { display: none; }
+}
+.canvas-under, .canvas-ink, .canvas-over { position: absolute; transform-origin: 0 0; pointer-events: none; }
+.canvas-overlay, .canvas-hits, .canvas-names { position: absolute; inset: 0; pointer-events: none; }
+.canvas-object, .canvas-handle, .canvas-name { position: absolute; left: 0; top: 0; margin: 0; }
+.canvas-object, .canvas-handle {
+  pointer-events: auto;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  border-radius: 50%;
+  cursor: inherit;
+}
+.canvas-object:focus-visible, .canvas-handle:focus-visible { outline: 2px solid var(--canvas-selection); outline-offset: 3px; }
+.canvas-object[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--canvas-selection); }
+.canvas-object[data-valid="true"] { box-shadow: 0 0 0 1px var(--canvas-selection); }
+.canvas-object[data-target="true"] { box-shadow: 0 0 0 3px var(--canvas-selection); }
+.canvas-name {
+  color: var(--canvas-ink);
+  white-space: pre;
+  font: inherit;
+  font-size: 14px;
+  line-height: 19px;
+  text-align: center;
+}
+.canvas-name[hidden] { display: none; }
+.canvas-name[data-side="right"] { text-align: left; }
+.canvas-name[data-side="left"] { text-align: right; }
+.canvas-handle { width: 44px; height: 44px; font-size: 32px; cursor: crosshair; }
+.canvas-controls {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  color: var(--canvas-ink);
+  background: var(--canvas-paper);
+  cursor: default;
+}
+.canvas-controls button { width: 44px; height: 44px; color: inherit; font: inherit; border: 0; background: transparent; cursor: pointer; }
+.canvas-controls output { min-width: 4em; text-align: center; font-size: 13px; }
+.canvas-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

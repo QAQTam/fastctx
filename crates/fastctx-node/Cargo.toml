@@ -1,0 +1,37 @@
+[package]
+name = "fastctx-node"
+description = "The node: the one long-lived process on each machine, and the only writer of the World's state there"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[test]]
+name = "own_lifetime"
+harness = false
+
+[dependencies]
+tempfile = "3"
+anyhow.workspace = true
+base64 = "0.22"
+fastctx-hands = { path = "../fastctx-hands" }
+fastctx-client = { path = "../fastctx-client" }
+fastctx-file-search = { path = "../fastctx-file-search" }
+fastctx-hosts = { path = "../fastctx-hosts" }
+fastctx-hub = { path = "../fastctx-hub" }
+fastctx-install = { path = "../fastctx-install" }
+fastctx-net = { path = "../fastctx-net" }
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-ripgrep = { path = "../fastctx-ripgrep" }
+fastctx-types = { path = "../fastctx-types" }
+fastctx-update = { path = "../fastctx-update" }
+getrandom = { version = "0.3", features = ["std"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+jiff.workspace = true
+notify = "8"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

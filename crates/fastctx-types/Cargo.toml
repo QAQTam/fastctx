@@ -1,0 +1,21 @@
+[package]
+name = "fastctx-types"
+description = "The World's contracts: every name, record, event and request has one type, defined here"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Machine and hub names: NFKC, case folding, scripts and categories, from the Unicode data ICU4X carries.
+icu_casemap = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.3", default-features = false, features = ["compiled_data"] }
+jiff = { workspace = true }
+# Release versions, test releases among them, in their semver order.
+semver = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

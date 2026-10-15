@@ -1,0 +1,372 @@
+/* Taking fastctx off this computer (removal.ts), in three steps: the two
+   ways as the welcome page's slips; the way chosen, small, over what goes
+   and what stays as solid chips; the list ticked off in pencil as the steps
+   are done. Each step takes the place of the one before, in a dialog of
+   one height: what may run long is in a frame of its own that scrolls. */
+
+.removal-stage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  height: min(460px, 64vh);
+  overflow-y: auto;
+}
+
+/* The first step is the two slips as they are, at the top of the same
+   height the later steps take: nothing in it is stretched to fill it. */
+.removal-stage > .removal-ways {
+  flex: none;
+  margin: 0;
+}
+
+.removal-stage.choosing {
+  justify-content: center;
+  padding-bottom: var(--space-8);
+}
+
+.removal-chosen {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4) var(--space-2) var(--space-2);
+  border-radius: var(--radius-m);
+  background: var(--accent-wash);
+}
+
+.removal-chosen.erase {
+  background: color-mix(in srgb, var(--wrong) 20%, transparent);
+}
+
+.removal-chosen .welcome-way-mark {
+  flex: none;
+  width: 60px;
+  margin: 0;
+}
+
+.removal-chosen-words {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.removal-chosen-title {
+  font-family: var(--font-emphasis);
+  font-size: var(--size-ui);
+  color: var(--text-strong);
+}
+
+.removal-chosen-what {
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+/* What may run long, framed, filling what the step leaves: the full list,
+   the steps being ticked. */
+.removal-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 96px;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-m);
+  background: var(--fill);
+  scroll-behavior: smooth;
+}
+
+.removal-frame .removal-head {
+  margin-top: var(--space-2);
+}
+
+/* Over the steps being ticked: what is happening, and how far along. */
+.removal-tally {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.removal-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+/* On a narrow screen each way is a row: its drawing beside its words. */
+@media (max-width: 520px) {
+  .removal-way {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    column-gap: var(--space-3);
+    align-items: center;
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .removal-way .welcome-way-mark {
+    grid-row: 1 / 3;
+    width: 64px;
+    margin: 0;
+  }
+}
+
+.removal-plan {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 0;
+  animation: removal-rise 0.28s cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+/* Drawn again for a press within the step, it stays where it rose to. */
+.removal-plan.risen {
+  animation: none;
+}
+
+@keyframes removal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.removal-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.removal-head {
+  margin: 0 0 var(--space-2);
+  font-size: var(--size-small);
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.removal-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.removal-chip {
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  background: var(--fill);
+  font-size: var(--size-small);
+  color: var(--text);
+  cursor: default;
+}
+
+.removal-column.goes .removal-chip {
+  background: color-mix(in srgb, var(--wrong) 12%, var(--fill));
+}
+
+.removal-column.stays .removal-chip {
+  background: var(--accent-wash);
+}
+
+.removal-warn,
+.removal-note {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-m);
+  font-size: var(--size-small);
+  line-height: var(--leading-ui);
+}
+
+.removal-warn {
+  background: color-mix(in srgb, var(--wrong) 14%, var(--bg));
+  color: var(--text-strong);
+}
+
+.removal-note {
+  background: var(--fill);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.removal-toggle {
+  margin-left: calc(-1 * var(--space-3));
+}
+
+.removal-list,
+.removal-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--size-small);
+}
+
+.removal-list li,
+.removal-left li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 3px 0;
+}
+
+.removal-mark {
+  flex: none;
+  align-self: center;
+  width: 16px;
+  height: 16px;
+}
+
+.removal-mark svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--text-3);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.removal-list li[data-result="done"] .removal-mark svg {
+  stroke: var(--pen-graphite);
+}
+
+.removal-list li[data-result="failed"] .removal-mark svg {
+  stroke: var(--wrong);
+}
+
+.removal-list li[data-result] .removal-mark path {
+  stroke-dasharray: 30;
+  stroke-dashoffset: 30;
+  animation: way-draw 0.45s cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+.removal-list li[data-result="failed"] .removal-what {
+  color: var(--wrong);
+}
+
+/* A step still to come: every list of steps is listed whole from the start,
+   so it is ticked in place and never grows. */
+.removal-list li[data-state="ahead"] .removal-what {
+  color: var(--text-3);
+}
+
+.removal-what {
+  flex: none;
+  color: var(--text);
+}
+
+.removal-where,
+.removal-left code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.removal-why {
+  color: var(--wrong);
+}
+
+.removal-go {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  width: 100%;
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+.removal-admin {
+  margin-right: auto;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* Typed exactly as the World's name; it keeps one fill however it is
+   pointed at or typed into. */
+.removal-name {
+  flex: 1 1 220px;
+  height: 34px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-m);
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--size-ui);
+  outline: none;
+}
+
+.removal-button {
+  flex: none;
+  height: 34px;
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-full);
+  background: var(--wrong);
+  color: var(--bg);
+  font-size: var(--size-ui);
+  transition: background-color var(--hover) ease, transform var(--hover) ease;
+}
+
+.removal-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--wrong) 85%, var(--text-strong));
+}
+
+.removal-button.armed {
+  animation: removal-armed 1.2s ease-in-out infinite;
+}
+
+@keyframes removal-armed {
+  50% {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--wrong) 40%, transparent);
+  }
+}
+
+.removal-button:disabled {
+  opacity: 0.45;
+}
+
+.removal-said {
+  margin: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.removal-wrong {
+  color: var(--wrong);
+}
+
+:root[data-reduced] .removal-plan,
+:root[data-reduced] .removal-button.armed,
+:root[data-reduced] .removal-list li[data-result] .removal-mark path {
+  animation: none;
+  stroke-dashoffset: 0;
+}
+
+/* The uninstall dialog: wide enough for its two slips side by side. */
+.removal-sheet {
+  margin-top: 8vh;
+}
+
+.removal-sheet .sheet-body {
+  width: min(760px, 100vw - 32px);
+  max-height: 84vh;
+  overflow-y: auto;
+}
+
+.settings-uninstall {
+  margin-left: calc(-1 * var(--space-2));
+}

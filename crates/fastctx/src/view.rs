@@ -1,0 +1,135 @@
+//! `fastctx view`: the command around the hands' viewer.
+
+use std::io::{Read as _, Write as _};
+use std::path::PathBuf;
+
+use anyhow::{Context as _, bail};
+use clap::Args;
+use fastctx_client::Client;
+use fastctx_hands::view::{Options, view};
+use fastctx_types::ipc::Peer;
+use fastctx_types::layout::WorldDir;
+use fastctx_types::{Address, Call, TownName};
+
+/// Look at files: numbered text, images, PDF pages, and Office content.
+#[derive(Args)]
+pub struct ViewArgs {
+    /// Only lines FIRST-LAST (or one line), counting from 1, of every file.
+    #[arg(long, value_name = "FIRST-LAST")]
+    lines: Option<String>,
+    /// Only characters FIRST-LAST of each line, counting from 1 as head notes do; for reading on in a line too long to show at once.
+    #[arg(long, value_name = "FIRST-LAST", conflicts_with_all = ["pages", "master", "sheet", "sheet_index", "range", "image"])]
+    chars: Option<String>,
+    /// Only PDF pages or PowerPoint slides FIRST-LAST, counting from 1.
+    #[arg(long, value_name = "FIRST-LAST")]
+    pages: Option<String>,
+    /// Only PowerPoint master and layout text; --lines selects within it.
+    #[arg(long, conflicts_with_all = ["pages", "sheet", "sheet_index", "range", "image", "encoding"])]
+    master: bool,
+    /// Excel sheet name, matched literally (including numeric names).
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["sheet_index", "lines", "pages", "image", "encoding"])]
+    sheet: Option<String>,
+    /// Excel sheet index, counting from 1; useful for continuing a workbook.
+    #[arg(long, value_name = "NUMBER", conflicts_with_all = ["sheet", "lines", "pages", "image", "encoding"])]
+    sheet_index: Option<usize>,
+    /// Excel cells in an inclusive A1 rectangle, such as B2:F40 or C7.
+    #[arg(long, value_name = "A1:D20", conflicts_with_all = ["lines", "pages", "image", "encoding"])]
+    range: Option<String>,
+    /// Render PDF pages as images instead of showing their text layer.
+    #[arg(long, conflicts_with_all = ["lines", "encoding"])]
+    image: bool,
+    /// Read text in this encoding, such as gbk or shift_jis; a list such as utf-8,gbk is tried line by line, for a log that mixes them.
+    #[arg(long, value_name = "NAME")]
+    encoding: Option<String>,
+    /// Also look at the NUL-separated paths in FILE (`-` for standard input).
+    #[arg(long, value_name = "FILE")]
+    files0_from: Option<PathBuf>,
+    /// The files, shown in this order.
+    paths: Vec<PathBuf>,
+}
+
+pub fn run(args: ViewArgs) -> anyhow::Result<std::process::ExitCode> {
+    let mut paths = args.paths;
+    if let Some(list) = &args.files0_from {
+        let mut bytes = Vec::new();
+        if list.as_os_str() == "-" {
+            std::io::stdin().read_to_end(&mut bytes)?;
+        } else {
+            let list = fastctx_platform::local_path(list)?;
+            bytes = std::fs::read(&list).with_context(|| format!("reading {}", list.display()))?;
+        }
+        for name in bytes.split(|&b| b == 0).filter(|name| !name.is_empty()) {
+            let name = std::str::from_utf8(name).context("a path in the list is not UTF-8")?;
+            paths.push(PathBuf::from(name));
+        }
+    }
+    if paths.is_empty() {
+        bail!("name the files to look at, such as: fastctx view -- /path/to/file");
+    }
+    let lines = args.lines.as_deref().map(|text| parse_range(text, "lines")).transpose()?;
+    let chars = args.chars.as_deref().map(|text| parse_range(text, "chars")).transpose()?;
+    let pages = args.pages.as_deref().map(|text| parse_range(text, "pages")).transpose()?;
+    let world = WorldDir::under(&fastctx_platform::fastctx_root()?);
+    // Inside a World `run` the answer's first line already names the machine.
+    let in_run = std::env::var_os("FASTCTX_MACHINE").is_some();
+    let options = Options {
+        lines,
+        chars,
+        pages,
+        master: args.master,
+        sheet: args.sheet,
+        sheet_index: args.sheet_index,
+        range: args.range.as_deref().map(str::parse).transpose()?,
+        image: args.image,
+        encoding: args.encoding,
+        machine: if in_run { None } else { machine(&world) },
+        in_run,
+    };
+    let mut out = crate::output::out();
+    let viewed = view(&paths, &options, &mut out)?;
+    out.flush()?;
+    drop(out);
+    record(&world, viewed.seen)?;
+    Ok(if viewed.failed { std::process::ExitCode::FAILURE } else { std::process::ExitCode::SUCCESS })
+}
+
+/// `FIRST-LAST` or `LINE`, counting from 1.
+fn parse_range(text: &str, option: &str) -> anyhow::Result<(u64, u64)> {
+    let (first, last) = text.split_once('-').unwrap_or((text, text));
+    let first: u64 = first.trim().parse().with_context(|| format!("--{option} {text}: FIRST is not a number"))?;
+    let last: u64 = last.trim().parse().with_context(|| format!("--{option} {text}: LAST is not a number"))?;
+    if first == 0 || last < first {
+        bail!("--{option} {text}: {option} count from 1 and LAST is not before FIRST");
+    }
+    Ok((first, last))
+}
+
+/// The machine to name in head notes: the one this World is on.
+fn machine(world: &WorldDir) -> Option<String> {
+    let bytes = std::fs::read(world.machine_file()).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("name")?.as_str().map(str::to_string)
+}
+
+/// In a resident's `run`, what it saw goes on its record, so a later
+/// `write` can tell whether a file changed since.
+fn record(world: &WorldDir, seen: Vec<fastctx_types::residents::Seen>) -> anyhow::Result<()> {
+    let Ok(resident) = std::env::var("FASTCTX_RESIDENT") else {
+        return Ok(());
+    };
+    if seen.is_empty() {
+        return Ok(());
+    }
+    let resident: Address = resident.parse()?;
+    let town = std::env::var("FASTCTX_TOWN").ok().map(TownName::try_from).transpose()?;
+    let call = Call::Saw { owner: resident.clone(), town, seen };
+    let recorded = tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+        let mut client = Client::connect(world, Peer::Command { resident: Some(resident), session: None }).await?;
+        client.call(call).await?;
+        anyhow::Ok(())
+    });
+    if let Err(error) = recorded {
+        eprintln!("fastctx view: what you saw could not be recorded, so a later write cannot check it: {error:#}");
+    }
+    Ok(())
+}

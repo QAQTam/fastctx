@@ -1,0 +1,40 @@
+[package]
+name = "fastctx-hands"
+description = "The World's hands: run, view and write"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[test]]
+name = "job_lifecycle"
+harness = false
+
+[dependencies]
+base64 = "0.22"
+chardetng = { version = "=1.0.0", features = ["testing-only-no-semver-guarantees-do-not-use"] }
+encoding_rs = "0.8"
+fastctx-client = { path = "../fastctx-client" }
+fastctx-office = { path = "../fastctx-office" }
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-pdf = { path = "../fastctx-pdf" }
+fastctx-types = { path = "../fastctx-types" }
+getrandom = { version = "0.3", features = ["std"] }
+jiff.workspace = true
+imara-diff = { version = "0.2", default-features = false }
+memchr = "2"
+regex-lite = "0.1"
+aho-corasick = "1"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+stacker = "0.1"
+tempfile = "3"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

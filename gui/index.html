@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>Fastctx</title>
+    <link rel="preload" href="/fonts/ibm-plex-serif/IBMPlexSerif-400.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/noto-sans-sc/NotoSansSC-400.woff2" as="font" type="font/woff2" crossorigin />
+    <script>
+      // The theme is named before the first paint, so no page flashes in the
+      // wrong one; `theme.ts` keeps it named after.
+      (function () {
+        var themes = ["warm-black", "ink-black", "warm-white"];
+        var asked = new URLSearchParams(location.search).get("theme");
+        try {
+          asked = themes.indexOf(asked) >= 0 ? asked : localStorage.getItem("theme");
+        } catch (e) {}
+        var light = matchMedia("(prefers-color-scheme: light)").matches;
+        var chosen = themes.indexOf(asked) >= 0;
+        var theme = chosen ? asked : light ? "warm-white" : "warm-black";
+        document.documentElement.dataset.theme = theme;
+        // On a phone the page runs under the system bars: their heights, and
+        // the theme for the window behind the page (`system-bars.ts`).
+        var shell = window.WorldWindow;
+        if (shell) {
+          var safe = JSON.parse(shell.insets());
+          document.documentElement.style.setProperty("--safe-top", safe.top + "px");
+          document.documentElement.style.setProperty("--safe-bottom", safe.bottom + "px");
+          shell.paint(theme, chosen, theme === "warm-white", false);
+        }
+        try {
+          var size = localStorage.getItem("bodySize");
+          if (["14", "15", "16", "17"].indexOf(size) >= 0) document.documentElement.style.setProperty("--body-size", size + "px");
+        } catch (e) {}
+        // So is whether the interface moves less: as the system asks, unless
+        // the user chose always or never (`motion.ts`).
+        var motion = null;
+        try {
+          motion = localStorage.getItem("motion");
+        } catch (e) {}
+        var reduced = motion === "off" || (motion !== "always" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+        if (reduced) document.documentElement.setAttribute("data-reduced", "");
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/boot.ts"></script>
+  </body>
+</html>

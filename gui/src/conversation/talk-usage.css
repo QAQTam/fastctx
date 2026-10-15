@@ -1,0 +1,400 @@
+/* A conversation's measure in the input's row (`usage-badge.ts`) and what
+   opens from it (`usage-pop.ts`, `hit-chart.ts`). */
+
+/* The badge: a line icon and a figure for each of what it measures, set
+   apart, quiet until one asks for care. */
+.composer-context {
+  gap: var(--space-3);
+}
+
+.talk-gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.talk-gauge[hidden],
+.talk-gauge-bare[hidden] {
+  display: none;
+}
+
+.talk-gauge > .glyph {
+  flex: none;
+  opacity: 0.85;
+}
+
+.talk-gauge-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-gauge.caution {
+  color: var(--caution);
+}
+
+.talk-gauge.cold {
+  opacity: 0.6;
+}
+
+/* The sweep that writes a changed figure again: the caret ahead in the
+   accent, the marks behind it faint until they settle. */
+.talk-gauge-caret {
+  color: var(--accent);
+}
+
+.talk-gauge-noise {
+  opacity: 0.55;
+}
+
+/* The pop-up: wider than the other menus, for the chart; a page of a
+   notebook, its parts parted by ruled pencil lines. */
+.usage-pop {
+  width: min(480px, 100%);
+  max-height: min(80dvh, 680px);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+}
+
+/* On a phone it is a sheet from the bottom, as the model's panel is, the
+   rest shaded behind it. */
+@media (max-width: 760px) {
+  .usage-pop {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    width: auto;
+    max-height: 86dvh;
+    padding: var(--space-4) var(--space-5) calc(var(--space-5) + var(--safe-bottom));
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
+    animation-name: sheet-rise;
+  }
+}
+
+.talk-usage-rule {
+  height: 8px;
+  margin: var(--space-3) 0;
+  background: var(--pen-rule);
+  -webkit-mask: var(--pen-rule-3) 0 50% / 100% 100% no-repeat;
+  mask: var(--pen-rule-3) 0 50% / 100% 100% no-repeat;
+}
+
+/* The three figures, in the input row's order and with its marks. */
+.talk-usage-figures {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  column-gap: var(--space-3);
+}
+
+.talk-usage-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.talk-usage-big {
+  font-family: var(--font-reading);
+  font-size: 24px;
+  line-height: 1.15;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-usage-figure.cold .talk-usage-big {
+  color: var(--text-3);
+}
+
+.talk-usage-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.talk-usage-label > .glyph {
+  flex: none;
+  opacity: 0.8;
+}
+
+.talk-usage-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The chart of how the cache served each request. */
+.talk-chart {
+  position: relative;
+  margin: 0 calc(-1 * var(--space-1));
+}
+
+.talk-chart svg {
+  display: block;
+  overflow: visible;
+}
+
+.talk-chart-rule {
+  fill: var(--pen-rule);
+}
+
+.talk-chart-ink,
+.talk-chart-latest,
+.talk-chart-dot {
+  fill: var(--pen-clay);
+}
+
+.talk-chart-thread {
+  fill: var(--pen-graphite);
+  opacity: 0.55;
+}
+
+.talk-chart-mean {
+  fill: var(--pen-graphite);
+  opacity: 0.85;
+}
+
+.talk-chart-low {
+  fill: var(--caution);
+}
+
+.talk-chart-axis {
+  fill: var(--text-3);
+  font-family: var(--font-reading);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-chart-hair {
+  stroke: var(--text-3);
+  stroke-width: 1;
+  opacity: 0.6;
+}
+
+.talk-chart-readout {
+  position: absolute;
+  top: -6px;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-s);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  font-size: var(--size-small);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The whole conversation small, always: the stretch shown in a wash of clay
+   between two handles, the rest under a veil of paper. */
+.talk-chart-brush {
+  margin-top: var(--space-1);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+/* Held by the pointer it draws no ring; reached by the keyboard it does. */
+.talk-chart-brush:focus {
+  outline: none;
+}
+
+.talk-chart-brush:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+.talk-chart-overview {
+  fill: var(--pen-graphite);
+  opacity: 0.75;
+}
+
+.talk-chart-window {
+  fill: color-mix(in srgb, var(--pen-clay) 15%, transparent);
+}
+
+.talk-chart-window.whole {
+  fill: color-mix(in srgb, var(--pen-clay) 5%, transparent);
+}
+
+.talk-chart-shade {
+  fill: color-mix(in srgb, var(--bg-elevated) 60%, transparent);
+}
+
+.talk-chart-handles {
+  fill: var(--pen-clay);
+}
+
+.talk-chart-handles.whole {
+  opacity: 0.6;
+}
+
+/* What the stretch's prompts and answers were made of: how many and how
+   long, a bar of marker, and its inks named with how much. */
+.talk-usage-spend {
+  display: grid;
+  row-gap: 6px;
+  padding-top: var(--space-3);
+}
+
+.talk-usage-stretch {
+  font-size: var(--size-small);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-usage-spend .ledger-parts {
+  height: 20px;
+}
+
+.talk-usage-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--space-4);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.talk-usage-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.talk-usage-key > b {
+  font-weight: 400;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-usage-mark {
+  flex: none;
+  width: 16px;
+  height: 8px;
+}
+
+/* At the foot: the account's windows as rings, and what it has cost. */
+.talk-usage-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+}
+
+.talk-usage-ring {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.talk-usage-ring-face {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 44px;
+}
+
+.talk-usage-ring-face svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.talk-usage-ring-num {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12.5px;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-usage-ring-num small {
+  font-size: 9px;
+  color: var(--text-3);
+  margin-left: 1px;
+}
+
+.talk-usage-ring-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  white-space: nowrap;
+}
+
+.talk-usage-ring-name {
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.talk-usage-ring-when {
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.talk-usage-cost {
+  margin-left: auto;
+  font-size: var(--size-small);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The dial that stands for the figures where they have no room. */
+.talk-gauge-dial {
+  display: none;
+}
+
+.talk-gauge-dial.caution {
+  color: var(--caution);
+}
+
+.talk-gauge-dial.cold {
+  opacity: 0.5;
+}
+
+/* On a phone the model's name keeps its room: the dial alone, as small as
+   the context's ring always was, the figures a press away. */
+@media (max-width: 480px) {
+  .talk-gauge {
+    display: none;
+  }
+
+  .talk-gauge-dial:not(:empty) {
+    display: inline-flex;
+  }
+
+  /* Each figure as wide as it needs, so none of their words is cut. */
+  .talk-usage-figures {
+    grid-auto-columns: max-content;
+    justify-content: space-between;
+  }
+
+  .talk-usage-cost {
+    margin-left: 0;
+  }
+}
+
+/* The way to each step's context, quiet under the stretch's bar. */
+.talk-usage-steps {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--space-2) 0 0 calc(-1 * var(--space-2));
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.talk-usage-steps:hover {
+  color: var(--text-strong);
+}
+
+.talk-usage-steps .glyph:last-child {
+  transform: rotate(-90deg);
+}

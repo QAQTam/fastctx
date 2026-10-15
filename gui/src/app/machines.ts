@@ -1,0 +1,1998 @@
+// The machines a login may use (`world-gui.md`, 账号、机器、共享与协助),
+// drawn: the account's World as a hand-drawn map that moves under the hand
+// (`machine-map.ts`), or set out as a list (`machine-list.ts`), as chosen in
+// the page's head and kept on this device. Choosing a hub or a machine floats its actions beside
+// it, small icons that say what they do when pointed at; the right button,
+// or a long press, lists them with their names. What is known of the one
+// chosen stands in a panel that opens only when asked for. Beside each hub
+// a dashed ring adds a machine: it says one is on its way once a way in was
+// given, and the machine is circled as it arrives. A machine of the
+// account's own is shared and removed from here; whom it is shared with is
+// taken back with a press. The network's administrator manages its people
+// here too (`map-people.ts`). Long sayings stand behind a pointer's rest,
+// not on the page.
+
+import { glyph } from "../conversation/glyphs";
+import { layerOpened, type Layer } from "./back";
+import { escape } from "../conversation/prose";
+import { Film } from "../film/film";
+import { network } from "../film/network";
+import { watchFilm } from "../film/theater";
+import type { Point } from "../map-canvas";
+import { blot, circle, outline, ruled, seeded } from "../pen/shapes";
+import type { AccountChange, HubAccounts, Login, MemberSeen } from "../world/accounts";
+import { loginsOf, names } from "../world/accounts";
+import type { NameProblem } from "../world/bridge";
+import type { MachinePageWords } from "./machine-page-words";
+import type { NameSaid } from "./name-words";
+import { RenameField, renamerOf } from "./rename";
+import type { WorldNow } from "../world/bridge";
+import type { LinkState } from "../world/world";
+import { agentName, osName, titleOf } from "../world/names";
+import type { AccessWords, MachinesWords } from "./account-words";
+import type { Confirm } from "./confirm";
+import { redrawKeepingFocus } from "./focus";
+import { AssistSheet, assistChange, assistancesIn, type Assistance } from "./assist-sheet";
+import { HubMoving, type HubMovingOptions } from "./hub-moving";
+import { holdUntilNamed, typedName } from "./typed-name";
+import { GiveSheet } from "./machine-sheets";
+import { MachineLog, type ReadLog } from "./machine-log";
+import { boxParts, chosenGroup, groupChange, groupForm, groupingOf, groupingTogether, groupMoreKey, groupMoreOf, groupNameOf, groupRenameForm, wireGroupForm, type Grouping } from "./machine-groups";
+import { foldedOf, MachineMap, MAP_ORDER, personKey } from "./machine-map";
+import { isManaged, machineList } from "./machine-list";
+import { MapPeople } from "./map-people";
+import type { PeopleWords } from "./people-words";
+import { RING } from "./map-layout";
+import { mapOf, phonesOf } from "./map-of";
+import { deviceKey, type MapNode } from "./map-nodes";
+import { link, talkLink } from "./places";
+import { assistantsOf, groupsOf, isComputer, isSuper, isVisitor, machineActsFor, machinesOf, ownerOf, owns, residentIn, sameLogin, superOf, type Assistant, type Machine } from "./reach";
+import type { Page } from "./shell";
+import { effect } from "./signals";
+import { UpdatePolicySheet, type Policy } from "./update-policy";
+import type { UpdateWords } from "./update-words";
+import { jobsOf, residentsOf, type Store } from "./store";
+
+export interface MachinesOptions {
+  store: Store;
+  words: MachinesWords;
+  access: AccessWords;
+  people: PeopleWords;
+  head(title: string, actions?: string): string;
+  /** The machine to bring into view, when one was named. */
+  focus: string | null;
+  /** When, as the front page says it: a clock time today, a day before. */
+  when(at: Date, now: Date): string;
+  /** Makes a change as a login. */
+  change(login: Login, change: AccountChange): Promise<void>;
+  /** Opens the sheet that lets another device into `login`; once it
+   *  closes, whether a way in was given. */
+  invite(login: Login): Promise<boolean> | void;
+  /** Opens a new conversation with an agent on `machine`, as written. */
+  talk(machine: string): void;
+  confirm: Confirm;
+  /** Reads the hub's record of changes, a page at a time. */
+  log: ReadLog;
+  /** Moving the server to another machine. */
+  moving: Pick<HubMovingOptions, "move" | "arrive" | "remote">;
+  /** Renaming a machine: the words of its field, the rule a name is
+   *  checked by, and renaming this computer. */
+  renaming: {
+    words: MachinePageWords;
+    nameSaid: NameSaid;
+    check(text: string): Promise<NameProblem | null>;
+    here(to: string): Promise<void>;
+  };
+  /** The network's update policy, as this device last heard it, and the
+   *  words of setting it. */
+  updates?: { policy(): Policy; words: UpdateWords } | undefined;
+}
+
+/** A group's box on the drawing: its name, its machines, and how each is
+ *  grouped from this device, in the same order. */
+interface GroupBox {
+  group: string;
+  machines: Machine[];
+  groupings: Grouping[];
+}
+
+/** One thing on the map, as the page knows it. */
+type Spot =
+  | { kind: "machine"; machine: Machine }
+  | { kind: "assist"; assistants: Assistant[] }
+  | { kind: "hub"; hub: HubAccounts }
+  | { kind: "device"; hub: HubAccounts; member: MemberSeen; login: Login; here: boolean };
+
+type GlyphName = Parameters<typeof glyph>[0];
+
+/** What can be done to a hub or machine, as an icon beside it and a line
+ *  in its menu. */
+interface Act {
+  act: string;
+  label: string;
+  icon: GlyphName;
+  danger?: boolean;
+  /** For a setting that is on or off, whether it is on. */
+  on?: boolean;
+}
+
+
+/** How long a taking back can be undone from the drawing's corner. */
+const UNDO_MS = 6_000;
+
+/** How long a machine that just arrived stays circled: the drawing-in of
+ *  the circle and a moment to see it. */
+const ARRIVED_MS = 6_000;
+
+/** Past this many machines others' groups start folded. */
+
+/** The port offered first for direct connections: the one after the hub's
+ *  own, 7443. */
+const DIRECT_PORT = 7444;
+
+/** Where this device keeps whether the machines show as a drawing or a list. */
+const VIEW_KEY = "machines.view";
+
+type View = "map" | "list";
+
+function keptView(): View {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "map";
+  } catch {
+    return "map";
+  }
+}
+
+export class MachinesPage implements Page {
+  private policySheet: UpdatePolicySheet | null = null;
+  private policyLogin: Login | null = null;
+  readonly element: HTMLElement;
+  readonly title: string;
+  private readonly panel: HTMLElement;
+  private readonly canvas: HTMLElement;
+  private readonly map: MachineMap;
+  /** The actions floating beside the one chosen, the menu, the tags of
+   *  whom each machine is given to, and the moment to undo a taking back. */
+  private readonly acts: HTMLElement;
+  private readonly menu: HTMLElement;
+  private readonly undoBar: HTMLElement;
+  private undoing: { timer: number; redo: () => Promise<void> } | null = null;
+  /** The card asking to confirm a change made on the drawing, or to fill
+   *  in what one needs. */
+  private readonly card: HTMLElement;
+  private cardFor: string | null = null;
+  private drawn = "";
+  private floated = "";
+  private readonly stop: () => void;
+  /** The spot chosen, by its key on the map. */
+  private selected: string | null;
+  private detailsOpen: boolean;
+  /** On a narrow page the chosen one's sheet shows its name and actions;
+   *  pulled up, everything known of it. */
+  private grown = false;
+  /** When the sheet was last pulled, so the press that pulled it is not
+   *  also taken for a tap. */
+  private pulled = 0;
+  /** The details, the menu and the card over the drawing, as the system
+   *  back closes them. */
+  private readonly detailsLayer: Layer = {
+    isOpen: () => !!this.selected && !this.panel.hidden && this.element.isConnected,
+    close: () => this.closeDetails(),
+  };
+  private readonly menuLayer: Layer = { isOpen: () => !!this.menuFor && this.element.isConnected, close: () => this.closeMenu() };
+  private readonly cardLayer: Layer = { isOpen: () => !!this.cardFor && this.element.isConnected, close: () => this.closeCard() };
+  /** Redraws when the page turns narrow or wide: the sheet and what floats
+   *  beside the one chosen depend on it. */
+  private readonly resized: ResizeObserver;
+  private readonly log: MachineLog;
+  /** The one to bring into view once the drawing has drawn its next
+   *  frame at its size: until then where it stands is not yet known. */
+  private bring: string | null = null;
+  private menuFor: { key: string | null; at: Point; sheet: boolean } | null = null;
+  private scale = 1;
+  private note: { machine: string; text: string } | null = null;
+  private readonly giving: GiveSheet;
+  private readonly assistSheet: AssistSheet;
+  private readonly moving: HubMoving;
+  private readonly people: MapPeople;
+  /** While the server's new place is chosen: what to do, and why a machine
+   *  pressed cannot take it. */
+  private readonly chooseBar: HTMLElement;
+  private whyNot: { said: string; detail: string } | null = null;
+  /** Hubs a machine is on its way to, with the machines each had when a
+   *  way in was given. */
+  private readonly waiting = new Map<string, Set<string>>();
+  private readonly fresh = new Set<string>();
+  /** Machines direct connections were just allowed to, while the hub
+   *  checks it reaches them. */
+  private readonly opening = new Set<string>();
+  /** Machines framed together with the mouse, and those inside the frame
+   *  while it is drawn. */
+  private framed: string[] = [];
+  private framing: string[] = [];
+  /** Groups the user folded or opened, by key; the rest follow the
+   *  default. */
+  private readonly folds = new Map<string, boolean>();
+  /** Come to a spot named in the address, until the drawing knows it. */
+  private focusing: boolean;
+
+  /** In no network: the film and the ways into one, instead of the
+   *  drawing. */
+  private readonly intro: HTMLElement;
+  private readonly layout: HTMLElement;
+  private film: Film | null = null;
+  /** The machines as a drawing or as a list, and the list as last drawn. */
+  private view: View;
+  private readonly views: HTMLElement;
+  private readonly list: HTMLElement;
+  private listed = "";
+
+  constructor(private readonly options: MachinesOptions) {
+    const { words } = options;
+    this.giving = new GiveSheet(options.access);
+    this.assistSheet = new AssistSheet(options.access);
+    this.moving = new HubMoving({ ...options.moving, words, access: options.access, confirm: options.confirm, changed: () => this.redraw() });
+    this.people = new MapPeople({
+      words: options.people,
+      store: options.store,
+      confirm: options.confirm,
+      change: options.change,
+      card: (key, html, go) => {
+        this.openCard(key, this.map.screenOf(key) ?? [0, 0], html, go);
+        return this.card;
+      },
+      undo: (said, redo) => this.offerUndo(said, redo),
+      failed: (said) => {
+        this.note = { machine: "", text: said };
+        this.redraw();
+      },
+      redraw: () => this.redraw(),
+      ownedBy: (account) => words.ownedBy(account),
+    });
+    this.title = words.title;
+    this.selected = options.focus ? `m:${options.focus}` : null;
+    // Come to one from elsewhere, what is known of it is open; a machine's
+    // own page is where its details are, so it is only chosen.
+    this.detailsOpen = !!options.focus;
+    this.focusing = !!options.focus;
+    this.element = document.createElement("div");
+    this.element.className = "machines-page";
+    this.element.innerHTML = `
+      ${options.head(
+        `<h1 class="page-title">${escape(words.title)}</h1>`,
+        `<div class="ml-views" role="radiogroup" aria-label="${escape(words.views)}" hidden>${(["map", "list"] as View[])
+          .map((view) => `<button class="ml-view" type="button" role="radio" data-view="${view}" title="${escape(view === "map" ? words.viewMap : words.viewList)}">${glyph(view === "map" ? "tree" : "rows", 16)}<span>${escape(view === "map" ? words.viewMap : words.viewList)}</span></button>`)
+          .join("")}</div><button class="text-button add-device" type="button" hidden>${glyph("plus", 16)}<span>${escape(words.add)}</span></button>`,
+      )}
+      <div class="machines-intro" hidden><div class="machines-film"></div><p class="machines-hub-is">${escape(words.hubIs)}</p><div class="machines-ways"><a class="sheet-go" href="${link({ kind: "login", way: "new" })}">${escape(words.newNetwork)}</a><a class="text-button quiet-button" href="${link({ kind: "login", way: "join" })}">${escape(words.joinNetwork)}</a></div></div>
+      <div class="machines-layout"><div class="machines-canvas"><div class="ml-list scroller" role="list" hidden></div><div class="map-undo" role="status" hidden></div><div class="map-choose" role="status" hidden></div><div class="map-acts" role="toolbar" aria-label="${escape(words.actions)}" hidden></div><div class="map-menu" role="menu" aria-label="${escape(words.actions)}" hidden></div><form class="map-card" tabindex="-1" hidden></form></div><aside class="machine-panel scroller" aria-live="polite" hidden></aside></div>`;
+    this.panel = this.element.querySelector<HTMLElement>(".machine-panel")!;
+    this.intro = this.element.querySelector<HTMLElement>(".machines-intro")!;
+    this.layout = this.element.querySelector<HTMLElement>(".machines-layout")!;
+    this.canvas = this.element.querySelector<HTMLElement>(".machines-canvas")!;
+    this.acts = this.element.querySelector<HTMLElement>(".map-acts")!;
+    this.menu = this.element.querySelector<HTMLElement>(".map-menu")!;
+    this.undoBar = this.element.querySelector<HTMLElement>(".map-undo")!;
+    this.chooseBar = this.element.querySelector<HTMLElement>(".map-choose")!;
+    this.card = this.element.querySelector<HTMLElement>(".map-card")!;
+    this.list = this.element.querySelector<HTMLElement>(".ml-list")!;
+    this.views = this.element.querySelector<HTMLElement>(".ml-views")!;
+    // A machine named in the address is shown on the drawing.
+    this.view = options.focus ? "map" : keptView();
+    this.views.addEventListener("click", (event) => {
+      const view = (event.target as HTMLElement).closest<HTMLElement>("[data-view]")?.dataset.view as View | undefined;
+      if (view) this.show(view);
+    });
+    this.list.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      const open = target.closest<HTMLElement>("[data-ml-open]")?.dataset.mlOpen;
+      if (open) return this.details(open);
+      const hub = target.closest<HTMLElement>("[data-ml-add]")?.dataset.mlAdd;
+      const login = hub ? this.hubLogin(hub) : null;
+      if (login) this.invite(login);
+    });
+    // The film of what a network is for, over the drawing, once in one:
+    // the last word of the line of hints under it.
+    const again = document.createElement("button");
+    again.type = "button";
+    again.className = "text-button quiet-button machines-film-again";
+    again.title = words.filmAgainWhat;
+    again.innerHTML = `${glyph("regenerate", 14)}<span>${escape(words.filmAgain)}</span>`;
+    again.addEventListener("click", () => {
+      watchFilm((shape) => network(words.film, shape), words.filmAgainWhat, words.filmClose);
+    });
+    this.map = new MachineMap({
+      afterHints: again,
+      words,
+      people: options.people,
+      storageKey: MAP_ORDER,
+      event: (event) => {
+        if (event.kind === "select") this.choose(event.key);
+        else if (event.kind === "marquee") this.frame(event.keys, event.done);
+        else if (event.kind === "context") this.openMenu(event.key, event.at, event.input !== "mouse" || matchMedia("(max-width: 760px)").matches);
+      },
+      frame: (frame) => {
+        this.scale = frame.view.scale;
+        this.float();
+        if (this.bring && frame.view.height > 0) {
+          const key = this.bring;
+          this.bring = null;
+          this.bringIntoView(key);
+        }
+      },
+    });
+    this.canvas.prepend(this.map.element);
+    this.log = new MachineLog(words, options.log, () => loginsOf(options.store.world.peek()?.accounts), (at) => options.when(at, options.store.clock.peek()));
+    this.canvas.append(this.log.button, this.log.panel);
+    // A ring pressed twice opens what is known of it: a machine's own page,
+    // or the details of a hub or of a machine whose agent assists.
+    this.map.element.addEventListener("dblclick", (event) => {
+      const key = (event.target as HTMLElement).closest<HTMLElement>("[data-item]")?.dataset.item;
+      if (!key || key.startsWith("add:")) return;
+      if (key.startsWith("m:")) location.hash = link({ kind: "machine", name: key.slice("m:".length) });
+      else this.details(key);
+    });
+    const add = this.element.querySelector<HTMLButtonElement>(".add-device")!;
+    // Another device comes into an account: offered where there is one.
+    effect(() => {
+      add.hidden = !loginsOf(options.store.world.get()?.accounts).length;
+    });
+    effect(() => {
+      this.log.button.hidden = !loginsOf(options.store.world.get()?.accounts).length;
+    });
+    add.addEventListener("click", () => {
+      const [first] = loginsOf(options.store.world.peek()?.accounts);
+      if (first) this.invite(first);
+    });
+    this.panel.addEventListener("click", (event) => this.click(event));
+    this.panel.addEventListener("click", (event) => {
+      const section = (event.target as HTMLElement).closest<HTMLElement>(".move-section");
+      const hub = this.selected?.startsWith("hub:") ? this.selected.slice(4) : null;
+      if (section && hub) void this.moving.click(event.target as HTMLElement, hub).catch((error: unknown) => console.warn("the move could not go on", error));
+    });
+    this.panel.addEventListener("click", (event) => this.clickAct(event));
+    this.panel.addEventListener("pointerdown", (event) => this.pull(event));
+    this.acts.addEventListener("click", (event) => this.clickAct(event));
+    this.menu.addEventListener("click", (event) => this.clickAct(event));
+    this.undoBar.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest(".map-undo-go")) void this.undo();
+    });
+    this.chooseBar.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      if (target.closest("[data-choose=new]")) this.moving.toNewServer(() => this.showMove());
+      else if (target.closest("[data-choose=cancel]")) this.stopChoosing();
+    });
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.menuFor) {
+        event.stopPropagation();
+        this.closeMenu();
+      } else if (event.key === "Escape" && this.cardFor) {
+        event.stopPropagation();
+        this.closeCard();
+      } else if (event.key === "Escape" && (this.moving.chosenHub || this.whyNot)) {
+        event.stopPropagation();
+        this.stopChoosing();
+      } else if (event.key === "Escape" && this.framed.length) {
+        event.stopPropagation();
+        this.framed = [];
+        this.redraw();
+      }
+    });
+    this.card.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("[data-card=cancel]")) this.closeCard();
+    });
+    document.addEventListener("pointerdown", this.outside, true);
+    this.stop = effect(() => this.draw(options.store.world.get(), options.store.clock.get()));
+    let narrow: boolean | null = null;
+    this.resized = new ResizeObserver(() => {
+      if (narrow === this.narrow()) return;
+      narrow = this.narrow();
+      this.redraw();
+      // Once the drawing has fitted itself to its new size.
+      if (narrow && this.selected) {
+        this.bring = this.selected;
+        this.map.refresh();
+      }
+    });
+    this.resized.observe(this.element);
+  }
+
+  leave(): void {
+    this.stop();
+    this.film?.destroy();
+    this.moving.dispose();
+    this.resized.disconnect();
+    this.log.dispose();
+    if (this.undoing) clearTimeout(this.undoing.timer);
+    document.removeEventListener("pointerdown", this.outside, true);
+    this.map.dispose();
+  }
+
+  /** A press anywhere but the menu closes it. */
+  private readonly outside = (event: Event): void => {
+    if (this.menuFor && !this.menu.contains(event.target as Node)) this.closeMenu();
+  };
+
+  private loginOf(element: HTMLElement): Login | undefined {
+    const at = element.closest<HTMLElement>("[data-hub]");
+    return loginsOf(this.options.store.world.peek()?.accounts).find((l) => l.hub === at?.dataset.hub && l.account === at?.dataset.account);
+  }
+
+  private click(event: Event): void {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-act]");
+    if (!button || button.disabled) return;
+    const login = this.loginOf(button);
+    const machine = button.closest<HTMLElement>("[data-machine]")?.dataset.machine ?? "";
+    switch (button.dataset.act) {
+      case "share":
+        if (login) this.share(login, machine);
+        return;
+      case "unshare": {
+        const to = button.dataset.to ?? "";
+        if (login) void this.takeBack(button, login, to, { change: "share", machine, to, shared: false }, { change: "share", machine, to, shared: true });
+        return;
+      }
+      case "assist-edit":
+        if (login) this.assist(login, machine, button.dataset.agent ?? "", button.dataset.home ?? null, button.dataset.to ?? null);
+        return;
+      case "assist-end": {
+        const to = button.dataset.to ?? "";
+        const agent = button.dataset.agent ?? "";
+        const home = button.dataset.home ? { home: button.dataset.home } : {};
+        // Given again by the undo, it ends when it was to.
+        const until = button.dataset.until ? { until: button.dataset.until } : {};
+        if (login)
+          void this.takeBack(
+            button,
+            login,
+            `${agentName(agent)} · ${to}`,
+            { change: "assist", machine, to, agent, ...home, assisting: false },
+            { change: "assist", machine, to, agent, ...home, assisting: true, ...until },
+          );
+        return;
+      }
+      case "invite":
+        if (login) this.invite(login);
+        return;
+      case "remove":
+        if (login) this.remove(login, machine);
+        return;
+      case "framed-pick":
+        this.choose(button.dataset.key ?? null);
+        return;
+      case "framed-clear":
+        this.framed = [];
+        this.redraw();
+        return;
+      case "framed-share":
+        this.shareFramed();
+        return;
+      case "framed-group":
+        this.groupFramed();
+        return;
+      case "framed-remove":
+        this.removeFramed();
+        return;
+      case "close-details":
+        this.closeDetails();
+        return;
+      case "grow":
+        if (Date.now() - this.pulled < 400) return;
+        this.grown = !this.grown;
+        this.redraw();
+        return;
+    }
+  }
+
+  /** Whether the page is narrow enough that what is known of the one
+   *  chosen rises as a sheet from below (`machines.css`, 860 pixels). */
+  private narrow(): boolean {
+    const width = this.element.clientWidth;
+    return width > 0 && width <= 860;
+  }
+
+  /** The sheet pulled by its grip: up shows everything, down shows less or
+   *  lets the choice go. */
+  private pull(event: PointerEvent): void {
+    if (!this.narrow() || !(event.target as HTMLElement).closest(".sheet-grip")) return;
+    const from = event.clientY;
+    const up = (ended: PointerEvent) => {
+      const dy = ended.clientY - from;
+      if (Math.abs(dy) < 24) return;
+      this.pulled = Date.now();
+      if (dy < 0) this.grown = true;
+      else if (this.grown) this.grown = false;
+      else this.selected = null;
+      this.redraw();
+    };
+    window.addEventListener("pointerup", up, { once: true });
+  }
+
+  /** On a narrow page the one chosen is brought to the middle of what the
+   *  sheet leaves of the drawing. */
+  private bringIntoView(key: string): void {
+    const at = this.map.screenOf(key);
+    if (!at || this.panel.hidden) return;
+    const box = this.canvas.getBoundingClientRect();
+    // The sheet stands on the bottom of the window; its height, not where
+    // it is while it still rises.
+    const top = document.documentElement.clientHeight - this.panel.offsetHeight;
+    const room = Math.max(0, Math.min(box.height, top - box.top));
+    this.map.glide(box.width / 2 - at[0], room / 2 - at[1]);
+  }
+
+  /** Shows the machines as a drawing or a list, and keeps the choice on
+   *  this device. What was chosen on one is let go on the other. */
+  private show(view: View): void {
+    if (view === this.view) return;
+    this.view = view;
+    try {
+      localStorage.setItem(VIEW_KEY, view);
+    } catch {
+      // Kept for this visit only.
+    }
+    this.selected = null;
+    this.detailsOpen = false;
+    this.framed = [];
+    this.closeMenu();
+    this.closeCard();
+    this.redraw();
+    if (view === "map") requestAnimationFrame(() => this.map.refresh());
+  }
+
+  /** Shows the film and the ways into a network while this computer is in
+   *  none, the drawing once it is in one. */
+  private alone(alone: boolean): void {
+    this.intro.hidden = !alone;
+    this.layout.hidden = alone;
+    this.element.classList.toggle("alone", alone);
+    if (alone && !this.film) {
+      const film = new Film((shape) => network(this.options.words.film, shape), this.options.words.title);
+      this.film = film;
+      this.intro.querySelector(".machines-film")!.replaceChildren(film.element);
+    } else if (!alone && this.film) {
+      this.film.destroy();
+      this.film = null;
+    }
+  }
+
+  /** The groups folded to their knot. Past two dozen machines the drawing
+   *  fitted to the page is too small to read them all, so others' groups
+   *  start folded and the account's own open; what the user opened or
+   *  folded stays so. */
+  private foldedOf(nodes: MapNode[]): Set<string> {
+    return foldedOf(nodes, this.folds);
+  }
+
+  /** A frame drawn round machines: one chosen, or several together. */
+  private frame(keys: string[], done: boolean): void {
+    const machines = keys.filter((key) => key.startsWith("m:"));
+    if (!done) {
+      if (JSON.stringify(machines) === JSON.stringify(this.framing)) return;
+      this.framing = machines;
+      const world = this.options.store.world.peek();
+      if (world) this.drawMap(world);
+      return;
+    }
+    this.framing = [];
+    if (machines.length < 2) return this.choose(machines[0] ?? null);
+    this.closeMenu();
+    this.closeCard();
+    this.framed = machines;
+    this.selected = null;
+    this.redraw();
+  }
+
+  private choose(key: string | null): void {
+    // Choosing where the server goes: a machine that can take it asks to
+    // be confirmed; any other says why it cannot; the paper ends choosing.
+    if (this.moving.chosenHub) {
+      const machine = key?.startsWith("m:") ? this.machineNamed(key) : null;
+      if (!machine) return this.stopChoosing();
+      this.whyNot = this.moving.whyNot(machine);
+      if (!this.whyNot) this.moving.confirmTo(machine, () => this.showMove());
+      this.redraw();
+      return;
+    }
+    // The dashed box that adds a person is itself the way to add one; a
+    // person's "⋯" lists what may be done to them.
+    if (key?.startsWith("adding:")) {
+      this.people.add(key.slice("adding:".length), key);
+      return;
+    }
+    if (key?.startsWith("who:") || key?.startsWith("gm:")) {
+      const at = this.map.screenOf(key);
+      if (at) this.openMenu(key, [at[0] - 20, at[1] + 18], this.narrow());
+      return;
+    }
+    // A group's knot folds its machines away, or opens them again.
+    if (key?.startsWith("group:")) {
+      const world = this.options.store.world.peek();
+      const nodes = world ? mapOf(world, this.options.words).nodes : [];
+      this.folds.set(key, !this.foldedOf(nodes).has(key));
+      this.redraw();
+      return;
+    }
+    this.framed = [];
+    this.closeMenu();
+    // The dashed ring is itself the way to add a machine.
+    if (key?.startsWith("add:")) {
+      this.selected = null;
+      const login = this.hubLogin(key.slice(4));
+      if (login) this.invite(login);
+      this.redraw();
+      return;
+    }
+    this.selected = key;
+    this.note = null;
+    this.grown = false;
+    this.redraw();
+    if (key && this.narrow()) requestAnimationFrame(() => this.bringIntoView(key));
+  }
+
+  private closeDetails(): void {
+    // On a narrow page the sheet is the choice itself.
+    if (this.narrow()) {
+      this.selected = null;
+      this.grown = false;
+    } else this.detailsOpen = false;
+    this.redraw();
+  }
+
+  private details(key: string): void {
+    this.selected = key;
+    this.detailsOpen = true;
+    this.closeMenu();
+    this.redraw();
+    this.panel.scrollTop = 0;
+  }
+
+  /** The first login on a hub, as which a device is let in there. */
+  private hubLogin(hub: string): Login | null {
+    return loginsOf(this.options.store.world.peek()?.accounts).find((login) => login.hub === hub) ?? null;
+  }
+
+  /** Opens the sheet that lets another device in; once a way in was given,
+   *  the hub's dashed ring says a machine is on its way. */
+  private invite(login: Login): void {
+    const given = this.options.invite(login);
+    void Promise.resolve(given).then((yes) => {
+      if (!yes) return;
+      const world = this.options.store.world.peek();
+      this.waiting.set(login.hub, new Set(world ? this.machineKeysOn(world, login.hub) : []));
+      this.redraw();
+    });
+  }
+
+  /** The keys of the machines drawn on a hub. */
+  private machineKeysOn(world: WorldNow, hub: string): string[] {
+    return mapOf(world, this.options.words)
+      .nodes.filter((node) => node.hubs.includes(hub))
+      .map((node) => node.key);
+  }
+
+  private hubOf(login: Login): HubAccounts | null {
+    return this.options.store.world.peek()?.accounts.hubs.find((hub) => hub.hub === login.hub) ?? null;
+  }
+
+  /** The accounts `machine` is shared with, as `login`'s hub says. */
+  private sharedWith(login: Login, machine: string): string[] {
+    return (this.hubOf(login)?.shares ?? []).filter((share) => share.machine === machine).map((share) => share.account);
+  }
+
+  /** The sheet that shares `machine` with other accounts. */
+  private share(login: Login, machine: string): void {
+    const { access } = this.options;
+    this.giving.open(
+      { title: access.shareTitle(machine), what: access.shareWhat, sees: access.shareSees, given: access.sharedTo, go: access.shareGo },
+      this.sharedWith(login, machine),
+      async (to, shared) => {
+        await this.options.change(login, { change: "share", machine, to, shared });
+        await this.options.store.refresh();
+        return this.sharedWith(login, machine);
+      },
+    );
+  }
+
+  private remove(login: Login, machine: string): void {
+    const { access } = this.options;
+    this.options.confirm.ask({
+      title: access.removeTitle(machine),
+      what: access.removeWhat(machine),
+      go: access.removeGo,
+      act: () => this.options.change(login, { change: "remove", name: machine, reason: access.reasonDefault }),
+      done: () => void this.options.store.refresh(),
+    });
+  }
+
+  /** Dissolves `hub`'s network, once its administrator typed its name:
+   *  every machine and phone leaves it, this computer too. */
+  private dissolve(login: Login, hub: HubAccounts): void {
+    const { words } = this.options;
+    const confirm = this.options.confirm;
+    const away = hub.members.filter((member) => !member.online).length;
+    confirm.ask({
+      title: words.dissolveTitle(hub.name),
+      what: words.dissolveWhat(hub.name, away),
+      fields: typedName(words.typeName(hub.name)),
+      go: words.dissolveGo,
+      act: () => this.options.change(login, { change: "dissolve", name: hub.name }),
+      done: () => void this.options.store.refresh(),
+    });
+    holdUntilNamed(confirm.body, hub.name);
+  }
+
+  /** Signs a phone out of the account, once asked. */
+  private removePhone(login: Login, name: string): void {
+    const { access, words } = this.options;
+    this.options.confirm.ask({
+      title: access.removeTitle(name),
+      what: words.removePhoneWhat(name),
+      go: access.removeGo,
+      act: () => this.options.change(login, { change: "remove", name, reason: access.reasonDefault }),
+      done: () => void this.options.store.refresh(),
+    });
+  }
+
+  /** The assist sheet for `agent`'s login `home` on `machine`, given as
+   *  `login`, with `editing`'s deadline open. */
+  private assist(login: Login, machine: string, agent: string, home: string | null, editing: string | null): void {
+    const { options } = this;
+    const assistances = (): Assistance[] => assistancesIn(this.hubOf(login)?.assists ?? [], machine, agent, home);
+    const name = home ? `${agentName(agent)} · ${home.split(/[\\/]/).filter(Boolean).pop() ?? home}` : agentName(agent);
+    this.assistSheet.open(
+      options.access.assistTitle(name, machine),
+      assistances(),
+      async (to, until, weekly, assisting) => {
+        await options.change(login, assistChange(machine, agent, home, to, until, weekly, assisting));
+        await options.store.refresh();
+        this.redraw();
+        return assistances();
+      },
+      editing,
+      agent === "claude",
+    );
+  }
+
+  /** Takes back a share or ends an assistance at once; for a moment it can be given
+   *  again from the drawing's corner. */
+  private async takeBack(button: HTMLButtonElement, login: Login, label: string, take: AccountChange, give: AccountChange): Promise<void> {
+    const machine = button.closest<HTMLElement>("[data-machine]")?.dataset.machine ?? "";
+    button.disabled = true;
+    try {
+      await this.options.change(login, take);
+      this.note = null;
+    } catch (error) {
+      this.note = { machine, text: this.options.access.failed(error instanceof Error ? error.message : String(error)) };
+      button.disabled = false;
+      this.redraw();
+      return;
+    }
+    this.offerUndo(this.options.words.tookBack(label), () => this.options.change(login, give));
+    await this.options.store.refresh();
+    this.redraw();
+  }
+
+  private redraw(): void {
+    this.drawn = "";
+    this.listed = "";
+    this.draw(this.options.store.world.peek(), this.options.store.clock.peek());
+  }
+
+  /** Everything on the map, by its key. */
+  private spots(world: WorldNow): Map<string, Spot> {
+    const spots = new Map<string, Spot>();
+    for (const hub of world.accounts.hubs) if (hub.logins.length) spots.set(`hub:${hub.hub}`, { kind: "hub", hub });
+    for (const machine of machinesOf(world)) spots.set(`m:${machine.written}`, { kind: "machine", machine });
+    for (const assistant of assistantsOf(world)) {
+      const key = `assist:${assistant.written}`;
+      const known = spots.get(key);
+      if (known?.kind === "assist") known.assistants.push(assistant);
+      else spots.set(key, { kind: "assist", assistants: [assistant] });
+    }
+    for (const { hub, member, login } of phonesOf(world))
+      spots.set(deviceKey(hub.hub, member.name), { kind: "device", hub, member, login, here: member.name === world.accounts.machine && !isComputer(world) });
+    return spots;
+  }
+
+  private draw(world: WorldNow | null, now: Date): void {
+    if (!world) return;
+    const { words } = this.options;
+    const spots = this.spots(world);
+    // A machine named in the address may be one whose agent assists.
+    if (this.selected?.startsWith("m:") && !spots.has(this.selected) && spots.has(`assist:${this.selected.slice(2)}`)) this.selected = `assist:${this.selected.slice(2)}`;
+    if (this.selected && !spots.has(this.selected)) this.selected = null;
+    this.drawMap(world);
+    const spot = this.selected ? spots.get(this.selected) : undefined;
+    if (this.focusing && spot) {
+      this.focusing = false;
+      if (spot.kind === "machine") this.detailsOpen = false;
+    }
+    // On a narrow page nothing floats beside the one chosen: its sheet rises
+    // at once, its actions a row in it.
+    const narrow = this.narrow();
+    const framed = this.framed.filter((key) => spots.get(key)?.kind === "machine");
+    const open = (!!spot && (narrow || this.detailsOpen)) || framed.length > 1;
+    if (open && this.panel.hidden) layerOpened(this.detailsLayer);
+    this.panel.hidden = !open;
+    this.panel.classList.toggle("peek", narrow && !this.grown);
+    // In no network, the page is the film of what a network is for and the
+    // ways into one; the drawing waits until there is one.
+    const alone = !loginsOf(world.accounts).length && isComputer(world);
+    this.alone(alone);
+    const listing = !alone && this.view === "list";
+    this.views.hidden = alone;
+    for (const button of this.views.querySelectorAll<HTMLElement>("[data-view]")) {
+      const chosen = button.dataset.view === this.view;
+      button.classList.toggle("chosen", chosen);
+      button.setAttribute("aria-checked", String(chosen));
+    }
+    this.canvas.classList.toggle("listing", listing);
+    this.list.hidden = !listing;
+    if (listing) {
+      const adds = world.accounts.hubs.filter((hub) => this.hubLogin(hub.hub)).map((hub) => hub.hub);
+      const html = machineList({ world, now, selected: open ? this.selected : null, adds, when: this.options.when }, words);
+      if (html !== this.listed) {
+        this.listed = html;
+        redrawKeepingFocus(this.list, () => {
+          this.list.innerHTML = html;
+        });
+      }
+    }
+    // Beside the list nothing floats: the actions are a row in the details.
+    const acts = (narrow || listing) && this.selected ? this.sheetActs(this.selected, world) : "";
+    const grip = narrow
+      ? `<button class="sheet-grip" type="button" data-act="grow" aria-expanded="${this.grown}" aria-label="${escape(this.grown ? words.closeDetails : words.details)}"></button>`
+      : "";
+    const html = alone
+      ? ""
+      : framed.length > 1
+        ? this.framedPanel(framed, world)
+      : spot && open
+        ? `${grip}<button class="icon-button panel-close" type="button" data-act="close-details" aria-label="${escape(words.closeDetails)}" title="${escape(words.closeDetails)}">${glyph("close", 16)}</button>${spot.kind === "hub" ? this.hubPanel(spot.hub, world, acts) : spot.kind === "assist" ? this.assistPanel(spot.assistants, world, now, acts) : spot.kind === "device" ? this.phonePanel(spot.member, spot.here, now, acts) : this.machinePanel(spot.machine, world, now, acts)}`
+        : "";
+    if (html !== this.drawn) {
+      this.drawn = html;
+      redrawKeepingFocus(this.panel, () => {
+        this.panel.innerHTML = html;
+      });
+    }
+    this.drawChoosing();
+    // The server's details follow its move while they are open, for the one
+    // who may move it.
+    const top = spot?.kind === "hub" && open ? this.superLogin(spot.hub, world) : undefined;
+    if (top && spot?.kind === "hub") this.moving.watch(top, spot.hub.hub);
+    else this.moving.unwatch();
+    this.float();
+  }
+
+  /** The strip over the drawing while the server's new place is chosen. */
+  private drawChoosing(): void {
+    const { words } = this.options;
+    const choosing = !!this.moving.chosenHub;
+    this.chooseBar.hidden = !choosing && !this.whyNot;
+    if (this.chooseBar.hidden) return;
+    const said = this.whyNot
+      ? `<span class="map-choose-said why"${this.whyNot.detail ? ` title="${escape(this.whyNot.detail)}"` : ""}>${escape(this.whyNot.said)}</span>`
+      : `<span class="map-choose-said">${escape(words.moveChoose)}</span>`;
+    const fresh = choosing && this.options.moving.remote ? `<button class="text-button quiet-button" type="button" data-choose="new">${glyph("server", 14)}<span>${escape(words.moveNewServer)}</span></button>` : "";
+    const html = `${said}${fresh}<button class="text-button quiet-button" type="button" data-choose="cancel"><span>${escape(choosing ? words.cancel : words.closeDetails)}</span></button>`;
+    if (this.chooseBar.innerHTML !== html) this.chooseBar.innerHTML = html;
+  }
+
+  private stopChoosing(): void {
+    this.whyNot = null;
+    this.moving.stopChoosing();
+    this.redraw();
+  }
+
+  /** The server whose move just began, its details open to follow it. */
+  private showMove(): void {
+    const world = this.options.store.world.peek();
+    const hub = world?.accounts.hubs.find((one) => this.superLogin(one, world));
+    this.whyNot = null;
+    if (hub) {
+      this.selected = `hub:${hub.hub}`;
+      this.detailsOpen = true;
+    }
+    this.redraw();
+  }
+
+  /** The login of this device that is `hub`'s super administrator. */
+  /** The network's update policy, set as its super administrator. */
+  private policy(login: Login): void {
+    const updates = this.options.updates;
+    if (!updates) return;
+    this.policySheet ??= new UpdatePolicySheet(updates.words, async (policy) => {
+      const top = this.policyLogin;
+      if (!top) return;
+      await this.options.change(top, { change: "updates", policy });
+      await this.options.store.refresh();
+    });
+    this.policyLogin = login;
+    this.policySheet.open(updates.policy());
+  }
+
+  private superLogin(hub: HubAccounts, world: WorldNow): Login | undefined {
+    return loginsOf(world.accounts).find((login) => login.hub === hub.hub && hub.accounts.find((account) => account.name === login.account)?.level === "super");
+  }
+
+  /** The machine a key on the drawing stands for, by its name. */
+  private machineNamed(key: string): string | null {
+    const world = this.options.store.world.peek();
+    const spot = world ? this.spots(world).get(key) : undefined;
+    return spot?.kind === "machine" ? spot.machine.name : null;
+  }
+
+  /** The keys of the machines that can take the server. */
+  private litKeys(world: WorldNow): Map<string, { sleeps: boolean }> {
+    const candidates = this.moving.candidates();
+    const lit = new Map<string, { sleeps: boolean }>();
+    for (const machine of machinesOf(world)) {
+      const candidate = candidates.get(machine.name);
+      if (candidate) lit.set(`m:${machine.written}`, candidate);
+    }
+    return lit;
+  }
+
+  /** The drawing: each hub the account is on with the ring that adds a
+   *  machine there, each machine it may work on, and each machine of
+   *  another whose agent assists it. A machine come to a hub one was on its
+   *  way to is circled as it arrives. */
+  private drawMap(world: WorldNow): void {
+    const { hubs, nodes, hubLabels, links, people } = mapOf(world, this.options.words);
+    for (const [hub, before] of this.waiting) {
+      const arrived = nodes.filter((node) => node.hubs.includes(hub) && !before.has(node.key));
+      if (!arrived.length) continue;
+      this.waiting.delete(hub);
+      for (const node of arrived) {
+        this.fresh.add(node.key);
+        setTimeout(() => {
+          this.fresh.delete(node.key);
+          this.redraw();
+        }, ARRIVED_MS);
+      }
+    }
+    const adds = hubs.filter((hub) => this.hubLogin(hub.id)).map((hub) => hub.id);
+    // While the server moves, under its name: where to, then who is still to
+    // follow.
+    for (const hub of hubs) {
+      const moving = this.moving.label(hub.id);
+      if (moving) hubLabels.set(hub.id, moving);
+    }
+    this.map.update({
+      hubs,
+      nodes,
+      hubLabels,
+      adds,
+      waiting: new Set(this.waiting.keys()),
+      selected: this.selected,
+      fresh: this.fresh,
+      links,
+      opening: this.opening,
+      framed: this.framing.length ? this.framing : this.framed,
+      folded: this.foldedOf(nodes),
+      lit: this.moving.chosenHub ? this.litKeys(world) : null,
+      people: this.people.shown(people),
+      adding: this.people.hubs(world),
+      grouped: this.groupedBoxes(world, nodes),
+    });
+  }
+
+  /** What can be done to a spot, as `world` stands. */
+  private actsOf(key: string, world: WorldNow): Act[] {
+    const { words } = this.options;
+    const person = personOf(key);
+    if (person) return this.people.acts(world, person.hub, person.account);
+    if (groupMoreOf(key))
+      return this.groupBox(key, world)
+        ? [
+            { act: "rename-group", label: words.groups.renameGroup, icon: "edit" },
+            { act: "end-group", label: words.groups.endGroup, icon: "unarchive" },
+          ]
+        : [];
+    const spot = this.spots(world).get(key);
+    if (!spot) return [];
+    const details: Act = { act: "details", label: words.details, icon: "info" };
+    if (spot.kind === "hub") {
+      const logins = loginsOf(world.accounts).filter((login) => login.hub === spot.hub.hub);
+      const top = logins.some((login) => spot.hub.accounts.find((account) => account.name === login.account)?.level === "super");
+      const open = spot.hub.self_registration;
+      return [
+        ...(logins.length ? [{ act: "invite", label: words.inviteDevice, icon: "plus" as const }] : []),
+        ...(top ? [{ act: "move", label: words.moveHub, icon: "move" as const }] : []),
+        ...(top ? [{ act: "signup", label: this.options.people.signUpState(open), icon: "signup" as const, on: open }] : []),
+        ...(top && spot.hub.versions && this.options.updates ? [{ act: "updates", label: this.options.updates.words.policy, icon: "update" as const }] : []),
+        details,
+        ...(top && spot.hub.dissolves ? [{ act: "dissolve", label: words.dissolve, icon: "close" as const, danger: true }] : []),
+      ];
+    }
+    if (spot.kind === "assist") return [{ act: "talk", label: words.talk, icon: "plus" }, details];
+    // A phone is only signed in: nothing runs on it to work with.
+    if (spot.kind === "device") return [details, ...(spot.here ? [] : [{ act: "remove", label: words.removePhone, icon: "close" as const, danger: true }])];
+    const owners = this.ownersOf(spot.machine, world);
+    // Direct connections are the network's administrator's to allow: to a
+    // computer, while it is online to be checked, and no longer at any time.
+    const admin = this.adminOf(spot.machine, world);
+    const member = admin ? this.memberOf(spot.machine, admin, world) : undefined;
+    const direct: Act[] =
+      member?.kind !== "computer" ? [] : member.direct?.length ? [{ act: "direct", label: words.stopDirect, icon: "link", on: true }] : member.reach ? [{ act: "direct", label: words.allowDirect, icon: "link", on: false }] : [];
+    // Its owner and the network's administrator rename it.
+    const rename: Act[] = renamerOf(spot.machine, world, this.options.change, this.options.renaming.here)
+      ? [{ act: "rename", label: this.options.renaming.words.rename, icon: "edit" }]
+      : [];
+    // And they group it.
+    const group: Act[] = groupingOf(spot.machine, world) ? [{ act: "group", label: words.groups.group, icon: "folder" }] : [];
+    // A managed machine has no agents of anyone's on it; a visitor shares
+    // none of its machines.
+    const managed = isManaged(world, spot.machine.name);
+    const shares = owners.length > 0 && !owners.some((login) => isVisitor(world, login));
+    return [
+      ...(managed
+        ? []
+        : [
+            { act: "talk", label: words.talk, icon: "plus" as const },
+            { act: "agents", label: words.hosts, icon: "agents" as const },
+          ]),
+      ...(shares ? [{ act: "share", label: words.share, icon: "colleague" as const }] : []),
+      ...direct,
+      ...rename,
+      ...group,
+      details,
+      ...(owners.length && !spot.machine.here ? [{ act: "remove", label: words.remove, icon: "close" as const, danger: true }] : []),
+    ];
+  }
+
+  /** The actions of the one chosen as a row in its sheet, each with its
+   *  name, large enough for a finger. */
+  private sheetActs(key: string, world: WorldNow): string {
+    // The sheet is a hub's details; a machine's are on its own page.
+    const acts = this.actsOf(key, world).filter((act) => act.act !== "details" || key.startsWith("m:"));
+    // Verbs share one row of equal columns; a setting is a row of its own
+    // with its switch, and what cannot be taken back stands apart below.
+    const verbs = acts.filter((act) => act.on === undefined && !act.danger);
+    const settings = acts.filter((act) => act.on !== undefined);
+    const dangers = acts.filter((act) => act.danger);
+    const { words } = this.options;
+    const row = verbs.length
+      ? `<div class="sheet-acts" style="--acts:${verbs.length}">${verbs
+          .map((act) => `<button class="sheet-act" type="button" data-map-act="${act.act}" data-key="${escape(key)}">${glyph(act.icon, 18)}<span>${escape(act.label)}</span></button>`)
+          .join("")}</div>`
+      : "";
+    const switches = settings
+      .map(
+        (act) =>
+          `<button class="sheet-row sheet-switch" type="button" role="switch" aria-checked="${act.on}" data-map-act="${act.act}" data-key="${escape(key)}">${glyph(act.icon, 18)}<span class="sheet-row-label">${escape(act.act === "direct" ? words.allowDirect : act.act === "signup" ? this.options.people.signUp : act.label)}</span><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span></button>`,
+      )
+      .join("");
+    const removals = dangers
+      .map((act) => `<button class="sheet-row danger" type="button" data-map-act="${act.act}" data-key="${escape(key)}">${glyph(act.icon, 18)}<span class="sheet-row-label">${escape(act.label)}</span></button>`)
+      .join("");
+    return row + (switches || removals ? `<div class="sheet-rows">${switches}${removals}</div>` : "");
+  }
+
+  /** The logins whose own a machine is: this computer's account on each
+   *  hub it is registered on, or the one that registered another. */
+  private ownersOf(machine: Machine, world: WorldNow): Login[] {
+    const logins = loginsOf(world.accounts);
+    if (machine.here) return logins.filter((login) => world.nodes.hubs.some((hub) => hub.hub === login.hub && hub.home === login.account));
+    const owner = logins.find((login) => owns(machine, login));
+    return owner ? [owner] : [];
+  }
+
+  /** Does an action chosen beside a spot or in its menu. */
+  private clickAct(event: Event): void {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-map-act]");
+    const world = this.options.store.world.peek();
+    if (!button || !world) return;
+    const key = button.dataset.key ?? "";
+    const act = button.dataset.mapAct!;
+    this.closeMenu();
+    if (act === "fit") return this.map.fit();
+    const person = personOf(key);
+    if (person) return this.people.run(act, person.hub, person.account, key);
+    if (groupMoreOf(key)) {
+      if (act === "rename-group") this.renameGroupCard(key);
+      else if (act === "end-group") void this.endGroup(key);
+      return;
+    }
+    const spot = this.spots(world).get(key);
+    if (!spot) return;
+    if (act === "details") {
+      if (spot.kind !== "machine") return this.details(key);
+      location.hash = link({ kind: "machine", name: spot.machine.written });
+      return;
+    }
+    if (spot.kind === "hub") {
+      const login = this.hubLogin(spot.hub.hub);
+      if (act === "invite" && login) this.invite(login);
+      else if (act === "signup") this.people.signUp(spot.hub.hub);
+      else if (act === "updates") {
+        const top = this.superLogin(spot.hub, world);
+        if (top && this.options.updates) this.policy(top);
+      }
+      else if (act === "dissolve") {
+        const top = this.superLogin(spot.hub, world);
+        if (top) this.dissolve(top, spot.hub);
+      }
+      else if (act === "move") {
+        const top = this.superLogin(spot.hub, world);
+        if (!top) return;
+        // The server's new place is chosen on the drawing.
+        this.show("map");
+        this.selected = null;
+        this.whyNot = null;
+        this.moving.choose(top, spot.hub).catch((error: unknown) => {
+          const said = error instanceof Error ? error.message : String(error);
+          this.whyNot = { said: this.options.access.failed(said), detail: said };
+          this.redraw();
+        });
+        this.redraw();
+      }
+      return;
+    }
+    if (spot.kind === "assist") {
+      if (act === "talk") this.options.talk(spot.assistants[0]!.written);
+      return;
+    }
+    if (spot.kind === "device") {
+      if (act === "remove") this.removePhone(spot.login, spot.member.name);
+      return;
+    }
+    const machine = spot.machine;
+    const login = this.ownersOf(machine, world)[0];
+    switch (act) {
+      case "talk":
+        this.options.talk(machine.written);
+        return;
+      case "agents":
+        location.hash = link({ kind: "agents", machine: machine.written });
+        return;
+      case "share":
+        if (login) this.share(login, machine.name);
+        return;
+      case "remove":
+        if (login) this.remove(login, machine.name);
+        return;
+      case "rename":
+        this.renameCard(key, machine);
+        return;
+      case "group": {
+        const grouping = groupingOf(machine, world);
+        if (grouping) this.groupCard(key, [machine], [grouping]);
+        return;
+      }
+      case "direct": {
+        const admin = this.adminOf(machine, world);
+        const member = admin ? this.memberOf(machine, admin, world) : undefined;
+        if (!admin || !member) return;
+        if (member.direct?.length) this.stopDirect(admin, machine, key, member.direct);
+        else this.allowDirect(admin, machine, key, member);
+        return;
+      }
+    }
+  }
+
+  /** Puts every framed machine in one group, from one card. */
+  private groupFramed(): void {
+    const world = this.options.store.world.peek();
+    if (!world || !this.framed.length) return;
+    const spots = this.spots(world);
+    const machines = this.framed.map((key) => spots.get(key)).flatMap((spot) => (spot?.kind === "machine" ? [spot.machine] : []));
+    const groupings = groupingTogether(machines, world);
+    if (groupings) this.groupCard(this.framed[0]!, machines, groupings);
+  }
+
+  /** The card that puts machines in a group, beside the ring of the one, or
+   *  the first of those framed together: one of their owner's groups, a new
+   *  one, or none. Put there, each is circled in its new box, and for a
+   *  moment the change can be undone from the drawing's corner. */
+  private groupCard(key: string, machines: Machine[], groupings: Grouping[]): void {
+    const words = this.options.words.groups;
+    const first = groupings[0];
+    if (!first) return;
+    const now = groupings.every((one) => one.now === first.now) ? first.now : undefined;
+    const title = machines.length === 1 ? words.groupTitle(machines[0]!.written) : words.groupMany(machines.length);
+    this.openCard(key, this.map.screenOf(key) ?? [0, 0], groupForm(words, title, first.groups, now), async () => {
+      const chosen = chosenGroup(this.card, words);
+      if ("wrong" in chosen) throw this.cardWrong(chosen.wrong);
+      const moving = machines.filter((_, at) => groupings[at]!.now !== chosen.group);
+      if (!moving.length) return;
+      const before = new Map(machines.map((machine, at) => [machine.name, groupings[at]!.now]));
+      for (const machine of moving) await this.options.change(first.login, groupChange(machine.name, chosen.group));
+      this.circle(moving);
+      this.offerUndo(machines.length === 1 ? words.movedOne(machines[0]!.written, chosen.group) : words.movedMany(moving.length, chosen.group), async () => {
+        for (const machine of moving) await this.options.change(first.login, groupChange(machine.name, before.get(machine.name) ?? null));
+      });
+    });
+    wireGroupForm(this.card);
+  }
+
+  /** The card that renames a group: its machines are in the group of the
+   *  new name, with any already in one of that name. */
+  private renameGroupCard(key: string): void {
+    const world = this.options.store.world.peek();
+    const box = world ? this.groupBox(key, world) : null;
+    if (!box) return;
+    const words = this.options.words.groups;
+    this.openCard(key, this.map.screenOf(key) ?? [0, 0], groupRenameForm(words, box.group), async () => {
+      const named = groupNameOf(this.card.querySelector<HTMLInputElement>("input[name=name]")?.value ?? "", words);
+      if ("wrong" in named) throw this.cardWrong(named.wrong);
+      if (named.name === box.group) return;
+      await this.renameGroups(box, named.name);
+      this.circle(box.machines);
+      this.offerUndo(words.renamedGroup(box.group, named.name), () => this.regroup(box));
+    });
+    this.card.querySelector<HTMLInputElement>("input[name=name]")?.select();
+  }
+
+  /** Ends a group at once: its machines stand in their owner's box again,
+   *  and for a moment the group can be given back from the drawing's
+   *  corner. Nothing about the machines changes, so nothing asks first. */
+  private async endGroup(key: string): Promise<void> {
+    const world = this.options.store.world.peek();
+    const box = world ? this.groupBox(key, world) : null;
+    if (!box) return;
+    try {
+      await this.renameGroups(box, null);
+      this.note = null;
+    } catch (error) {
+      this.note = { machine: "", text: this.options.access.failed(error instanceof Error ? error.message : String(error)) };
+      this.redraw();
+      return;
+    }
+    this.circle(box.machines);
+    this.offerUndo(this.options.words.groups.endedGroup(box.group), () => this.regroup(box));
+    await this.options.store.refresh();
+    this.redraw();
+  }
+
+  /** Renames a box's group for each owner it holds machines of, or ends it
+   *  where `to` is none. */
+  private async renameGroups(box: GroupBox, to: string | null): Promise<void> {
+    const done: Grouping[] = [];
+    for (const grouping of box.groupings) {
+      if (done.some((one) => sameLogin(one.login, grouping.login) && one.owner === grouping.owner)) continue;
+      done.push(grouping);
+      await this.options.change(grouping.login, { change: "rename_group", owner: grouping.owner, from: box.group, to });
+    }
+  }
+
+  /** Puts a box's machines back in its group, as they were before. */
+  private async regroup(box: GroupBox): Promise<void> {
+    for (const [at, machine] of box.machines.entries()) await this.options.change(box.groupings[at]!.login, groupChange(machine.name, box.group));
+  }
+
+  /** A group's box on the drawing, by its "⋯": its name, its machines and
+   *  how each is grouped from here; none unless this device may group
+   *  every one of them. */
+  private groupBox(key: string, world: WorldNow, nodes: MapNode[] = mapOf(world, this.options.words).nodes): GroupBox | null {
+    const box = groupMoreOf(key);
+    if (!box) return null;
+    const spots = this.spots(world);
+    const machines = nodes
+      .filter((node) => node.group?.key === box.kind && node.hubs.includes(box.hub))
+      .flatMap((node) => {
+        const spot = spots.get(node.key);
+        return spot?.kind === "machine" ? [spot.machine] : [];
+      });
+    const groupings = machines.map((machine) => groupingOf(machine, world, box.hub));
+    if (!machines.length || groupings.some((one) => !one)) return null;
+    return { group: box.group, machines, groupings: groupings as Grouping[] };
+  }
+
+  /** The boxes of groups whose "⋯" the drawing shows, by its keys for
+   *  boxes. */
+  private groupedBoxes(world: WorldNow, nodes: MapNode[]): Set<string> {
+    const asked = new Set<string>();
+    const boxes = new Set<string>();
+    for (const node of nodes) {
+      const kind = node.group?.key;
+      if (!kind || boxParts(kind).group === null) continue;
+      for (const hub of node.hubs) {
+        const key = `group:${hub}:${kind}`;
+        if (asked.has(key)) continue;
+        asked.add(key);
+        if (this.groupBox(groupMoreKey(hub, kind), world, nodes)) boxes.add(key);
+      }
+    }
+    return boxes;
+  }
+
+  /** Circles machines for a moment, as they stand somewhere new. */
+  private circle(machines: Machine[]): void {
+    for (const machine of machines) {
+      const key = `m:${machine.written}`;
+      this.fresh.add(key);
+      setTimeout(() => {
+        this.fresh.delete(key);
+        this.redraw();
+      }, ARRIVED_MS);
+    }
+  }
+
+  /** Says in the open card why it does not go, and keeps it open. */
+  private cardWrong(said: string): Error {
+    const wrong = this.card.querySelector<HTMLElement>(".map-card-wrong");
+    if (wrong) {
+      wrong.textContent = said;
+      wrong.hidden = false;
+    }
+    return new Error("kept open");
+  }
+
+  /** The login of the network's administrator among this device's, on a
+   *  hub `machine` is on. */
+  private adminOf(machine: Machine, world: WorldNow): Login | undefined {
+    return loginsOf(world.accounts).find((login) => machine.on.some((on) => on.hub === login.hub) && isSuper(world, login));
+  }
+
+  /** What `login`'s hub says of `machine`, by its name or one it had. */
+  private memberOf(machine: Machine, login: Login, world: WorldNow): MemberSeen | undefined {
+    return world.accounts.hubs.find((hub) => hub.hub === login.hub)?.members.find((member) => names(member, machine.name));
+  }
+
+  /** A card beside the ring with its name to change. Renamed, it is
+   *  circled under its new name, and for a moment the old name can be given
+   *  back from the drawing's corner: a name a machine had stays its own. */
+  private renameCard(key: string, machine: Machine): void {
+    const world = this.options.store.world.peek();
+    const rename = world ? renamerOf(machine, world, this.options.change, this.options.renaming.here) : null;
+    if (!rename) return;
+    const { words, nameSaid, check } = this.options.renaming;
+    const from = machine.name;
+    this.openCard(key, this.map.screenOf(key) ?? [0, 0], `<p class="map-card-title">${escape(words.renameTitle(machine.written))}</p><div class="map-card-rename"></div>`, async () => {});
+    const field = new RenameField({
+      words,
+      nameSaid,
+      name: from,
+      note: !machine.here && machine.online === false ? words.renameOffline(machine.written) : undefined,
+      check,
+      rename: async (to) => {
+        await rename(to);
+        await this.options.store.refresh();
+      },
+      done: (to) => {
+        field.dispose();
+        this.closeCard();
+        const renamed = `m:${to}`;
+        this.selected = renamed;
+        this.fresh.add(renamed);
+        setTimeout(() => {
+          this.fresh.delete(renamed);
+          this.redraw();
+        }, ARRIVED_MS);
+        this.offerUndo(words.renamed(from, to), () => rename(from, to));
+        this.redraw();
+      },
+      cancel: () => {
+        field.dispose();
+        this.closeCard();
+      },
+    });
+    this.card.querySelector(".map-card-rename")!.append(field.element);
+    field.focus();
+  }
+
+  /** The card that lets other machines connect to one directly: a small
+   *  drawing of their lines meeting it, its addresses to choose from (its
+   *  network cards' and where the server sees it, never an example), and
+   *  the port. The server then tries it from outside; until it has, the
+   *  socket on its ring is pencil, and what kept the server out is said in
+   *  the card. */
+  private allowDirect(login: Login, machine: Machine, key: string, member: MemberSeen): void {
+    const { words } = this.options;
+    const seen = member.reach?.seen ? [hostOf(member.reach.seen)] : [];
+    const cards = (member.reach?.interfaces ?? []).map(hostOf).filter((host) => !seen.includes(host));
+    const choice = (host: string, note: string, checked: boolean) =>
+      `<label class="choice map-card-choice"><input type="checkbox" name="host" value="${escape(host)}"${checked ? " checked" : ""}><span class="mono">${escape(host)}</span><span class="choice-note">${escape(note)}</span></label>`;
+    const at = this.map.screenOf(key) ?? [0, 0];
+    this.openCard(
+      key,
+      at,
+      `<p class="map-card-title">${escape(words.directTitle(machine.written))}</p>
+       <div class="map-card-pictures">${directPicture(true)}</div>
+       <fieldset class="map-card-field"><legend>${escape(words.directAddresses)}</legend><div class="choice-options">${[
+         ...seen.map((host) => choice(host, words.directSeen, true)),
+         ...cards.map((host) => choice(host, words.directCard, !seen.length)),
+       ].join("")}</div></fieldset>
+       <label class="field map-card-port"><span class="field-label">${escape(words.directPort)}</span><input class="mono" name="port" inputmode="numeric" value="${DIRECT_PORT}" autocomplete="off" spellcheck="false" required></label>
+       <p class="map-card-wrong" role="alert" hidden></p>
+       <details class="map-card-more"><summary>${escape(words.more)}</summary><p>${escape(words.directWhat)}</p></details>
+       <footer class="map-card-acts"><button class="text-button" type="button" data-card="cancel">${escape(words.cancel)}</button><button class="text-button map-card-go" type="submit">${escape(words.directGo)}</button></footer>`,
+      async () => {
+        const wrong = this.card.querySelector<HTMLElement>(".map-card-wrong")!;
+        const hosts = [...this.card.querySelectorAll<HTMLInputElement>("input[name=host]:checked")].map((input) => input.value);
+        const port = Number(this.card.querySelector<HTMLInputElement>("input[name=port]")!.value.trim());
+        const refuse = (said: string) => {
+          wrong.textContent = said;
+          wrong.hidden = false;
+          return new Error("kept open");
+        };
+        if (!hosts.length) throw refuse(words.directPickOne);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw refuse(words.directPortWrong);
+        wrong.textContent = words.directChecking;
+        wrong.hidden = false;
+        wrong.classList.add("quiet");
+        this.opening.add(key);
+        this.redraw();
+        try {
+          await this.options.change(login, { change: "direct", machine: machine.name, at: hosts.map((host) => (host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`)) });
+        } catch (error) {
+          wrong.classList.remove("quiet");
+          throw refuse(error instanceof Error ? error.message : String(error));
+        } finally {
+          this.opening.delete(key);
+          this.redraw();
+        }
+      },
+    );
+  }
+
+  /** Takes direct connections to a machine away at once, after a small
+   *  card of before and after; for a moment they can be given back. */
+  private stopDirect(login: Login, machine: Machine, key: string, before: string[]): void {
+    const { words } = this.options;
+    const at = this.map.screenOf(key) ?? [0, 0];
+    this.openCard(
+      key,
+      at,
+      `<p class="map-card-title">${escape(words.stopDirectTitle(machine.written))}</p>
+       <div class="map-card-pictures">${directPicture(true)}<span aria-hidden="true">→</span>${directPicture(false)}</div>
+       <p class="map-card-said">${escape(words.stopDirectSaid)}</p>
+       <p class="map-card-wrong" role="alert" hidden></p>
+       <footer class="map-card-acts"><button class="text-button" type="button" data-card="cancel">${escape(words.cancel)}</button><button class="text-button map-card-go" type="submit">${escape(words.confirm)}</button></footer>`,
+      async () => {
+        await this.options.change(login, { change: "direct", machine: machine.name, at: [] });
+        this.offerUndo(words.directStopped(machine.written), () => this.options.change(login, { change: "direct", machine: machine.name, at: before }));
+      },
+    );
+  }
+
+  /** A card beside a ring, or rising from below on a narrow page; `go`
+   *  runs when it is confirmed, and an error it throws stays in the card. */
+  private openCard(key: string, at: Point, html: string, go: () => Promise<void | "keep">): void {
+    this.closeMenu();
+    this.cardFor = key;
+    this.float();
+    this.card.innerHTML = html;
+    const sheet = this.narrow();
+    this.card.classList.toggle("as-sheet", sheet);
+    this.card.hidden = false;
+    layerOpened(this.cardLayer);
+    if (!sheet) {
+      // Beside the ring, on its right unless what is open on the right, the
+      // panel or the canvas's edge, leaves no room there.
+      const canvas = this.canvas.getBoundingClientRect();
+      const right = this.panel.hidden ? canvas.width : Math.min(canvas.width, this.panel.getBoundingClientRect().left - canvas.left);
+      const width = this.card.offsetWidth;
+      const x = at[0] + 16 + width + 8 <= right ? at[0] + 16 : at[0] - 16 - width;
+      const y = Math.min(this.canvas.clientHeight - this.card.offsetHeight - 8, at[1] - 24);
+      this.card.style.transform = `translate(${Math.max(8, Math.min(x, right - width - 8))}px, ${Math.max(8, y)}px)`;
+    } else this.card.style.transform = "";
+    this.card.onsubmit = (event) => {
+      event.preventDefault();
+      const button = this.card.querySelector<HTMLButtonElement>(".map-card-go");
+      if (button) button.disabled = true;
+      go().then(
+        (kept) => {
+          if (kept === "keep") {
+            if (button) button.disabled = false;
+            return;
+          }
+          this.closeCard();
+          void this.options.store.refresh().then(() => this.redraw());
+        },
+        (error: unknown) => {
+          if (button) button.disabled = false;
+          if (error instanceof Error && error.message === "kept open") return;
+          const wrong = this.card.querySelector<HTMLElement>(".map-card-wrong");
+          const said = error instanceof Error ? error.message : String(error);
+          if (wrong) {
+            wrong.textContent = said;
+            wrong.hidden = false;
+          } else {
+            this.note = { machine: key.replace(/^m:/, ""), text: this.options.access.failed(said) };
+            this.redraw();
+          }
+        },
+      );
+    };
+    this.card.focus({ preventScroll: true });
+  }
+
+  private closeCard(): void {
+    if (!this.cardFor) return;
+    this.cardFor = null;
+    this.card.hidden = true;
+    this.card.innerHTML = "";
+    this.card.onsubmit = null;
+    this.float();
+  }
+
+  /** A change made on the drawing, undone for a moment from its corner. */
+  private offerUndo(said: string, redo: () => Promise<void>): void {
+    if (this.undoing) clearTimeout(this.undoing.timer);
+    this.undoing = { timer: window.setTimeout(() => this.endUndo(), UNDO_MS), redo };
+    this.undoBar.innerHTML = `<span>${escape(said)}</span><button class="text-button map-undo-go" type="button">${escape(this.options.words.undo)}</button>`;
+    this.undoBar.hidden = false;
+  }
+
+  private async undo(): Promise<void> {
+    const undoing = this.undoing;
+    if (!undoing) return;
+    this.endUndo();
+    try {
+      await undoing.redo();
+    } catch (error) {
+      this.note = { machine: "", text: this.options.access.failed(error instanceof Error ? error.message : String(error)) };
+    }
+    await this.options.store.refresh();
+    this.redraw();
+  }
+
+  private endUndo(): void {
+    if (this.undoing) clearTimeout(this.undoing.timer);
+    this.undoing = null;
+    this.undoBar.hidden = true;
+    this.undoBar.innerHTML = "";
+  }
+
+  /** The icons beside the one chosen, in a row to the right of its name,
+   *  or under its ring where the right has no room; the names on the
+   *  drawing keep clear of them. */
+  private float(): void {
+    const world = this.options.store.world.peek();
+    const key = this.menuFor || this.cardFor || this.narrow() || this.view === "list" ? null : this.selected;
+    const at = key ? this.map.screenOf(key) : null;
+    if (!world || !key || !at) {
+      if (!this.acts.hidden) {
+        this.acts.hidden = true;
+        this.acts.innerHTML = "";
+        this.floated = "";
+      }
+      this.map.reserve([]);
+      return;
+    }
+    const acts = this.actsOf(key, world);
+    const html = acts
+      .map(
+        (act) =>
+          `<button class="map-act${act.danger ? " danger" : ""}${act.on ? " on" : ""}" type="button" data-map-act="${act.act}" data-key="${escape(key)}" aria-label="${escape(act.label)}" title="${escape(act.label)}"${act.on === undefined ? "" : ` aria-pressed="${act.on}"`}>${glyph(act.icon, 18)}</button>`,
+      )
+      .join("");
+    if (html !== this.floated) {
+      this.floated = html;
+      this.acts.innerHTML = html;
+    }
+    this.acts.hidden = false;
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    const size = matchMedia("(pointer: coarse)").matches ? 44 : 36;
+    const gap = 6;
+    const count = this.acts.children.length;
+    const row = count * size + (count - 1) * gap;
+    // Past where its name stands right of its ring, measured from the ring
+    // so the row does not follow the name when the name makes way for it.
+    const right = at[0] + Math.max(RING * this.scale, 14) + 4 + this.map.nameWidth(key) + 14;
+    const beside = right + row <= width - 4;
+    const startX = beside ? right : Math.min(width - row - 4, Math.max(4, at[0] - row / 2));
+    const y = beside ? at[1] - size / 2 : Math.min(height - size - 4, at[1] + Math.max(RING * this.scale, 14) + 10);
+    const boxes = [...this.acts.children].map((button, index) => {
+      const x = startX + index * (size + gap);
+      (button as HTMLElement).style.transform = `translate(${x.toFixed(1)}px, ${Math.max(4, y).toFixed(1)}px)`;
+      return { x, y, width: size, height: size };
+    });
+    this.map.reserve(boxes);
+  }
+
+  /** The menu of a spot, or of the drawing itself, where the right button
+   *  was pressed; on a phone it rises from below. */
+  private openMenu(key: string | null, at: Point, sheet: boolean): void {
+    const world = this.options.store.world.peek();
+    if (!world) return;
+    const { words } = this.options;
+    if (key?.startsWith("add:") || key?.startsWith("adding:")) return this.choose(key);
+    // A person's strip, pressed with the right button, lists what their "⋯"
+    // does.
+    const strip = key?.match(/^group:([^:]+):of:([^/]+)$/);
+    if (strip && this.people.acts(world, strip[1]!, strip[2]!).length) key = personKey(strip[1]!, strip[2]!);
+    // So does a group's.
+    const groupStrip = key?.match(/^group:([^:]+):(.+)$/);
+    if (groupStrip && boxParts(groupStrip[2]!).group !== null && this.groupBox(groupMoreKey(groupStrip[1]!, groupStrip[2]!), world)) key = groupMoreKey(groupStrip[1]!, groupStrip[2]!);
+    const acts: Act[] = key ? this.actsOf(key, world) : [{ act: "fit", label: words.fit, icon: "expand" }];
+    if (!acts.length) return;
+    // A person's or a group's menu stands for them alone: what was chosen
+    // on the drawing gives way, and a sheet says whose or which it is.
+    const alone = key ? (personOf(key)?.account ?? groupMoreOf(key)?.group ?? null) : null;
+    if (alone !== null) {
+      this.selected = null;
+      this.detailsOpen = false;
+    } else if (key) this.selected = key;
+    this.menuFor = { key, at, sheet };
+    this.menu.innerHTML = (alone !== null && sheet ? `<p class="map-menu-head">${escape(alone)}</p>` : "") + acts
+      .map(
+        (act) =>
+          `<button class="map-menu-item${act.danger ? " danger" : ""}" type="button" role="menuitem" data-map-act="${act.act}" data-key="${escape(key ?? "")}">${glyph(act.icon, 16)}<span>${escape(act.label)}</span></button>`,
+      )
+      .join("");
+    this.menu.classList.toggle("as-sheet", sheet);
+    this.menu.hidden = false;
+    layerOpened(this.menuLayer);
+    if (!sheet) {
+      const x = Math.min(this.canvas.clientWidth - this.menu.offsetWidth - 8, at[0]);
+      const y = Math.min(this.canvas.clientHeight - this.menu.offsetHeight - 8, at[1]);
+      this.menu.style.transform = `translate(${Math.max(8, x)}px, ${Math.max(8, y)}px)`;
+    } else this.menu.style.transform = "";
+    this.menu.querySelector<HTMLElement>("button")?.focus();
+    this.redraw();
+  }
+
+  private closeMenu(): void {
+    if (!this.menuFor) return;
+    this.menuFor = null;
+    this.menu.hidden = true;
+    this.menu.innerHTML = "";
+    this.float();
+  }
+
+  private stateOf(online: boolean | null, since: string | null, here: boolean, now: Date): { kind: string; said: string } {
+    const { words } = this.options;
+    const at = since ? this.options.when(new Date(since), now) : null;
+    if (here || online === true) return { kind: "online", said: at ? words.online(at) : words.onlineNow };
+    if (online === false) return { kind: "offline", said: words.offline(at) };
+    return { kind: "unknown", said: words.unknown };
+  }
+
+  /** The head of the panel: a name, its tags, and whether it is online. */
+  private panelHead(name: string, tags: string[], state: { kind: string; said: string }, assisting = false): string {
+    return `<header class="panel-head ${state.kind}${assisting ? " assist" : ""}"><span class="dot" aria-hidden="true"></span><h2 class="panel-title">${escape(name)}</h2>${tags.join("")}<span class="panel-state">${escape(state.said)}</span></header>`;
+  }
+
+  private tag(text: string, kind = "", title = ""): string {
+    return text ? `<span class="tag${kind ? ` ${kind}` : ""}"${title ? ` title="${escape(title)}"` : ""}>${kind === "tag-reach" ? glyph("shield", 12) : ""}${escape(text)}</span>` : "";
+  }
+
+  /** A row of accounts something is given to, each taken back with its
+   *  cross, and the button that gives it to another. */
+  private givenRow(label: string, given: string[], take: (to: string) => string, add: string): string {
+    const { words } = this.options;
+    const chips = given
+      .map((to) => `<span class="chip">${escape(to)}<button class="chip-x" type="button" ${take(to)} aria-label="${escape(words.takeBack(to))}" title="${escape(words.takeBack(to))}">${glyph("close", 12)}</button></span>`)
+      .join("");
+    return `<div class="given-row"><span class="given-label">${escape(label)}</span>${chips}${add}</div>`;
+  }
+
+  private button(act: string, label: string, extra = "", icon = ""): string {
+    return `<button class="text-button quiet-button" type="button" data-act="${act}"${extra}>${icon}<span>${escape(label)}</span></button>`;
+  }
+
+  /** The machines framed together: each, and what is done to all of them
+   *  at once where the account owns every one. */
+  private framedPanel(keys: string[], world: WorldNow): string {
+    const { words } = this.options;
+    const spots = this.spots(world);
+    const machines = keys.map((key) => spots.get(key)).flatMap((spot) => (spot?.kind === "machine" ? [spot.machine] : []));
+    const owned = this.ownedTogether(machines, world);
+    const rows = machines
+      .map((machine) => {
+        const facts = "Ok" in machine.facts && machine.facts.Ok ? machine.facts.Ok : null;
+        const state = machine.online === false ? " offline" : "";
+        return `<li><button class="framed-row${state}" type="button" data-act="framed-pick" data-key="m:${escape(machine.written)}"><span class="dot" aria-hidden="true"></span><span class="framed-name">${escape(machine.written)}</span><span class="framed-sub">${escape(facts ? osName(facts.os) : "")}</span></button></li>`;
+      })
+      .join("");
+    return `<header class="panel-head"><h2 class="panel-title">${escape(words.framedTitle(machines.length))}</h2></header>
+      <ul class="framed-list">${rows}</ul>
+      <div class="panel-acts">${[
+        owned ? this.button("framed-share", words.framedShare, "", glyph("colleague", 14)) : "",
+        groupingTogether(machines, world) ? this.button("framed-group", words.groups.group, "", glyph("folder", 14)) : "",
+        owned && !machines.some((machine) => machine.here) ? this.button("framed-remove", words.framedRemove, " data-danger", glyph("close", 14)) : "",
+        this.button("framed-clear", words.framedClear),
+      ].join("")}</div>`;
+  }
+
+  /** The one login that owns every machine in `machines`, if one does. */
+  private ownedTogether(machines: Machine[], world: WorldNow): Login | undefined {
+    const first = machines[0] ? this.ownersOf(machines[0], world)[0] : undefined;
+    return first && machines.every((machine) => this.ownersOf(machine, world).some((login) => sameLogin(login, first))) ? first : undefined;
+  }
+
+  private framedMachines(): { machines: Machine[]; login: Login } | null {
+    const world = this.options.store.world.peek();
+    if (!world) return null;
+    const spots = this.spots(world);
+    const machines = this.framed.map((key) => spots.get(key)).flatMap((spot) => (spot?.kind === "machine" ? [spot.machine] : []));
+    const login = this.ownedTogether(machines, world);
+    return login && machines.length ? { machines, login } : null;
+  }
+
+  /** Shares every framed machine with the same accounts: those all of them
+   *  are shared with are shown, and a change applies to each. */
+  private shareFramed(): void {
+    const framed = this.framedMachines();
+    if (!framed) return;
+    const { access, words } = this.options;
+    const { machines, login } = framed;
+    const together = () => {
+      const each = machines.map((machine) => new Set(this.sharedWith(login, machine.name)));
+      return [...(each[0] ?? [])].filter((account) => each.every((set) => set.has(account)));
+    };
+    this.giving.open({ title: words.framedShareTitle(machines.length), what: access.shareWhat, sees: access.shareSees, given: access.sharedTo, go: access.shareGo }, together(), async (to, shared) => {
+      for (const machine of machines) await this.options.change(login, { change: "share", machine: machine.name, to, shared });
+      await this.options.store.refresh();
+      return together();
+    });
+  }
+
+  /** Removes every framed machine, after one red card naming them. */
+  private removeFramed(): void {
+    const framed = this.framedMachines();
+    if (!framed) return;
+    const { access, words } = this.options;
+    const { machines, login } = framed;
+    this.options.confirm.ask({
+      title: words.framedRemoveTitle(machines.length),
+      what: words.framedRemoveWhat(machines.map((machine) => machine.written)),
+      go: access.removeGo,
+      act: async () => {
+        for (const machine of machines) await this.options.change(login, { change: "remove", name: machine.name, reason: access.reasonDefault });
+      },
+      done: () => {
+        this.framed = [];
+        void this.options.store.refresh();
+      },
+    });
+  }
+
+  /** What is known of a machine the account may work on. */
+  private machinePanel(machine: Machine, world: WorldNow, now: Date, acts = ""): string {
+    const { words, access } = this.options;
+    const logins = loginsOf(world.accounts);
+    const owner = logins.find((login) => owns(machine, login)) ?? null;
+    const mine = machine.here || !!owner;
+    const ownerName = mine ? null : (logins.map((login) => ownerOf(machine, login)).find(Boolean) ?? null);
+    const viewer = logins.find((login) => machine.on.some((on) => on.hub === login.hub)) ?? null;
+    const shared = !!viewer && !mine && this.sharedWith(viewer, machine.name).includes(viewer.account);
+    const bySuper = !!viewer && !shared && isSuper(world, viewer);
+    const reaching = !mine && logins.some((login) => machineActsFor(world, machine.name, login));
+    const tags = [
+      machine.here ? this.tag(words.here) : "",
+      owner && !machine.here ? this.tag(words.yours, "tag-own") : "",
+      ownerName ? this.tag(bySuper ? words.superInShort(ownerName) : words.sharedInShort(ownerName), "", bySuper ? words.superIn(ownerName) : words.sharedIn(ownerName)) : "",
+      reaching ? this.tag(words.reaching, "tag-reach", words.reachingWhat) : "",
+    ];
+    const facts = "Ok" in machine.facts && machine.facts.Ok ? machine.facts.Ok : null;
+    const route = !machine.here && machine.online === true && machine.through ? words.via(machine.through) : "";
+    const factLine = facts
+      ? [osName(facts.os), facts.arch, `fastctx ${facts.version}`, route].filter(Boolean).map(escape).join(`<span class="sep">·</span>`)
+      : "Err" in machine.facts && machine.facts.Err && machine.online !== false
+        ? `<span title="${escape(machine.facts.Err)}">${escape(words.factsUnknown(machine.facts.Err))}</span>`
+        : escape(route);
+    // This computer, hub by hub: how it reaches each, and whose it is there.
+    const hubs = machine.here
+      ? world.nodes.hubs
+          .map((hub) => {
+            const stand = hub.home ? words.registeredUnder(hub.home) : hub.logins.length ? words.onlyLogins(hub.logins.join(words.separator)) : "";
+            return `<li class="panel-hub ${hub.link.kind}"><span class="panel-hub-name">${escape(hub.name)}</span><span${linkWhy(hub.link) ? ` title="${escape(linkWhy(hub.link))}"` : ""}>${escape([linkSaid(hub.link, words), stand].filter(Boolean).join(" · "))}</span></li>`;
+          })
+          .join("")
+      : "";
+    // Its owner's own: whom it is shared with, and the rest it sets.
+    const owners = machine.here ? logins.filter((login) => world.nodes.hubs.some((hub) => hub.hub === login.hub && hub.home === login.account)) : owner ? [owner] : [];
+    const sharing = owners
+      .map(
+        (login) =>
+          `<div class="panel-give" data-hub="${escape(login.hub)}" data-account="${escape(login.account)}">${this.givenRow(
+            owners.length > 1 ? `${words.sharedTo} · ${login.hubName}` : words.sharedTo,
+            this.sharedWith(login, machine.name),
+            (to) => `data-act="unshare" data-to="${escape(to)}"`,
+            this.button("share", words.share, "", glyph("plus", 13)),
+          )}</div>`,
+      )
+      .join("");
+    const own = owners.length
+      ? `<div class="panel-acts" data-hub="${escape(owners[0]!.hub)}" data-account="${escape(owners[0]!.account)}">${machine.here ? "" : this.button("remove", words.remove, " data-danger", glyph("close", 14))}</div>`
+      : "";
+    // Whom an agent on it assists, ended here as on the agents page.
+    const assisting = owners
+      .map((login) => {
+        const assists = (this.hubOf(login)?.assists ?? []).filter((assist) => assist.machine === machine.name);
+        if (!assists.length) return "";
+        const chips = assists
+          .map((assist) => {
+            const label = `${agentName(assist.agent)} · ${assist.account}`;
+            const at = `data-to="${escape(assist.account)}" data-agent="${escape(assist.agent)}"${assist.home ? ` data-home="${escape(assist.home)}"` : ""}${assist.until ? ` data-until="${escape(assist.until)}"` : ""}`;
+            const until = assist.until ? new Date(assist.until) : null;
+            const said = until ? access.moment.until(until, now) : access.when.none;
+            const day = until ? `<span class="assist-tag-until">${glyph("history", 12)}${escape(access.moment.short(until, now))}</span>` : "";
+            return `<span class="chip assist-chip"><button class="assist-tag-open" type="button" data-act="assist-edit" ${at} title="${escape(`${access.changeUntil} · ${said}`)}">${escape(label)}${day}</button><button class="chip-x" type="button" data-act="assist-end" ${at} aria-label="${escape(words.endAssist(assist.account))}" title="${escape(words.endAssist(assist.account))}">${glyph("close", 12)}</button></span>`;
+          })
+          .join("");
+        return `<div class="panel-give" data-hub="${escape(login.hub)}" data-account="${escape(login.account)}"><div class="given-row"><span class="given-label">${escape(words.assisting)}</span>${chips}</div></div>`;
+      })
+      .join("");
+    const note = this.note?.machine === machine.name ? `<p class="machine-note">${escape(this.note.text)}</p>` : "";
+    const state = this.stateOf(machine.online, machine.since, machine.here, now);
+    const direct = this.directSaid(machine, world);
+    return `<article class="panel-machine" data-machine="${escape(machine.name)}">
+      ${this.panelHead(machine.written, tags, state)}
+      ${acts}
+      ${factLine ? `<p class="panel-facts">${factLine}</p>` : ""}
+      ${facts ? `<p class="panel-home"><span>${escape(words.home)}</span><code>${escape(facts.home)}</code></p>` : ""}
+      ${hubs ? `<ul class="panel-hubs">${hubs}</ul>` : ""}
+      ${direct}
+      ${sharing}
+      ${assisting}
+      ${this.present(machine.name, world, viewer)}
+      ${this.agentsLink(machine.written)}
+      ${note}
+      ${own}
+    </article>`;
+  }
+
+  /** A machine's direct links: with whom they are up and how fast, which
+   *  are down and why, and where others connect to it when it takes them. */
+  private directSaid(machine: Machine, world: WorldNow): string {
+    const { words } = this.options;
+    const { nodes, links } = mapOf(world, words);
+    const key = `m:${machine.written}`;
+    const name = (other: string) => nodes.find((node) => node.key === other)?.name ?? other.replace(/^m:/, "");
+    const mine = links.filter((link) => link.a === key || link.b === key).sort((a, b) => Number(b.up) - Number(a.up));
+    const at = nodes.find((node) => node.key === key)?.directAt ?? [];
+    if (!mine.length && !at.length) return "";
+    const said = mine.map((link) => {
+      const peer = name(link.a === key ? link.b : link.a);
+      return link.up ? `<span class="direct-up">${escape(words.directUp(peer, link.ms))}</span>` : `<span class="direct-down">${escape(words.directDown(peer, link.why))}</span>`;
+    });
+    return `<div class="panel-direct"><span class="given-label">${escape(words.directRow)}</span><span class="panel-direct-list">${said.join(`<span class="sep">·</span>`)}</span>${at.length ? `<p class="panel-direct-at">${escape(words.takesDirectAt(at.join("、")))}</p>` : ""}</div>`;
+  }
+
+  /** What is known of a machine of another's whose agent assists: whose
+   *  it is, that it is no machine of the account's to work on, and the
+   *  assisting logins, each a way into a conversation. */
+  private assistPanel(assistants: Assistant[], world: WorldNow, now: Date, acts = ""): string {
+    const { words } = this.options;
+    const first = assistants[0]!;
+    const reaching = machineActsFor(world, first.machine, first.login);
+    const tags = [this.tag(words.assistShort(first.owner ?? ""), "tag-assist", words.assistantSaid(first.owner ?? "")), reaching ? this.tag(words.reaching, "tag-reach", words.reachingWhat) : ""];
+    const state = this.stateOf(first.online, first.since, false, now);
+    return `<article class="panel-machine" data-machine="${escape(first.machine)}">
+      ${this.panelHead(first.written, tags, state, true)}
+      ${acts}
+      <p class="panel-said" title="${escape(words.assistantSaid(first.owner ?? ""))}">${glyph("colleague", 14)}<span>${escape(words.assistantNote)}</span></p>
+      ${assistants
+        .filter((one) => one.until)
+        .map((one) => `<p class="panel-said">${glyph("history", 14)}<span>${escape(`${agentName(one.agent)} ${this.options.access.moment.until(new Date(one.until!), now)}`)}</span></p>`)
+        .join("")}
+      ${this.present(first.machine, world, first.login)}
+      ${this.agentsLink(first.written)}
+    </article>`;
+  }
+
+  /** A phone signed in to the account: whether it is there, and since
+   *  when it is signed in. */
+  private phonePanel(member: MemberSeen, here: boolean, now: Date, acts = ""): string {
+    const { words } = this.options;
+    const state = this.stateOf(member.online, member.since ?? null, here, now);
+    const tags = [this.tag(words.phone, "", words.phoneWhat), here ? this.tag(words.here) : ""];
+    return `<article class="panel-machine" data-device="${escape(member.name)}">
+      ${this.panelHead(member.name, tags, state)}
+      ${acts}
+      <p class="panel-said">${glyph("phone", 14)}<span>${escape(words.phoneSince(this.options.when(new Date(member.added), now)))}</span></p>
+    </article>`;
+  }
+
+  /** The way to the agents on a machine, which have a page of their own. */
+  private agentsLink(machine: string): string {
+    const { words } = this.options;
+    return `<a class="text-button quiet-button panel-agents" href="${link({ kind: "agents", machine })}">${glyph("agents", 14)}<span>${escape(words.hosts)}</span></a>`;
+  }
+
+  /** What is known of a hub: how this computer reaches it, the account's
+   *  level there, who its super administrator is, and its machines. */
+  private hubPanel(hub: HubAccounts, world: WorldNow, acts = ""): string {
+    const { words } = this.options;
+    const logins = loginsOf(world.accounts).filter((login) => login.hub === hub.hub);
+    const state = { kind: hub.link.kind === "online" ? "online" : "offline", said: linkSaid(hub.link, words) || words.hubOff };
+    const rows = logins
+      .map((login) => {
+        const me = hub.accounts.find((account) => account.name === login.account);
+        const admin = superOf(world, login);
+        const top = me?.level === "super";
+        return `<li class="panel-login" data-hub="${escape(login.hub)}" data-account="${escape(login.account)}">
+          <span class="panel-login-name">${glyph("person", 14)}<span>${escape(login.account)}</span>${this.tag(top ? words.levelSuper : words.levelMember, top ? "tag-own" : "")}</span>
+          ${!top && admin ? `<span class="panel-said" title="${escape(words.superNote(admin))}">${glyph("shield", 13)}<span>${escape(words.superShort(admin))}</span></span>` : ""}
+          <span class="panel-login-acts">${this.button("invite", words.inviteDevice, "", glyph("plus", 13))}</span>
+        </li>`;
+      })
+      .join("");
+    const machines = hub.members.filter((member) => member.kind === "computer" && member.home).length;
+    return `<article class="panel-hub-card">
+      <header class="panel-head ${state.kind}"><span class="knot" aria-hidden="true"></span><h2 class="panel-title">${escape(words.hubTitle(hub.name))}</h2><span class="panel-state">${escape(state.said)}</span></header>
+      <p class="panel-what">${escape(words.hubIs)}</p>
+      ${acts}
+      <p class="panel-facts">${escape(words.hubMachines(machines))}</p>
+      <ul class="panel-logins">${rows}</ul>
+      ${this.superLogin(hub, world) ? this.moving.section(hub.hub, world.nodes.machine ?? null) : ""}
+    </article>`;
+  }
+
+  /** Who is at work on a machine and what runs there, as `login` sees it;
+   *  nothing when no one is. */
+  private present(machine: string, world: WorldNow, login: Login | null): string {
+    const { words } = this.options;
+    const group = login ? (groupsOf(world).find((one) => sameLogin(one.login, login)) ?? null) : null;
+    const residents = residentsOf(world).filter(
+      (r) => r.about.machine === machine && (r.now?.activity === "busy" || r.now?.waiting_for_user) && (!group || residentIn(world, group, r)),
+    );
+    const jobs = jobsOf(world).filter((job) => job.machine === machine);
+    const agents = residents.length
+      ? `<ul class="machine-agents">${residents
+          .map(
+            (r) =>
+              `<li><a href="${talkLink({ resident: r.about.id, machine: r.about.machine })}"><span class="mark ${r.now?.waiting_for_user ? "mark-ask" : r.now?.activity === "busy" ? "mark-busy" : "mark-idle"}" aria-hidden="true"></span>${escape([agentName(r.about.host.agent), titleOf(r)].filter(Boolean).join(" · "))}${r.town ? `<span class="tag">${escape(r.town)}</span>` : ""}</a></li>`,
+          )
+          .join("")}</ul>`
+      : "";
+    return `${agents}${jobs.length ? `<p class="machine-jobs">${escape(words.jobs(jobs.length))}</p>` : ""}`;
+  }
+
+}
+
+/** The person a key on the drawing stands for: their "⋯". */
+function personOf(key: string): { hub: string; account: string } | null {
+  const found = key.match(/^who:([^:]+):(.+)$/);
+  return found ? { hub: found[1]!, account: found[2]! } : null;
+}
+
+/** Why a hub is not reached, in the kernel's words, for the hover. */
+export function linkWhy(link: LinkState): string {
+  return link.kind === "connecting" ? (link.last_error ?? "") : link.kind === "stopped" ? link.reason : "";
+}
+
+/** How this computer reaches a hub, in words. */
+export function linkSaid(link: LinkState, words: MachinesWords): string {
+  switch (link.kind) {
+    case "online":
+      return link.through ? words.linkVia(link.through, link.hub) : words.linkOnline(link.hub);
+    case "connecting":
+      return words.linkConnecting(link.last_error);
+    case "stopped":
+      return link.dissolved ? words.linkDissolved : words.linkStopped(link.reason);
+    case "alone":
+      return "";
+  }
+}
+
+/** An address as the hub or a network card gives it, without a port. */
+function hostOf(address: string): string {
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(address);
+  if (bracketed) return bracketed[1]!;
+  return /^[^:]+:\d+$/.test(address) ? address.slice(0, address.lastIndexOf(":")) : address;
+}
+
+/** A machine others connect to directly, drawn small for a card: its ring
+ *  in the middle with its line to the hub's knot above, and two machines
+ *  beside it with theirs; with direct connections, straight clay lines from
+ *  the two to it. */
+function directPicture(direct: boolean): string {
+  const random = seeded(`direct-picture:${direct}`);
+  const knot: [number, number] = [66, 7];
+  const middle: [number, number] = [66, 30];
+  const sides: [number, number][] = [
+    [18, 26],
+    [114, 26],
+  ];
+  const rings = [circle(middle, 8, 1.5, random), ...sides.map((side) => circle(side, 6, 1.3, random))];
+  const bowed = (from: [number, number], reach: number) => {
+    const dx = knot[0] - from[0];
+    const dy = knot[1] - from[1];
+    const length = Math.hypot(dx, dy);
+    const start: [number, number] = [from[0] + (dx / length) * (reach + 2), from[1] + (dy / length) * (reach + 2)];
+    const end: [number, number] = [knot[0] - (dx / length) * 5, knot[1] - (dy / length) * 5];
+    return outline([start, [(start[0] + end[0]) / 2 + 2, (start[1] + end[1]) / 2 - 2], end], 1.1, random, { pressure: 0.3, taper: 0.1 });
+  };
+  const lines = [bowed(middle, 8), ...sides.map((side) => bowed(side, 6))];
+  const straight = direct ? sides.map((side) => ruled([side[0] + (side[0] < 66 ? 8 : -8), side[1] + 1], [middle[0] + (side[0] < 66 ? -10 : 10), middle[1]], 1.1, random)) : [];
+  return `<svg class="map-card-picture" viewBox="0 0 132 40" aria-hidden="true"><g class="ink graphite" filter="url(#pen-marker)"><path d="${circle(knot, 3.5, 1.2, random)}"/><path d="${blot(knot, 1.5, random)}"/>${[...rings, ...lines].map((d) => `<path d="${d}"/>`).join("")}</g><g class="ink clay" filter="url(#pen-marker)">${straight.map((d) => `<path d="${d}"/>`).join("")}</g></svg>`;
+}

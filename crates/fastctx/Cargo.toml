@@ -1,0 +1,39 @@
+[package]
+name = "fastctx"
+description = "One world, many machines: a real, honest world for AI agents to live in"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "fastctx"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+fastctx-client = { path = "../fastctx-client" }
+fastctx-hands = { path = "../fastctx-hands" }
+fastctx-hub = { path = "../fastctx-hub" }
+fastctx-net = { path = "../fastctx-net" }
+fastctx-install = { path = "../fastctx-install" }
+fastctx-node = { path = "../fastctx-node" }
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-ripgrep = { path = "../fastctx-ripgrep" }
+fastctx-serve = { path = "../fastctx-serve" }
+fastctx-tui = { path = "../fastctx-tui" }
+fastctx-types = { path = "../fastctx-types" }
+fastctx-uninstall = { path = "../fastctx-uninstall" }
+getrandom = { version = "0.3", features = ["std"] }
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+tikv-jemallocator = { version = "0.7", default-features = false }

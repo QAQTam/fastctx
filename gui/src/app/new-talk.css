@@ -1,0 +1,647 @@
+/* A new conversation's page: in its quiet middle, the chosen agent's mark
+   drawn by hand and the place's name; at its foot, the input where a
+   conversation keeps it, with what the words go to above them. */
+
+.new-talk-page {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* Its middle sits a little above the true centre, where the eye takes a
+   page's centre to be. */
+.new-talk-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--gutter) max(var(--space-8), 9vh);
+  text-align: center;
+}
+
+.new-talk-mark {
+  height: 52px;
+  color: var(--text-3);
+}
+
+.new-talk-mark svg {
+  width: 52px;
+  height: 52px;
+  overflow: visible;
+  stroke-width: 1.1;
+  filter: url(#pen-marker);
+}
+
+/* The mark is drawn once, a stroke at a time, when an agent is chosen. */
+.new-talk-mark svg :is(path, rect, circle) {
+  stroke-dasharray: 1;
+  animation: mark-draw 1100ms var(--fold-easing) both;
+}
+
+.new-talk-mark svg :is(path, rect, circle):nth-child(2) {
+  animation-delay: 320ms;
+}
+
+@keyframes mark-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+}
+
+.new-talk-title {
+  margin: 0;
+  max-width: min(var(--column), 100%);
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+  font-size: calc(var(--body-size) * 1.6);
+  line-height: var(--leading-heading);
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+/* Nothing scrolls beneath this input. */
+.new-talk-dock::before {
+  display: none;
+}
+
+/* What the words go to: the agent, the machine it works on, the project,
+   each a quiet label that opens its choices. */
+.talk-context {
+  display: flex;
+  gap: 2px;
+  margin: calc(-1 * var(--space-1)) 0 var(--space-2) calc(-1 * var(--space-2));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.talk-context::-webkit-scrollbar {
+  display: none;
+}
+
+.talk-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--size-small);
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.talk-chip > .glyph {
+  flex: none;
+  color: var(--text-3);
+}
+
+.talk-chip-name {
+  color: var(--text);
+}
+
+.talk-chip-sub {
+  color: var(--text-3);
+}
+
+.talk-chip-sub::before {
+  content: "·";
+  margin-right: 6px;
+}
+
+.talk-chip-sub.who {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.talk-chip.assist .talk-chip-sub:not(.who) {
+  color: var(--accent);
+}
+
+/* Where it works, when that is not where it lives: after an arrow of a
+   shell. */
+.talk-chip-works {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+}
+
+.talk-chip-works::before {
+  content: "→";
+  margin-right: 2px;
+  color: var(--text-3);
+}
+
+.talk-chip-works > .glyph {
+  color: var(--text-3);
+}
+
+.talk-chip.quiet .talk-chip-name,
+.talk-chip.empty .talk-chip-name {
+  color: var(--text-3);
+}
+
+/* A small arrow says the label opens. */
+.talk-chip > .glyph:last-child {
+  opacity: 0.7;
+}
+
+.talk-chip:hover,
+.talk-chip[aria-expanded="true"] {
+  background: var(--hairline);
+}
+
+/* A label's choices, risen over the input. */
+.talk-pop {
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: calc(100% + var(--space-2));
+  z-index: 6;
+  max-height: min(56dvh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-l);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+  animation: panel-rise var(--fold) var(--fold-easing) both;
+}
+
+.talk-pop[data-pop="town"] {
+  right: auto;
+  width: min(320px, calc(100% - var(--space-6)));
+}
+
+/* The picker's own space below it is the room between it and these. */
+.pop-section {
+  margin-top: var(--space-1);
+}
+
+.pop-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0 calc(-1 * var(--space-2));
+}
+
+.pop-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 34px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  text-align: left;
+  font-size: var(--size-ui);
+  color: var(--text-2);
+}
+
+.pop-row:hover:not(:disabled),
+.pop-row.chosen {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.pop-row:disabled {
+  color: var(--text-3);
+}
+
+.pop-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pop-row > .glyph {
+  flex: none;
+  color: var(--accent);
+}
+
+@media (max-width: 760px) {
+  .talk-pop,
+  .talk-pop[data-pop="town"] {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 72dvh;
+    padding: var(--space-4) var(--space-5) calc(var(--space-5) + var(--safe-bottom));
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
+    animation-name: sheet-rise;
+  }
+
+  .pop-row,
+  .talk-pop .choice {
+    min-height: 44px;
+    align-items: center;
+  }
+
+  /* The labels stay on one line, so the input beneath never moves; what
+     does not fit ends in an ellipsis. Who is logged in is said in the
+     agent's choices only. */
+  .talk-context {
+    overflow: hidden;
+  }
+
+  .talk-chip {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    height: 34px;
+    padding: 0 6px;
+  }
+
+  /* The pill is what says it opens; the arrow needs the room. */
+  .talk-chip > .glyph:last-child {
+    display: none;
+  }
+
+  .talk-chip > :is(.talk-chip-name, .talk-chip-sub, .talk-chip-works) {
+    min-width: 3em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* What gives way first: the machine the agent lives on, then the
+     project, then the machines and folders; the agent's name never. */
+  .talk-chip[data-pop="agent"] {
+    flex-shrink: 6;
+  }
+
+  .talk-chip[data-pop="agent"] > .talk-chip-name {
+    flex: none;
+  }
+
+  .talk-chip[data-pop="agent"] > .talk-chip-sub {
+    min-width: 0;
+  }
+
+  .talk-chip[data-pop="town"] {
+    flex-shrink: 3;
+  }
+
+  .talk-chip-sub.who {
+    display: none;
+  }
+
+  /* As every sheet on a phone: a shade over the rest, a tap on it only
+     puts the sheet away. */
+  .new-talk-dock:has(.talk-pop:not([hidden]))::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+    background: rgba(0, 0, 0, 0.36);
+    animation: sheet-scrim var(--fold) ease both;
+  }
+}
+
+:root[data-reduced] .new-talk-mark svg :is(path, rect, circle),
+:root[data-reduced] .talk-pop {
+  animation: none;
+}
+
+/* The sidebar's way here, while it is the page shown. */
+.new-talk.current {
+  background: color-mix(in srgb, var(--accent-wash) 55%, var(--bg-elevated));
+}
+
+/* Once the first words are sent, the conversation begins where the stage
+   was: the words rise into it, the line beneath says it is starting
+   (`conversation/starting.ts`). */
+.new-talk-page.begun .new-talk-stage {
+  display: none;
+}
+
+.new-talk-page.begun .new-talk-dock::before {
+  display: block;
+}
+
+/* Which agent: every login in one table (`agent-picker.ts`). The groups and
+   the machines run across it; each login is a row on the table's own
+   columns, so the agents, who is logged in, the plans and the bars line up
+   all the way down, whatever machine they are on. */
+.agent-picker {
+  display: grid;
+  grid-template-columns: max-content max-content minmax(0, 1fr) max-content max-content max-content;
+  column-gap: var(--space-3);
+  padding: var(--space-1) 0 var(--space-2);
+}
+
+.agent-group {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 var(--space-1);
+  font-family: var(--font-reading);
+  font-weight: 400;
+  font-size: var(--size-small);
+  letter-spacing: 0.02em;
+  color: var(--text-3);
+}
+
+.agent-picker > .agent-hold:first-child > .agent-group {
+  margin-top: 0;
+}
+
+/* A group and a machine are only ways to narrow the table: their rows
+   stand on the table's own columns. */
+.agent-hold,
+.agent-host {
+  display: contents;
+}
+
+.agent-hold[hidden],
+.agent-host[hidden],
+.agent-row[hidden],
+.agent-none[hidden] {
+  display: none;
+}
+
+/* Past ten logins, what narrows them: a solid field at the top that stays
+   there as the table scrolls. */
+.agent-filter {
+  position: sticky;
+  top: calc(-1 * var(--space-3));
+  z-index: 1;
+  display: block;
+  width: 100%;
+  margin: calc(-1 * var(--space-3)) 0 var(--space-2);
+  padding: 8px var(--space-3);
+  border: 0;
+  border-radius: var(--radius-m);
+  outline: 0;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--size-ui);
+  box-shadow: 0 var(--space-3) 0 var(--bg-elevated), 0 calc(-1 * var(--space-3)) 0 var(--bg-elevated);
+}
+
+.agent-filter::placeholder {
+  color: var(--text-3);
+}
+
+.agent-group::after {
+  content: "";
+  flex: 1;
+  height: 8px;
+  background: var(--pen-rule);
+  -webkit-mask: var(--pen-rule-1) 0 50% / 100% 100% no-repeat;
+  mask: var(--pen-rule-1) 0 50% / 100% 100% no-repeat;
+}
+
+.agent-machine {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2) var(--space-2) 2px;
+  font-size: var(--size-ui);
+  color: var(--text-strong);
+}
+
+.agent-machine-dot {
+  flex: none;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--text-3);
+}
+
+.agent-machine.online .agent-machine-dot {
+  background: var(--alive);
+}
+
+.agent-machine.offline .agent-machine-dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.2px var(--text-3);
+}
+
+.agent-machine.offline .agent-machine-name {
+  color: var(--text-3);
+}
+
+.agent-machine-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-machine-note {
+  flex: none;
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.agent-machine-note + .agent-machine-note::before {
+  content: "·";
+  margin-right: var(--space-2);
+}
+
+/* A login: set in under its machine's name, past the dot. */
+.agent-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 var(--space-3) 0 calc(var(--space-2) + 15px);
+  border-radius: var(--radius-m);
+  text-align: left;
+  color: var(--text-2);
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.agent-row:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--fill);
+}
+
+.agent-row.chosen,
+.agent-row.chosen:hover:not(:disabled) {
+  color: var(--text-strong);
+  background: var(--accent-wash);
+}
+
+.agent-row:disabled {
+  color: var(--text-3);
+  cursor: default;
+}
+
+.agent-row-mark {
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.agent-row.chosen .agent-row-mark {
+  color: var(--accent);
+}
+
+.agent-row-agent {
+  font-size: var(--size-ui);
+  white-space: nowrap;
+}
+
+.agent-row-who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--size-small);
+}
+
+.agent-row-plan .tag {
+  font-size: 12px;
+}
+
+/* Each window a short bar and how much of it is spent; past nine tenths in
+   the caution colour, spent in the warning colour. */
+.agent-row-limits {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.agent-limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-limit-track {
+  position: relative;
+  width: 32px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+.agent-limit-track > i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--pen-clay);
+}
+
+.agent-limit-used {
+  min-width: 2.6em;
+  text-align: right;
+  color: var(--text-2);
+}
+
+.agent-limit.high .agent-limit-track > i {
+  background: var(--caution);
+}
+
+.agent-limit.high .agent-limit-used {
+  color: var(--caution);
+}
+
+.agent-limit.spent .agent-limit-track > i {
+  background: var(--wrong);
+}
+
+.agent-limit.spent .agent-limit-used {
+  color: var(--wrong);
+}
+
+
+.agent-row-note {
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.agent-row-note.caution {
+  color: var(--caution);
+}
+
+.agent-row-note.credits {
+  color: var(--accent);
+}
+
+.agent-none {
+  grid-column: 1 / -1;
+  margin: 2px 0 var(--space-1) calc(var(--space-2) + 15px);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* On a phone a login takes two lines: the agent, who is logged in and the
+   plan; under them the windows, and any note at the end. */
+@media (max-width: 760px) {
+  .agent-picker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .agent-row {
+    grid-template-columns: 18px max-content minmax(0, 1fr) auto;
+    grid-template-areas:
+      "mark agent who plan"
+      ". limits limits note";
+    column-gap: var(--space-2);
+    row-gap: 4px;
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
+    padding-left: var(--space-3);
+    min-height: 52px;
+  }
+
+  .agent-row-mark {
+    grid-area: mark;
+  }
+
+  .agent-row-agent {
+    grid-area: agent;
+  }
+
+  .agent-row-plan {
+    grid-area: plan;
+  }
+
+  .agent-row-note {
+    grid-area: note;
+  }
+
+  .agent-row-who {
+    grid-area: who;
+  }
+
+  .agent-row-limits {
+    grid-area: limits;
+  }
+
+
+  .agent-none {
+    margin-left: var(--space-3);
+  }
+}
+
+/* Which of the user's own logins opens it, where several may: under the
+   table, spaced as its groups are. */
+.agent-picker + .pop-section {
+  margin-top: var(--space-2);
+}

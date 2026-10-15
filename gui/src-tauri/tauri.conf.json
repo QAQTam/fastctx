@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Fastctx",
+  "mainBinaryName": "fastctx-app",
+  "version": "1.0.1-beta.1",
+  "identifier": "dev.fastctx.world",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5317",
+    "beforeBuildCommand": "npm run build && python ../scripts/gui-notices.py",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Fastctx",
+        "width": 1180,
+        "height": 860,
+        "minWidth": 360,
+        "minHeight": 520
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src ipc: http://ipc.localhost",
+      "devCsp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "resources": {
+      "licenses/LICENSE-APACHE": "licenses/LICENSE-APACHE",
+      "licenses/NOTICE": "licenses/NOTICE",
+      "licenses/THIRD_PARTY_LICENSES.md": "licenses/THIRD_PARTY_LICENSES.md"
+    },
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/desktop-presence.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMzQjk0NThCRkZCRjg1OEMKUldTTWhiLy9pMFc1TThHUitkUVVyWCtzT0NsOERUUHZKelZjcHJmS3lBUzBtUXBVNHdkenEzZjEK",
+      "endpoints": [
+        "https://github.com/yc-duan/fastctx/releases/latest/download/latest.json"
+      ],
+      "dangerousInsecureTransportProtocol": true,
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

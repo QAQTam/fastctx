@@ -1,0 +1,308 @@
+/* The World's design tokens (`world-gui.md`, 审美). Every value the
+   interface uses comes from here; components never write a colour, a size
+   or a duration of their own.
+
+   Boxes are solid: a pill, a field, a card is a fill a shade off the
+   paper, never a line drawn round it (the user's taste, 2026-10-10); a
+   field keeps one fill whether pointed at, pressed or typed in. Lines on
+   the page are the pen's: ruled across, down a margin.
+
+   Colour is by role. The three themes are the user's own, value for
+   value, and the terminal interface takes the same ones
+   (`crates/fastctx-tui/src/design.rs`): warm black, the default dark; ink
+   black, its colourless sibling; warm white, the light one. The page names
+   its theme on the root before it paints (`theme.ts`): the one chosen, or
+   the system's light or dark. */
+
+:root {
+  /* Type. The whole layout is reckoned in the body size, so a reader who
+     sets a larger size keeps the same words to a line. */
+  --body-size: 15px;
+  --font-reading: "Reading", "IBM Plex Serif", "Noto Sans SC", "Microsoft YaHei UI", serif;
+  --font-emphasis: "Emphasis", var(--font-reading);
+  --font-code: "Rec Mono Linear", "Cascadia Mono", "Reading", "Noto Sans SC", monospace;
+  --code-axes: "MONO" 1, "CASL" 0, "slnt" 0;
+
+  --size-small: calc(var(--body-size) - 2px);
+  --size-ui: calc(var(--body-size) - 1px);
+  --size-code: calc(var(--body-size) * 0.88);
+  /* Headings inside what an agent writes stay close to the body: a message
+     nests in the page, so it never raises a heading that competes with the
+     page's own. Levels part by face and space more than by size. */
+  --size-h1: calc(var(--body-size) * 1.154);
+  --size-h2: calc(var(--body-size) * 1.154);
+  --size-h3: calc(var(--body-size) * 1.077);
+  --size-title: calc(var(--body-size) * 1.6);
+  /* A size under the body, as the conversation reads on a phone; reckoned
+     here, where the body's size is the one chosen. */
+  --size-under: calc(var(--body-size) - 1px);
+
+  --leading-prose: 1.68;
+  --leading-ui: 1.45;
+  --leading-code: 1.55;
+  --leading-heading: 1.36;
+
+  /* The reading column: 48 body widths, a little wider than claude.ai's
+     46, so a stretch of tools and its boxes have room to breathe, whatever
+     the size. Gutters close in on a phone and open out on a wide screen. */
+  --column: calc(var(--body-size) * 48);
+  --gutter: clamp(16px, 4.5vw, 36px);
+
+  /* Space, on a 4px step. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 16px;
+  --radius-full: 999px;
+
+  /* Glyphs are drawn at their nominal size times this, rounded to whole
+     pixels: a size up from the nominal everywhere, more under a finger
+     (below). */
+  --icon-scale: 1.2;
+
+  /* The activity rail: a 20px column of glyphs, then 10px. */
+  --rail-glyph: 20px;
+  --rail-gap: 10px;
+  --tool-header: 28px;
+
+  /* Motion. Hover moves only colour, opacity and transform; folding has one
+     duration and one curve everywhere. Nothing moves for itself. */
+  --hover: 180ms;
+  --fold: 220ms;
+  --fold-easing: cubic-bezier(0.2, 0, 0, 1);
+  --enter: 220ms;
+  /* A turn's line comes in softly, and goes at once. */
+  --line-in: 240ms;
+  /* Words sent rise from the input into their place: up along
+     --send-easing, across along the slower --send-drift, so they travel on
+     a curve. */
+  --send: 560ms;
+  --send-easing: cubic-bezier(0.3, 0.2, 0.15, 1);
+  --send-drift: cubic-bezier(0.55, 0, 0.3, 1);
+
+  /* Android supplies the bars' heights before the page paints; browsers
+     use their own safe areas. Content at an edge keeps clear by these. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* On a phone the body is a size larger: the same words are read at arm's
+   length, and a smaller one makes browsers zoom into the composer. */
+@media (max-width: 600px) {
+  :root {
+    --body-size: 16px;
+  }
+}
+
+/* Warm black. */
+:root,
+[data-theme="warm-black"] {
+  color-scheme: dark;
+  --bg: #1f1f1e;
+  --bg-sunken: #1a1a19;
+  --bg-elevated: #2c2c2a;
+  --surface-code: #272727;
+  --surface-code-2: #1f1f1e;
+  --surface-header: #2e2e2c;
+  --bubble: #121212;
+  --on-bubble: #f5f2e8;
+
+  --text: #f8f8f6;
+  --text-strong: #f5f2e8;
+  --text-2: #bcbcb9;
+  --text-3: #989898;
+  --text-quote: #c3c2b7;
+
+  --accent: #d97757;
+  --accent-bright: #e0a18b;
+  --accent-wash: rgba(217, 119, 87, 0.22);
+  --selection: rgba(217, 119, 87, 0.32);
+  --focus: rgba(217, 119, 87, 0.6);
+
+  --hairline: rgba(245, 242, 232, 0.1);
+  --divider: rgba(245, 242, 232, 0.06);
+  --rule: rgba(245, 242, 232, 0.16);
+  /* The line that joins an activity's glyphs down the rail. */
+  --rail-line: rgba(245, 242, 232, 0.28);
+  /* Solid boxes: a quiet fill, a stronger one under the pointer, and the
+     well a field is typed into. */
+  --fill: rgba(245, 242, 232, 0.06);
+  --fill-strong: rgba(245, 242, 232, 0.1);
+  --field: rgba(0, 0, 0, 0.2);
+
+  --add-fg: #7cb27c;
+  --add-line: #23863633;
+  --add-char: #2ea04366;
+  --del-fg: #c96a6a;
+  --del-line: #da363333;
+  --del-char: #f8514966;
+
+  --alive: #7cb27c;
+  --caution: #d4a85a;
+  --wrong: #c96a6a;
+  --scrollbar: #3c3c3c;
+  /* The pen's inks, for drawings only, never for text: graphite for the
+     paper's structure, clay for work, and three quiet colours for kinds.
+     On dark paper the inks lighten what they cross; on light paper they
+     darken it, as ink does. */
+  --pen-graphite: #9a978d;
+  --pen-clay: #d97757;
+  /* The turn's line: the pencil trace the pen writes over, and the light
+     that passes over its word; each must show on this paper. */
+  --pen-trace: rgba(154, 151, 141, 0.38);
+  --glint: var(--pen-clay);
+  --pen-sky: #7fa8cf;
+  --pen-sage: #9cb07e;
+  --pen-rose: #d08da4;
+  --pen-blend: screen;
+  --swash-strength: 16%;
+  --pen-rule: rgba(245, 242, 232, 0.2);
+  --shadow-pop: 0 12px 36px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Ink black: warm black without hue. Its accent is a grey, and the words
+   that went in sit on an inverted, near-white ground. */
+[data-theme="ink-black"] {
+  color-scheme: dark;
+  --bg: #0a0b0b;
+  --bg-sunken: #141516;
+  --bg-elevated: #212121;
+  --surface-code: #1a1b1c;
+  --surface-code-2: #0a0b0b;
+  --surface-header: #222324;
+  --bubble: #fbfbfc;
+  --on-bubble: #0a0b0b;
+
+  --text: #fbfbfc;
+  --text-strong: #fbfbfc;
+  --text-2: #aaaaab;
+  --text-3: #838484;
+  --text-quote: #c7c6c7;
+
+  --accent: #c2c4c7;
+  --accent-bright: #dadce0;
+  --accent-wash: rgba(194, 196, 199, 0.2);
+  --selection: rgba(194, 196, 199, 0.32);
+  --focus: rgba(194, 196, 199, 0.6);
+
+  --hairline: rgba(255, 255, 255, 0.1);
+  --divider: rgba(255, 255, 255, 0.08);
+  --rule: rgba(255, 255, 255, 0.16);
+  --rail-line: rgba(255, 255, 255, 0.26);
+  --fill: rgba(255, 255, 255, 0.065);
+  --fill-strong: rgba(255, 255, 255, 0.11);
+  --field: rgba(0, 0, 0, 0.35);
+
+  --add-fg: #7cb27c;
+  --add-line: #23863633;
+  --add-char: #2ea04366;
+  --del-fg: #c96a6a;
+  --del-line: #da363333;
+  --del-char: #f8514966;
+
+  --alive: #7cb27c;
+  --caution: #d4a85a;
+  --wrong: #c96a6a;
+  --scrollbar: #2c2c2d;
+  --pen-graphite: #8f9092;
+  --pen-clay: #c2c4c7;
+  --pen-trace: rgba(143, 144, 146, 0.42);
+  --glint: var(--text-strong);
+  --pen-sky: #8fa9c4;
+  --pen-sage: #9fae8f;
+  --pen-rose: #c49aa9;
+  --pen-blend: screen;
+  --swash-strength: 16%;
+  --pen-rule: rgba(255, 255, 255, 0.2);
+  --shadow-pop: 0 12px 36px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Warm white. */
+[data-theme="warm-white"] {
+  color-scheme: light;
+  --bg: #f8f8f6;
+  --bg-sunken: #f1efe9;
+  --bg-elevated: #ffffff;
+  --surface-code: #ecebe5;
+  --surface-code-2: #f8f8f6;
+  --surface-header: #e3e1da;
+  --bubble: #e6e4de;
+  --on-bubble: #0d0d0d;
+
+  --text: #0d0d0d;
+  --text-strong: #0d0d0d;
+  --text-2: #797569;
+  --text-3: #9a968b;
+  --text-quote: #797569;
+
+  --accent: #bf5d3a;
+  --accent-bright: #8f452b;
+  --accent-wash: rgba(191, 93, 58, 0.16);
+  --selection: rgba(191, 93, 58, 0.22);
+  --focus: rgba(191, 93, 58, 0.55);
+
+  --hairline: rgba(60, 55, 40, 0.1);
+  --divider: rgba(60, 55, 40, 0.06);
+  --rule: rgba(60, 55, 40, 0.16);
+  --rail-line: rgba(60, 55, 40, 0.3);
+  --fill: rgba(60, 55, 40, 0.055);
+  --fill-strong: rgba(60, 55, 40, 0.095);
+  --field: rgba(60, 55, 40, 0.06);
+
+  --add-fg: #1c9c1c;
+  --add-line: #dafbe180;
+  --add-char: #aceebb99;
+  --del-fg: #c92626;
+  --del-line: #ffebe980;
+  --del-char: #ff818266;
+
+  --alive: #1c9c1c;
+  --caution: #9a6d1a;
+  --wrong: #c92626;
+  --scrollbar: #c6c4bd;
+  --pen-graphite: #87867f;
+  --pen-clay: #c96442;
+  --pen-trace: rgba(135, 134, 127, 0.55);
+  --glint: var(--pen-clay);
+  --pen-sky: #6a9bcc;
+  --pen-sage: #788c5d;
+  --pen-rose: #c46686;
+  --pen-blend: multiply;
+  --swash-strength: 24%;
+  --pen-rule: rgba(60, 55, 40, 0.28);
+  --shadow-pop: 0 12px 36px rgba(60, 55, 40, 0.16), 0 2px 8px rgba(60, 55, 40, 0.1);
+}
+
+/* Less motion, where the system asks for it or the user chose so
+   (`motion.ts`): none that is not information. */
+:root[data-reduced] {
+  --hover: 0ms;
+  --fold: 0ms;
+  --enter: 0ms;
+  --line-in: 0ms;
+  --send: 0ms;
+}
+
+/* Every glyph at its nominal size times the scale, in whole pixels; where
+   rounding is not understood, the glyph keeps its nominal size. */
+.glyph {
+  width: round(nearest, calc(var(--glyph, 20) * var(--icon-scale) * 1px), 1px);
+  height: round(nearest, calc(var(--glyph, 20) * var(--icon-scale) * 1px), 1px);
+}
+
+/* Under a finger the glyphs are larger again: read at arm's length, pressed
+   with a thumb. */
+@media (hover: none) and (pointer: coarse) {
+  :root {
+    --icon-scale: 1.4;
+  }
+}

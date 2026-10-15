@@ -1,0 +1,1025 @@
+/* The agents page: the machine shown chosen in the head, a tab for each
+   agent, the logins listed as rows; candidates and folders as quiet rows
+   below; the change card over the page. */
+
+/* The head's machine: a pill with whether it is online, opening the menu
+   of every machine the page can show. */
+.agents-pick-place {
+  position: relative;
+  display: inline-flex;
+  align-self: center;
+  min-width: 0;
+  margin-left: var(--space-2);
+}
+
+.agents-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 8px 0 12px;
+  border-radius: var(--radius-full);
+  background: var(--fill);
+  color: var(--text-strong);
+  font-size: var(--size-ui);
+  transition: background-color var(--hover) ease;
+}
+
+.agents-pick:hover,
+.agents-pick[aria-expanded="true"] {
+  background: var(--fill-strong);
+}
+
+.agents-pick > svg {
+  flex: none;
+  color: var(--text-3);
+}
+
+.agents-pick-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agents-pick-sub {
+  flex: none;
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.agents-pick-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pen-trace);
+}
+
+.agents-pick-dot.online {
+  background: var(--alive);
+}
+
+.agents-pick-menu {
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: max(100%, 280px);
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.agents-pick-group + .agents-pick-group {
+  margin-top: var(--space-1);
+}
+
+.agents-pick-hold {
+  display: block;
+  padding: var(--space-2) var(--space-3) 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* A group of the owner's within a hold: its name, level with the
+   machines' names, in their weight. */
+.agents-pick-band {
+  display: block;
+  padding: 6px var(--space-3) 2px calc(var(--space-3) + 17px);
+  font-size: 12px;
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+.agents-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-s);
+  color: var(--text-2);
+  font-size: var(--size-ui);
+  text-align: left;
+}
+
+.agents-pick-item .agents-pick-name {
+  flex: 1;
+}
+
+.agents-pick-item:hover,
+.agents-pick-item:focus-visible {
+  outline: 0;
+  color: var(--text-strong);
+  background: var(--fill);
+}
+
+.agents-pick-item.current {
+  color: var(--text-strong);
+  background: var(--accent-wash);
+}
+
+/* Under the head: the agent's tabs; across from them, its programs on the
+   machine, how the scan goes, and scanning again. */
+.logins-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  padding: 0 var(--gutter) var(--space-3);
+}
+
+.logins-tabs {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.logins-tabs [role="tab"] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  color: var(--text-2);
+  transition: color var(--hover) ease, background-color var(--hover) ease;
+}
+
+.logins-tabs [role="tab"]:hover {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.logins-tabs [role="tab"].current {
+  color: var(--text-strong);
+  background: var(--fill-strong);
+}
+
+.logins-machine-state {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2) var(--space-4);
+  min-width: 0;
+}
+
+.logins-machine-state:empty {
+  display: none;
+}
+
+.logins-body {
+  padding: 0 var(--gutter) var(--space-8);
+}
+
+.logins-programs {
+  font-size: var(--size-small);
+  color: var(--text-3);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  cursor: default;
+}
+
+.logins-programs.quiet {
+  text-decoration: none;
+}
+
+.logins-scanning {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.logins-scanning.wrong {
+  color: var(--wrong);
+}
+
+.logins-reading,
+.logins-none {
+  padding: var(--space-4) 0;
+}
+
+/* Never scanned, or not heard: the agent's mark or the machine's, and the
+   way to look, in the middle. */
+.logins-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-10) 0;
+  color: var(--text-3);
+}
+
+/* The logins listed: a solid row each, who on the left, then its windows,
+   this week and its last weeks; the row opens the login's usage. */
+.logins-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.logins-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(170px, 1.25fr) 112px auto 32px;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-radius: var(--radius-l);
+  background: var(--fill);
+  cursor: pointer;
+  transition: background-color var(--hover) ease;
+}
+
+.logins-row:hover {
+  background: var(--fill-strong);
+}
+
+.logins-row.plain {
+  grid-template-columns: minmax(0, 1fr) 32px;
+  cursor: default;
+}
+
+.logins-row.plain:hover {
+  background: var(--fill);
+}
+
+.logins-row.changing {
+  opacity: 0.75;
+}
+
+.logins-row-who {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.logins-row-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.logins-slip-mark {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-2);
+}
+
+.logins-row-who-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-strong);
+  text-decoration: none;
+}
+
+.logins-row-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px var(--space-3);
+}
+
+.logins-row .tag {
+  flex: none;
+}
+
+.tag-token {
+  color: var(--accent);
+}
+
+.tag-warn {
+  color: var(--caution);
+}
+
+.tag.logins-assisted {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+
+.logins-row-week {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.logins-row-key {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.logins-row-big {
+  font-size: 18px;
+  line-height: 1.25;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.logins-row-big.quiet {
+  color: var(--text-3);
+}
+
+.logins-row-about {
+  margin-right: 3px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.logins-row-small {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.logins-row-mini {
+  display: flex;
+  align-items: center;
+}
+
+.logins-row-mini svg {
+  display: block;
+}
+
+.ledger-mini .ledger-empty {
+  fill: var(--fill-strong);
+}
+
+.logins-more {
+  justify-self: end;
+}
+
+.logins-row-note {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 1080px) {
+  .logins-row {
+    grid-template-columns: minmax(0, 1fr) minmax(170px, 1.1fr) 112px 32px;
+  }
+
+  .logins-row-mini {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .logins-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-3) var(--space-3);
+    padding: var(--space-3);
+  }
+
+  .logins-row-who {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .logins-row .logins-more {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+  }
+
+  .logins-row .logins-bars {
+    grid-column: 1 / -1;
+  }
+
+  .logins-row-week {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .logins-row-big {
+    font-size: 16px;
+  }
+}
+
+/* The rows share their columns: the window's name, the bar, how much is
+   used and how long until it starts again, each column aligned down the
+   slip, the figures in even digits to the right. */
+.logins-bars {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  column-gap: var(--space-3);
+  row-gap: 6px;
+}
+
+.logins-bar {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  align-items: center;
+  font-size: var(--size-small);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.logins-bar-used {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 2px;
+  min-width: 2.8em;
+  color: var(--text-2);
+}
+
+.logins-bar.high .logins-bar-used {
+  color: var(--caution);
+}
+
+.logins-bar.spent .logins-bar-used {
+  color: var(--wrong);
+}
+
+/* The times start at their clocks, the clocks one above another. */
+.logins-bar-reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  min-width: 4.6em;
+}
+
+.logins-bar-track {
+  position: relative;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--hairline);
+  overflow: hidden;
+}
+
+.logins-bar-track > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--pen-clay);
+}
+
+.logins-bar.high .logins-bar-track > span {
+  background: var(--caution);
+}
+
+.logins-bar.spent .logins-bar-track > span {
+  background: var(--wrong);
+}
+
+/* Never read: an empty dashed bar, the reason a hover away. */
+.logins-bar.unread .logins-bar-track {
+  background: none;
+  border-top: 1px dashed var(--text-3);
+  height: 0;
+  opacity: 0.6;
+}
+
+.logins-credits {
+  color: var(--accent);
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+}
+
+/* The stamp: a solid wash of clay, slightly turned, as if pressed by hand;
+   no line round it. */
+.logins-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-s);
+  font-size: var(--size-small);
+  color: var(--pen-clay);
+  background: var(--accent-wash);
+  transform: rotate(-2deg);
+}
+
+.logins-stamp.busy {
+  color: var(--text-3);
+  background: var(--fill);
+  transform: none;
+}
+
+.logins-assisting {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.logins-group {
+  margin: var(--space-5) 0 var(--space-2);
+  font-size: var(--size-small);
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+/* Rows read across in one look: on a wide screen they stop at a width
+   where a name and its 「接入」 stay together. */
+.logins-candidates,
+.logins-folders {
+  max-width: 760px;
+}
+
+.logins-candidates {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.logins-candidate {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  color: var(--text-2);
+}
+
+.logins-candidate:hover {
+  background: var(--hairline);
+}
+
+.logins-candidate-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.logins-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+/* 「接入」 stands out on its row: the one thing to do with a candidate. */
+.logins-apply {
+  margin-left: auto;
+  color: var(--accent);
+  font-family: var(--font-emphasis);
+  font-weight: 400;
+}
+
+/* 「添加文件夹…」, and the folders searched for logins: a row each, the
+   folder's name and where it is, how its search goes at the end of the row;
+   what it found below it a quiet row each, set in under the name. */
+.logins-add-open {
+  margin-top: var(--space-3);
+}
+
+.logins-folder-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.logins-folder-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 40px;
+  padding: 0 0 0 var(--space-2);
+  color: var(--text-2);
+}
+
+.logins-folder-mark {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.logins-folder-what {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+  cursor: default;
+}
+
+.logins-folder-name {
+  flex: 0 1 auto;
+  min-width: 2em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.logins-folder-where {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.logins-folder-state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.logins-folder-state.wrong {
+  color: var(--wrong);
+}
+
+.logins-folder-forget {
+  flex: none;
+  color: var(--text-3);
+}
+
+.logins-found {
+  margin: 0 0 var(--space-1);
+  padding: 0 0 0 calc(16px + var(--space-2));
+  list-style: none;
+}
+
+.logins-found-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  color: var(--text-2);
+}
+
+.logins-found-row > .glyph {
+  flex: none;
+  color: var(--text-3);
+}
+
+.logins-found-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-small);
+  color: var(--text);
+  cursor: default;
+}
+
+.logins-found-more {
+  margin: 2px 0 0 var(--space-1);
+}
+
+.logins-apply .pulse {
+  margin-right: 6px;
+}
+
+/* A row just added, or what a folder chosen turned out to be: a wash of
+   the accent that fades to the row's own ground. */
+.logins-candidate.fresh,
+.logins-found-row.fresh,
+.logins-folder.fresh,
+.logins-row.fresh {
+  animation: logins-fresh 2400ms ease-out both;
+}
+
+.logins-folder {
+  border-radius: var(--radius-m);
+}
+
+@keyframes logins-fresh {
+  from {
+    background-color: var(--accent-wash);
+  }
+}
+
+:root[data-reduced] .logins-candidate.fresh,
+:root[data-reduced] .logins-found-row.fresh,
+:root[data-reduced] .logins-folder.fresh,
+:root[data-reduced] .logins-row.fresh {
+  animation: none;
+  background-color: var(--accent-wash);
+}
+
+@media (max-width: 760px) {
+  .logins-folder-head,
+  .logins-found-row {
+    min-height: 44px;
+  }
+
+  .logins-folder-where {
+    display: none;
+  }
+}
+
+/* Choosing a folder on another machine: the sheet keeps its size as the
+   walk goes, and only the folders scroll. */
+.folder-sheet .sheet-body {
+  display: flex;
+  flex-direction: column;
+  width: min(520px, 100vw - 32px);
+  height: min(620px, 84vh);
+  overflow: hidden;
+}
+
+.folder-sheet .folder-walk {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.folder-sheet .folder-walk-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+@media (max-width: 760px) {
+  .folder-sheet .sheet-body {
+    width: 100%;
+    height: min(80dvh, 640px);
+  }
+}
+
+/* The change card. It fits the screen whole; only its opened details
+   scroll, in their own place, its head and foot staying put. */
+.agent-change-sheet .sheet-body {
+  display: flex;
+  flex-direction: column;
+  width: min(660px, 100vw - 32px);
+  max-height: 88vh;
+  overflow: hidden;
+}
+
+.agent-change {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.agent-change > * {
+  flex: none;
+}
+
+.agent-change-drawing {
+  width: 180px;
+  height: auto;
+  margin: 0 auto var(--space-2);
+  color: var(--text-2);
+}
+
+.agent-change-drawing .ach-strike,
+.agent-change-drawing .ach-arrow {
+  fill: none;
+  stroke: var(--pen-clay);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.agent-change-drawing .ach-arrow {
+  stroke: var(--pen-graphite);
+}
+
+.agent-change-drawing .ach-ring {
+  fill: none;
+  stroke: var(--pen-clay);
+  stroke-width: 2;
+}
+
+.agent-change-drawing .ach-run {
+  color: var(--text-strong);
+}
+
+.agent-change-rows {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.agent-change-rows > div {
+  display: grid;
+  grid-template-columns: 4.5em minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.agent-change-rows dt {
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.agent-change-rows dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+}
+
+/* What is put in, turned off, left alone: a word or a name each. */
+.agent-change-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px;
+  border-radius: var(--radius-full);
+  background: var(--fill);
+  color: var(--text);
+  font-size: var(--size-small);
+  white-space: nowrap;
+}
+
+.agent-change-tag .glyph {
+  color: var(--text-3);
+}
+
+.agent-change-said {
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.agent-change-lines {
+  margin: 0;
+  padding-left: 1.2em;
+  font-size: var(--size-small);
+  color: var(--text-2);
+}
+
+.agent-change-raise {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font-size: var(--size-small);
+}
+
+.agent-change-toggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-change-toggle .glyph {
+  transform: rotate(-90deg);
+  transition: transform var(--hover) ease;
+}
+
+.agent-change-toggle[aria-expanded="true"] .glyph {
+  transform: none;
+}
+
+/* The details, once opened: the files a line each, scrolling here alone. */
+.agent-change > .agent-change-details {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.agent-change-files,
+.agent-change-kept {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--size-small);
+}
+
+.agent-change-file-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  color: var(--text-2);
+  text-align: left;
+  transition: background-color var(--hover) ease;
+}
+
+.agent-change-file-line:hover {
+  background: var(--hairline);
+}
+
+.agent-change-file-mark {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.agent-change-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.agent-change-chevron {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-3);
+  transform: rotate(-90deg);
+  transition: transform var(--hover) ease;
+}
+
+.agent-change-file.open .agent-change-chevron {
+  transform: none;
+}
+
+.agent-change-diff:not(:empty) {
+  margin: var(--space-1) 0 var(--space-2);
+}
+
+.agent-change-command {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-2);
+}
+
+.agent-change-command code,
+.agent-change-kept code {
+  overflow-wrap: anywhere;
+  font-family: var(--font-code);
+  color: var(--text-2);
+}
+
+.agent-change-stamp {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  font-family: var(--font-emphasis);
+  font-size: var(--size-h3);
+  color: var(--pen-clay);
+}
+
+.agent-change-stampmark {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--pen-clay);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.agent-change-kept li {
+  display: flex;
+  gap: var(--space-2);
+  color: var(--text-3);
+}
+
+/* On a phone the tabs keep their row: the programs stay a hover on a
+   wider screen, and scanning again is its mark alone. */
+@media (max-width: 560px) {
+  .logins-machine-state .logins-programs {
+    display: none;
+  }
+
+  .logins-rescan span {
+    display: none;
+  }
+}

@@ -1,0 +1,57 @@
+[package]
+name = "fastctx-tui"
+description = "The World in a terminal: projects, agents, machines and conversations, in the World's design language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# Scenes drawn from made-up data, for looking at the screens without a World.
+preview = []
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+crossterm = "0.29"
+fastctx-client = { path = "../fastctx-client" }
+fastctx-install = { path = "../fastctx-install" }
+fastctx-types = { path = "../fastctx-types" }
+jiff.workspace = true
+serde_json.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+# Grammars for code in fenced blocks, without C dependencies; colours are
+# our own roles, not syntect's themes.
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
+two-face = { version = "0.5.2", default-features = false, features = ["syntect-fancy"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+unicode-segmentation = "1.12"
+unicode-linebreak = "0.1.5"
+unicode-width = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+mio = { version = "1", features = ["os-poll", "os-ext"] }
+rustix = { version = "1", features = ["fs", "stdio", "termios"] }
+signal-hook = "0.3"
+signal-hook-mio = { version = "0.2", features = ["support-v1_0"] }
+terminfo = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_Globalization",
+    "Win32_System_Console",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[[example]]
+name = "scenes"
+required-features = ["preview"]

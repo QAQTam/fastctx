@@ -1,0 +1,583 @@
+import { CanvasCamera, type CameraOptions } from "./camera";
+import { DropTargets, nearestItem, type ValidTarget } from "./drop";
+import { placeLabels } from "./labels";
+import { onMotion, reducedMotion } from "../motion";
+import type { Bounds, CanvasEvent, CanvasFrame, CanvasHandle, CanvasItem, Draft, Point } from "./types";
+import "./canvas.css";
+
+export interface CanvasOptions extends CameraOptions {
+  label: string;
+  controls: { minus: string; plus: string; fit: string; scale: string };
+  /** The hint under the drawing for a mouse: how to zoom and how to move
+   *  it. */
+  /** The hints under the drawing, and what follows them on that line, such
+   *  as a way to what the drawing is for. */
+  hints?: { zoom: string; pan: string; after?: HTMLElement } | undefined;
+  /** A live predicate: final release always checks it again. */
+  validTarget: ValidTarget;
+  event(event: CanvasEvent): void;
+  /** Called once per paint; rebuild page detail only when view.level changes. */
+  frame?(frame: CanvasFrame): void;
+  /** Text for assistive technology, supplied by the page. */
+  draftLabel?(draft: Draft): string;
+  /** A picture to look at: always fitted to its frame, never moved or
+   *  zoomed, with no controls; its items can still be chosen. */
+  still?: boolean;
+}
+
+/** A pointer down on the drawing. With a mouse the left button chooses
+ *  or, dragged, draws a frame round several; the middle button moves the
+ *  drawing. A finger or a pen moves it. */
+interface Pointer { point: Point; start: Point; item: string | null; moved: boolean; touch: boolean; middle?: boolean; frame?: boolean }
+interface ButtonLabel { item: CanvasItem; button: HTMLButtonElement; label: HTMLElement; width: number; height: number }
+
+/** The page owns ink and operations. This surface owns the camera, input, hit
+ * objects and plain HTML names. Dispose it when its page leaves the screen. */
+export class MapCanvas {
+  readonly element = document.createElement("figure");
+  /** What lies on the paper under the ink, and over it. They move with the
+   *  ink but are not scaled with it: the page draws them to the camera's
+   *  scale itself, as SVG text under a scaled HTML layer is painted, in
+   *  Chrome on Android, at the scale it was last laid out at. Neither is
+   *  blended with the paper. */
+  readonly under = document.createElement("div");
+  readonly over = document.createElement("div");
+  /** The ink: the page may blend it with the paper. */
+  readonly ink = document.createElement("div");
+  readonly overlay = document.createElement("div");
+  readonly camera: CanvasCamera;
+  private readonly abort = new AbortController();
+  private readonly targets: DropTargets;
+  private readonly names = document.createElement("div");
+  private readonly hits = document.createElement("div");
+  private readonly status = document.createElement("span");
+  private readonly control = document.createElement("div");
+  private readonly scaleText = document.createElement("output");
+  private readonly marquee = document.createElement("div");
+  private readonly resize: ResizeObserver;
+  private readonly buttons = new Map<string, ButtonLabel>();
+  private readonly handles = new Map<string, { handle: CanvasHandle; button: HTMLButtonElement }>();
+  private items: readonly CanvasItem[] = [];
+  private bounds: Bounds = { x: 0, y: 0, width: 0, height: 0 };
+  private pointers = new Map<number, Pointer>();
+  private pointed: string | null = null;
+  private selected: string | null = null;
+  private focused: string | null = null;
+  private draft: Draft | null = null;
+  private draftPointer: number | null = null;
+  private animation = 0;
+  private disposed = false;
+  private longPress = 0;
+  private longPressed = false;
+  private rect = this.element.getBoundingClientRect();
+  private fitOnResize = true;
+  private controlWidth = 0;
+  private labelObstacles: readonly Bounds[] = [];
+  private frameState: CanvasFrame;
+  private previousView = { x: NaN, y: NaN, scale: NaN };
+
+  constructor(private readonly options: CanvasOptions) {
+    this.camera = new CanvasCamera(options);
+    this.targets = new DropTargets(options.validTarget);
+    this.frameState = { view: this.camera.view, moving: false, reducedMotion: reducedMotion(), hiddenLabels: [] };
+    this.element.className = options.still ? "map-canvas map-still" : "map-canvas";
+    this.element.tabIndex = options.still ? -1 : 0;
+    this.element.setAttribute("role", "group");
+    this.element.setAttribute("aria-label", options.label);
+    this.ink.className = "canvas-ink";
+    this.ink.setAttribute("aria-hidden", "true");
+    for (const [layer, name] of [[this.under, "canvas-under"], [this.over, "canvas-over"]] as const) {
+      layer.className = name;
+      layer.setAttribute("aria-hidden", "true");
+    }
+    this.overlay.className = "canvas-overlay";
+    this.names.className = "canvas-names";
+    this.names.setAttribute("aria-hidden", "true");
+    this.hits.className = "canvas-hits";
+    this.control.className = "canvas-controls";
+    this.status.className = "canvas-status";
+    this.status.setAttribute("aria-live", "polite");
+    this.status.setAttribute("aria-atomic", "true");
+    this.scaleText.setAttribute("aria-label", options.controls.scale);
+    for (const [text, label, action] of [
+      ["−", options.controls.minus, () => this.zoom(1 / 1.25)],
+      ["+", options.controls.plus, () => this.zoom(1.25)],
+      ["↔", options.controls.fit, () => this.fit()],
+    ] as const) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = text;
+      button.setAttribute("aria-label", label);
+      button.title = label;
+      button.addEventListener("click", action, { signal: this.abort.signal });
+      this.control.append(button);
+      if (text === "−") this.control.append(this.scaleText);
+    }
+    this.marquee.className = "canvas-marquee";
+    this.marquee.hidden = true;
+    this.overlay.append(this.marquee);
+    this.element.append(this.under, this.ink, this.over, this.overlay, this.hits, this.names, this.status);
+    if (!options.still) this.element.append(this.control);
+    if (options.hints && !options.still) {
+      const hints = document.createElement("div");
+      hints.className = "canvas-hints";
+      hints.innerHTML = `<span class="canvas-hint" aria-hidden="true"><kbd>Ctrl</kbd><span class="canvas-plus">+</span>${MOUSE}<span>${escapeHtml(options.hints.zoom)}</span></span><span class="canvas-hint" aria-hidden="true">${MOUSE}<span>${escapeHtml(options.hints.pan)}</span></span>`;
+      if (options.hints.after) hints.append(options.hints.after);
+      this.element.append(hints);
+    }
+    const signal = this.abort.signal;
+    this.element.addEventListener("pointerdown", e => this.down(e), { signal });
+    this.element.addEventListener("pointermove", e => this.move(e), { signal });
+    this.element.addEventListener("pointerup", e => this.up(e), { signal });
+    this.element.addEventListener("pointercancel", e => this.cancelPointer(e.pointerId), { signal });
+    this.element.addEventListener("lostpointercapture", e => { if (this.pointers.has(e.pointerId)) this.cancelPointer(e.pointerId); }, { signal });
+    this.element.addEventListener("pointerleave", () => { if (!this.pointers.size) this.point(null, [0, 0]); }, { signal });
+    this.element.addEventListener("wheel", e => this.wheel(e), { passive: false, signal });
+    this.element.addEventListener("dblclick", e => { if (!options.still && !this.keyOf(e.target) && !(e.target as Element).closest("[data-handle]") && !this.isControl(e.target)) { e.preventDefault(); this.fit(); } }, { signal });
+    this.element.addEventListener("contextmenu", e => {
+      if (this.isControl(e.target)) return;
+      e.preventDefault();
+      if (!this.longPressed) this.options.event({ kind: "context", key: this.itemAt(this.local(e)), at: this.local(e), input: "mouse" });
+    }, { signal });
+    this.element.addEventListener("keydown", e => this.key(e), { signal });
+    this.element.addEventListener("click", e => {
+      // Pointer selection was settled on pointerup after the pan threshold.
+      if (e.detail !== 0 || this.isControl(e.target)) return;
+      const target = e.target as HTMLElement;
+      const handle = this.handles.get(target.closest<HTMLElement>("[data-handle]")?.dataset.handle ?? "");
+      if (handle) this.beginDraft(handle.handle, this.camera.toScreen(handle.handle.point), true);
+      else if (this.keyOf(target)) this.select(this.keyOf(target), this.camera.toScreen(this.buttons.get(this.keyOf(target)!)!.item.point));
+    }, { signal });
+    this.element.addEventListener("focusin", e => {
+      const key = this.keyOf(e.target);
+      this.focused = key;
+      const item = key ? this.buttons.get(key)?.item : undefined;
+      const handle = this.handles.get((e.target as HTMLElement).dataset.handle ?? "")?.handle;
+      if (item || handle) { this.camera.reveal((item ?? handle)!.point, 100); this.point(key, this.camera.toScreen((item ?? handle)!.point)); this.schedule(); }
+    }, { signal });
+    this.element.addEventListener("focusout", e => {
+      if (!this.element.contains(e.relatedTarget as Node | null)) { this.focused = null; if (this.draft?.keyboard) this.cancelDraft("interrupted"); this.schedule(); }
+    }, { signal });
+    window.addEventListener("blur", () => { this.clearPointers(); this.cancelDraft("interrupted"); }, { signal });
+    const unfollow = onMotion(() => this.schedule());
+    signal.addEventListener("abort", unfollow);
+    document.fonts.addEventListener("loadingdone", () => { this.measure(); this.schedule(); }, { signal });
+    this.resize = new ResizeObserver(() => {
+      this.rect = this.element.getBoundingClientRect();
+      this.camera.resize(this.element.clientWidth, this.element.clientHeight);
+      if (this.fitOnResize) this.camera.fit(this.bounds, this.fitPadding());
+      this.measure();
+      this.schedule();
+    });
+    this.resize.observe(this.element);
+  }
+
+  get frame(): CanvasFrame { return this.frameState; }
+  get activeDraft(): Draft | null { return this.draft; }
+  get selection(): string | null { return this.selected; }
+  /** Mirror the page's selection without emitting a user gesture. */
+  setSelection(key: string | null): void {
+    if (key && !this.buttons.has(key)) throw new Error("Unknown canvas selection");
+    this.selected = key;
+    this.schedule();
+  }
+  /** Screen-space areas occupied by the page's floating cards or legends. */
+  reserveLabels(boxes: readonly Bounds[]): void {
+    if (JSON.stringify(boxes) === JSON.stringify(this.labelObstacles)) return;
+    this.labelObstacles = boxes.map(box => ({ ...box }));
+    this.schedule();
+  }
+  /** The measured size of an item's name, shown or withheld. */
+  labelSize(key: string): { width: number; height: number } | null {
+    const entry = this.buttons.get(key);
+    return entry ? { width: entry.width, height: entry.height } : null;
+  }
+  /** CSS-pixel centre of a grip, kept clear of its source's hit area at far zoom. */
+  handlePoint(key: string): Point | null {
+    const handle = this.handles.get(key)?.handle;
+    if (!handle) return null;
+    const point = this.camera.toScreen(handle.point);
+    const source = this.buttons.get(handle.source)?.item;
+    if (!source) return point;
+    const start = this.camera.toScreen(source.point);
+    const distance = Math.hypot(point[0] - start[0], point[1] - start[1]);
+    const reach = Math.max(22, source.radius * this.camera.view.scale) + 22 + 4;
+    if (distance >= reach) return point;
+    return [start[0] + (distance ? (point[0] - start[0]) / distance : 1) * reach,
+      start[1] + (distance ? (point[1] - start[1]) / distance : 0) * reach];
+  }
+
+  /** Reconcile by identity; focusing a machine survives a detail redraw. */
+  /** What the drawing holds. With `keepView`, the drawing stays where it is
+   *  and is no longer fitted to what it holds: a change the person made in
+   *  it, such as folding a part, must not move the rest under the pointer. */
+  setScene(items: readonly CanvasItem[], handles: readonly CanvasHandle[], bounds: Bounds, keepView = false): void {
+    if (new Set(items.map(i => i.key)).size !== items.length || new Set(handles.map(h => h.key)).size !== handles.length) throw new Error("Duplicate canvas identity");
+    this.items = items;
+    this.bounds = bounds;
+    const kept = new Set(items.map(i => i.key));
+    for (const [key, entry] of this.buttons) {
+      if (!kept.has(key)) { entry.button.remove(); entry.label.remove(); this.buttons.delete(key); }
+    }
+    for (const item of items) {
+      let entry = this.buttons.get(item.key);
+      if (!entry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.item = item.key;
+        button.className = "canvas-object";
+        const label = document.createElement("span");
+        label.className = "canvas-name";
+        label.hidden = true;
+        label.dataset.label = item.key;
+        this.hits.append(button);
+        this.names.append(label);
+        entry = { item, button, label, width: 0, height: 0 };
+        this.buttons.set(item.key, entry);
+      }
+      entry.item = item;
+      entry.button.setAttribute("aria-label", [item.label, item.sub].filter(Boolean).join(" · "));
+      entry.button.dataset.kind = item.kind;
+      entry.label.dataset.side = item.side ?? "";
+      const text = [item.label, item.sub].filter(Boolean).join("\n");
+      if (entry.label.textContent !== text) entry.label.textContent = text;
+    }
+    const handleKeys = new Set(handles.map(h => h.key));
+    for (const [key, entry] of this.handles) { if (!handleKeys.has(key)) { entry.button.remove(); this.handles.delete(key); } }
+    for (const handle of handles) {
+      let entry = this.handles.get(handle.key);
+      if (!entry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "canvas-handle";
+        button.dataset.handle = handle.key;
+        button.textContent = "·";
+        this.hits.append(button);
+        entry = { handle, button };
+        this.handles.set(handle.key, entry);
+      }
+      entry.handle = handle;
+      entry.button.setAttribute("aria-label", handle.label);
+      entry.button.title = handle.label;
+    }
+    if (this.selected && !kept.has(this.selected)) this.select(null, [0, 0]);
+    if (this.pointed && !kept.has(this.pointed)) this.point(null, [0, 0]);
+    // Until the drawing is moved by hand it stays fitted to what it holds.
+    if (keepView) this.fitOnResize = false;
+    else if (this.fitOnResize && this.camera.view.width > 0) this.camera.fit(this.bounds, this.fitPadding());
+    if (this.draft) {
+      const current = this.handles.get(this.draft.handle.key)?.handle;
+      if (!current || current.source !== this.draft.handle.source || current.point.some((n, i) => n !== this.draft!.handle.point[i])) this.cancelDraft("changed");
+      else this.refreshDraft(this.camera.toScreen(this.draft.point));
+    }
+    this.measure();
+    this.schedule();
+  }
+  pan(dx: number, dy: number): void { this.fitOnResize = false; this.camera.pan(dx, dy); this.schedule(); }
+  zoom(factor: number, at?: Point): void { this.fitOnResize = false; this.camera.zoom(factor, at); this.schedule(); }
+  fit(): void { this.fitOnResize = true; this.camera.fit(this.bounds, this.fitPadding()); this.schedule(); }
+  /** Use after directly changing the camera, or changing CSS font metrics. */
+  refresh(): void { this.measure(); this.schedule(); }
+  dispose(): void {
+    this.disposed = true;
+    this.clearPointers();
+    this.cancelDraft("interrupted");
+    this.abort.abort();
+    this.resize.disconnect();
+    cancelAnimationFrame(this.animation);
+  }
+  /** Room left round the world when it is fitted: a tenth of the shorter
+   *  side, from 24 to 76 pixels, so a phone's drawing is not shrunk away. */
+  private fitPadding(): number {
+    return Math.max(24, Math.min(76, Math.min(this.camera.view.width, this.camera.view.height) * 0.1));
+  }
+  private measure(): void {
+    const visibility = new Map([...this.buttons.values()].map(e => [e.label, e.label.hidden]));
+    for (const { label } of this.buttons.values()) label.hidden = false;
+    for (const entry of this.buttons.values()) { entry.width = entry.label.offsetWidth; entry.height = entry.label.offsetHeight; }
+    for (const [label, hidden] of visibility) label.hidden = hidden;
+    this.controlWidth = this.control.offsetWidth;
+  }
+  private schedule(): void {
+    if (this.animation || this.disposed) return;
+    this.animation = requestAnimationFrame(() => { this.animation = 0; this.paint(); });
+  }
+  private paint(): void {
+    const view = this.camera.view;
+    const changed = view.x !== this.previousView.x || view.y !== this.previousView.y || view.scale !== this.previousView.scale;
+    const moving = this.pointers.size > 0 || changed;
+    this.previousView = view;
+    this.ink.style.transform = `translate(${view.x}px,${view.y}px) scale(${view.scale})`;
+    for (const layer of [this.under, this.over]) layer.style.transform = `translate(${view.x}px,${view.y}px)`;
+    const obstacles: Bounds[] = [...this.labelObstacles];
+    for (const entry of this.buttons.values()) {
+      const [x, y] = this.camera.toScreen(entry.item.point);
+      const box = entry.item.box;
+      if (box) {
+        // A rectangle as it is drawn, at least a finger's height.
+        const [left, top] = this.camera.toScreen([box.x, box.y]);
+        const width = box.width * view.scale;
+        const height = Math.max(44, box.height * view.scale);
+        const shift = (height - box.height * view.scale) / 2;
+        entry.button.style.transform = `translate(${left}px,${top - shift}px)`;
+        entry.button.style.width = `${width}px`;
+        entry.button.style.height = `${height}px`;
+        entry.button.style.borderRadius = (box.corners ?? [0, 0, 0, 0]).map((corner) => `${corner * view.scale}px`).join(" ");
+      } else {
+        const size = Math.max(44, entry.item.radius * view.scale * 2);
+        entry.button.style.transform = `translate(${x - size / 2}px,${y - size / 2}px)`;
+        entry.button.style.width = entry.button.style.height = `${size}px`;
+      }
+      entry.button.setAttribute("aria-pressed", String(entry.item.key === this.selected));
+      entry.button.dataset.valid = String(this.draft?.valid.includes(entry.item.key) ?? false);
+      entry.button.dataset.target = String(this.draft?.target === entry.item.key);
+      entry.button.dataset.pointed = String(this.pointed === entry.item.key);
+      const r = (entry.item.labelRadius ?? entry.item.radius) * view.scale;
+      obstacles.push({ x: x - r, y: y - r, width: 2 * r, height: 2 * r });
+    }
+    for (const { handle, button } of this.handles.values()) {
+      const [x, y] = this.handlePoint(handle.key)!;
+      button.style.transform = `translate(${x - 22}px,${y - 22}px)`;
+    }
+    // Reserve the corner control; CSS positions it without per-frame layout reads.
+    obstacles.push({ x: view.width - this.controlWidth - 12, y: view.height - 56, width: this.controlWidth + 12, height: 56 });
+    const placements = placeLabels([...this.buttons.values()].map(e => ({ key: e.item.key, point: this.camera.toScreen(e.item.point),
+      radius: (e.item.labelRadius ?? e.item.radius) * view.scale, width: e.width, height: e.height,
+      priority: e.item.key === this.focused || e.item.key === this.pointed ? 100 : e.item.key === this.selected ? 50 : e.item.priority ?? 0, side: e.item.side })),
+      { x: 8, y: 8, width: Math.max(0, view.width - 16), height: Math.max(0, view.height - 16) }, obstacles);
+    const hiddenLabels: string[] = [];
+    for (const { key, box } of placements) {
+      const label = this.buttons.get(key)!.label;
+      label.hidden = !box;
+      if (box) label.style.transform = `translate(${box.x}px,${box.y}px)`;
+      else hiddenLabels.push(key);
+    }
+    this.scaleText.textContent = `${Math.round(view.scale * 100)}%`;
+    this.element.dataset.moving = String(moving);
+    this.element.dataset.panning = String([...this.pointers.values()].some((pointer) => pointer.middle || (!pointer.frame && pointer.moved)));
+    this.element.dataset.reducedMotion = String(reducedMotion());
+    this.frameState = { view, moving, reducedMotion: reducedMotion(), hiddenLabels };
+    this.options.frame?.(this.frameState);
+    if (changed) this.schedule();
+  }
+  private keyOf(target: EventTarget | null): string | null { return target instanceof Element ? target.closest<HTMLElement>("[data-item]")?.dataset.item ?? null : null; }
+  private itemAt(point: Point): string | null { return nearestItem(this.items, point, p => this.camera.toScreen(p), this.camera.view.scale)?.key ?? null; }
+  private isControl(target: EventTarget | null): boolean { return target instanceof Node && (this.control.contains(target) || this.overlay.contains(target)); }
+  private local(e: { clientX: number; clientY: number }): Point { return [e.clientX - this.rect.left, e.clientY - this.rect.top]; }
+  private point(key: string | null, at: Point): void {
+    if (this.pointed === key) return;
+    this.pointed = key;
+    this.options.event({ kind: "point", key, at });
+    this.schedule();
+  }
+  private select(key: string | null, at: Point): void {
+    this.selected = key;
+    this.options.event({ kind: "select", key, at });
+    this.schedule();
+  }
+  private stopLongPress(): void { clearTimeout(this.longPress); this.longPress = 0; }
+  private clearPointers(): void {
+    this.stopLongPress();
+    for (const id of this.pointers.keys()) { if (this.element.hasPointerCapture(id)) this.element.releasePointerCapture(id); }
+    this.pointers.clear();
+    this.schedule();
+  }
+  private down(e: PointerEvent): void {
+    // The middle button moves the paper and never chooses or opens
+    // anything; with a mouse the left button chooses, or draws a frame.
+    const middle = e.button === 1;
+    if ((e.button !== 0 && !middle) || this.isControl(e.target) || (middle && this.options.still)) return;
+    const frame = e.pointerType === "mouse" && !middle && !this.options.still;
+    e.preventDefault();
+    // Capture keyboard cancellation throughout a pointer gesture without moving
+    // the camera as focusing an off-screen item would do.
+    this.element.focus({ preventScroll: true });
+    this.rect = this.element.getBoundingClientRect();
+    const point = this.local(e);
+    this.longPressed = false;
+    this.stopLongPress();
+    const item = middle ? null : this.itemAt(point);
+    this.pointers.set(e.pointerId, { point, start: point, item, moved: false, touch: e.pointerType === "touch", middle, frame });
+    this.element.setPointerCapture(e.pointerId);
+    if (middle) {
+      this.cancelDraft("interrupted");
+    } else if (this.pointers.size === 1) {
+      const handleKey = (e.target as Element).closest<HTMLElement>("[data-handle]")?.dataset.handle;
+      const handle = handleKey ? this.handles.get(handleKey) : undefined;
+      if (handle) { this.beginDraft(handle.handle, point, false); this.draftPointer = e.pointerId; }
+      else {
+        this.cancelDraft("interrupted");
+        if (e.pointerType === "touch" && item) {
+          // 500 ms is the gesture's deliberate hold interval, not an operation timeout.
+          this.longPress = window.setTimeout(() => {
+            this.longPressed = true;
+            this.select(item, point);
+            this.options.event({ kind: "context", key: item, at: point, input: "touch" });
+          }, 500);
+        }
+      }
+    } else {
+      this.cancelDraft("interrupted");
+      for (const pointer of this.pointers.values()) pointer.moved = true;
+    }
+    this.schedule();
+  }
+  private move(e: PointerEvent): void {
+    const p = this.local(e);
+    const pointer = this.pointers.get(e.pointerId);
+    if (!pointer) { if (e.pointerType !== "touch") this.point(this.isControl(e.target) ? null : this.itemAt(p), p); return; }
+    const previous = [...this.pointers.values()].slice(0, 2).map(p => p.point);
+    const old = pointer.point;
+    pointer.point = p;
+    if (Math.hypot(p[0] - pointer.start[0], p[1] - pointer.start[1]) >= (pointer.touch ? 8 : 5)) {
+      pointer.moved = true;
+      this.stopLongPress();
+    }
+    if (this.draft && this.draftPointer === e.pointerId) { this.refreshDraft(p); return; }
+    if (this.options.still) return;
+    if (this.pointers.size >= 2) {
+      const now = [...this.pointers.values()].slice(0, 2).map(p => p.point);
+      const centre = (points: Point[]): Point => [(points[0][0] + points[1][0]) / 2, (points[0][1] + points[1][1]) / 2];
+      const before = centre(previous), after = centre(now);
+      const distance = (points: Point[]) => Math.hypot(points[0][0] - points[1][0], points[0][1] - points[1][1]);
+      if (distance(previous) > 0) this.camera.zoom(distance(now) / distance(previous), before);
+      this.pan(after[0] - before[0], after[1] - before[1]);
+    } else if (pointer.frame) {
+      if (pointer.moved) this.drawFrame(pointer.start, p, false);
+    } else if ((pointer.moved || pointer.middle) && !this.longPressed) this.pan(p[0] - old[0], p[1] - old[1]);
+  }
+  /** The frame from `from` to `to`, on the screen, and the items inside. */
+  private drawFrame(from: Point, to: Point, done: boolean): void {
+    const x = Math.min(from[0], to[0]);
+    const y = Math.min(from[1], to[1]);
+    const width = Math.abs(to[0] - from[0]);
+    const height = Math.abs(to[1] - from[1]);
+    this.marquee.hidden = done;
+    this.marquee.style.transform = `translate(${x}px,${y}px)`;
+    this.marquee.style.width = `${width}px`;
+    this.marquee.style.height = `${height}px`;
+    const keys = this.items
+      .filter((item) => {
+        const [sx, sy] = this.camera.toScreen(item.point);
+        return sx >= x && sx <= x + width && sy >= y && sy <= y + height;
+      })
+      .map((item) => item.key);
+    this.options.event({ kind: "marquee", keys, done });
+  }
+  private up(e: PointerEvent): void {
+    const pointer = this.pointers.get(e.pointerId);
+    if (!pointer) return;
+    // A browser can coalesce the last move into release. Apply that final position
+    // before deciding whether this was a click, pan, pinch or handle drop.
+    this.move(e);
+    this.stopLongPress();
+    if (this.draft && this.draftPointer === e.pointerId) { this.refreshDraft(this.local(e)); this.finishDraft(this.local(e)); }
+    else if (pointer.frame && pointer.moved) this.drawFrame(pointer.start, this.local(e), true);
+    else if (!pointer.middle && !pointer.moved && !this.longPressed && this.pointers.size === 1) this.select(pointer.item, this.local(e));
+    this.pointers.delete(e.pointerId);
+    if (this.element.hasPointerCapture(e.pointerId)) this.element.releasePointerCapture(e.pointerId);
+    this.schedule();
+  }
+  private cancelPointer(id: number): void {
+    this.stopLongPress();
+    if (this.pointers.get(id)?.frame) this.marquee.hidden = true;
+    this.pointers.delete(id);
+    if (this.draftPointer === id) this.cancelDraft("interrupted");
+    this.schedule();
+  }
+  /** Ctrl and the wheel zoom (a touchpad's pinch comes as the same); the
+   *  wheel alone moves nothing. */
+  private wheel(e: WheelEvent): void {
+    if (this.options.still || this.isControl(e.target) || !(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    this.rect = this.element.getBoundingClientRect();
+    const unit = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? parseFloat(getComputedStyle(this.element).fontSize) : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? this.camera.view.height : 1;
+    this.zoom(Math.exp(-e.deltaY * unit / 300), this.local(e));
+    if (this.draft && !this.draft.keyboard) this.refreshDraft(this.local(e));
+  }
+  private beginDraft(handle: CanvasHandle, screen: Point, keyboard: boolean): void {
+    this.cancelDraft("interrupted");
+    this.draft = { handle, point: this.camera.toWorld(screen), target: null, valid: this.targets.list(handle, this.items).map(i => i.key), keyboard };
+    this.reportDraft();
+  }
+  private refreshDraft(screen: Point): void {
+    if (!this.draft) return;
+    const valid = this.targets.list(this.draft.handle, this.items).map(i => i.key);
+    const target = this.targets.at(this.draft.handle, this.items, screen, p => this.camera.toScreen(p), this.camera.view.scale)?.key ?? null;
+    this.draft = { ...this.draft, point: this.camera.toWorld(screen), valid, target };
+    this.reportDraft();
+  }
+  private reportDraft(): void {
+    if (!this.draft) return;
+    this.options.event({ kind: "draft", draft: this.draft });
+    if (this.options.draftLabel) this.status.textContent = this.options.draftLabel(this.draft);
+    this.schedule();
+  }
+  private finishDraft(at: Point): void {
+    if (!this.draft) return;
+    const draft = this.draft;
+    const target = this.items.find(i => i.key === draft.target);
+    if (!target || !this.options.validTarget(draft.handle, target)) { this.cancelDraft("outside"); return; }
+    this.draft = null;
+    this.draftPointer = null;
+    this.status.textContent = "";
+    this.options.event({ kind: "drop", handle: draft.handle, target: target.key, at });
+    this.schedule();
+  }
+  private cancelDraft(reason: "escape" | "outside" | "interrupted" | "changed"): void {
+    if (!this.draft) return;
+    const handle = this.draft.handle;
+    this.draft = null;
+    this.draftPointer = null;
+    this.status.textContent = "";
+    this.options.event({ kind: "cancel", handle, reason });
+    this.schedule();
+  }
+  private key(e: KeyboardEvent): void {
+    if (this.isControl(e.target)) return;
+    if (e.key === "Escape") { this.cancelDraft("escape"); this.clearPointers(); e.preventDefault(); return; }
+    const key = this.keyOf(e.target);
+    if (e.key === "ContextMenu" || e.key === "F10" && e.shiftKey) {
+      e.preventDefault();
+      const item = key ? this.buttons.get(key)?.item : undefined;
+      this.options.event({ kind: "context", key, at: item ? this.camera.toScreen(item.point) : [this.camera.view.width / 2, this.camera.view.height / 2], input: "keyboard" });
+      return;
+    }
+    if (this.draft?.keyboard) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.finishDraft(this.camera.toScreen(this.draft.point)); return; }
+      if (e.key === "Tab" || e.key.startsWith("Arrow")) {
+        e.preventDefault();
+        const valid = this.targets.list(this.draft.handle, this.items);
+        const index = valid.findIndex(i => i.key === this.draft!.target);
+        const direction = e.shiftKey || e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1;
+        const item = valid[(index + direction + valid.length) % valid.length];
+        if (item) {
+          this.camera.reveal(item.point, 100);
+          this.draft = { ...this.draft, point: item.point, target: item.key, valid: valid.map(i => i.key) };
+          this.reportDraft();
+        }
+        return;
+      }
+    }
+    if (e.key === "Enter" || e.key === " ") {
+      const handle = this.handles.get((e.target as HTMLElement).dataset.handle ?? "")?.handle;
+      if (handle) { e.preventDefault(); this.beginDraft(handle, this.camera.toScreen(handle.point), true); return; }
+      const item = key ? this.buttons.get(key)?.item : undefined;
+      if (item) { e.preventDefault(); this.select(item.key, this.camera.toScreen(item.point)); return; }
+    }
+    if (this.options.still) return;
+    const pans: Record<string, Point> = { ArrowLeft: [48, 0], ArrowRight: [-48, 0], ArrowUp: [0, 48], ArrowDown: [0, -48] };
+    if (pans[e.key]) { e.preventDefault(); this.pan(...pans[e.key]); }
+    else if (e.key === "+" || e.key === "=") { e.preventDefault(); this.zoom(1.25); }
+    else if (e.key === "-" || e.key === "_") { e.preventDefault(); this.zoom(1 / 1.25); }
+    else if (e.key === "0") { e.preventDefault(); this.fit(); }
+  }
+}
+
+/** A mouse, drawn small, its wheel filled: what the hints under the drawing
+ *  point at. */
+const MOUSE = `<svg class="canvas-mouse" viewBox="0 0 12 18" aria-hidden="true"><rect x="1" y="1" width="10" height="16" rx="5" fill="none" stroke="currentColor" stroke-width="1.2"/><line x1="6" y1="1.5" x2="6" y2="7" stroke="currentColor" stroke-width="0.9"/><rect class="canvas-mouse-wheel" x="4.9" y="3.4" width="2.2" height="3.6" rx="1.1"/></svg>`;
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]!);
+}

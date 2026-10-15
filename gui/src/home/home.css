@@ -1,0 +1,324 @@
+/* What a project's page and the settings draw with: a board of sections,
+   each a quiet title over its rows, the people at work and the jobs that
+   run. The front page has its own (`front.css`). */
+
+.sep {
+  margin: 0 0.5em;
+  color: var(--text-3);
+}
+
+.fact {
+  white-space: nowrap;
+}
+
+.fact.unreachable {
+  white-space: normal;
+  color: var(--caution);
+}
+
+/* The board: one column that scrolls on a narrow screen; two that scroll
+   each on their own on a wide one. The edges fade, so what scrolls slips
+   under the day rather than being cut. */
+.board {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: var(--board);
+  margin: var(--space-5) auto 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black var(--space-3), black calc(100% - var(--space-8)), transparent);
+  mask-image: linear-gradient(to bottom, transparent, black var(--space-3), black calc(100% - var(--space-8)), transparent);
+}
+
+.board-column {
+  min-width: 0;
+  margin: 0 calc(-1 * var(--space-3));
+  padding: var(--space-3) var(--space-3) var(--space-10);
+}
+
+/* In one column the board scrolls as a whole; a column scrolling inside it
+   would be squeezed to a share of the height. */
+.board > .board-column {
+  overflow: visible;
+  min-height: auto;
+}
+
+@container (min-width: 920px) {
+  .board {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: var(--space-12);
+    overflow: hidden;
+  }
+
+  .board > .board-column {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+}
+
+/* Sections: a quiet title with a rule running out from it. */
+.home-section + .home-section {
+  margin-top: var(--space-8);
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-reading);
+  font-weight: 400;
+  font-size: var(--size-small);
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+.section-title::after {
+  content: "";
+  flex: 1;
+  height: 8px;
+  background: var(--pen-rule);
+  -webkit-mask: var(--pen-rule-1) 0 50% / 100% 100% no-repeat;
+  mask: var(--pen-rule-1) 0 50% / 100% 100% no-repeat;
+}
+
+:is(.project-page, .journal-page) :is(ul, ol):not(.prose *) {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.quiet,
+.idle {
+  margin: 0;
+  font-size: var(--size-ui);
+  color: var(--text-3);
+}
+
+.idle {
+  margin-top: var(--space-2);
+  padding-left: calc(var(--rail-glyph) + var(--rail-gap));
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 7px;
+  border-radius: var(--radius-full);
+  background: var(--hairline);
+  color: var(--text-2);
+  font-size: var(--size-small);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.detail {
+  display: block;
+  font-size: var(--size-small);
+  color: var(--text-3);
+}
+
+.detail.wrong {
+  color: var(--wrong);
+}
+
+/* People: who is at work or waiting, each a line that opens their
+   conversation. */
+.someone {
+  display: grid;
+  grid-template-columns: var(--rail-glyph) minmax(0, 1fr) auto;
+  column-gap: var(--rail-gap);
+  align-items: start;
+  margin: 0 calc(-1 * var(--space-3));
+  padding: var(--space-3);
+  border-radius: var(--radius-m);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color var(--hover) ease;
+}
+
+.someone:hover {
+  background: var(--hairline);
+}
+
+.someone .rail {
+  height: calc(var(--size-ui) * var(--leading-ui));
+  display: grid;
+  place-items: center;
+}
+
+/* What waits on the reader is marked as with a highlighter: one swash of
+   clay behind its name's line, however many lines follow, the words sharp
+   on top of it. */
+.someone.waiting .someone-line:first-child {
+  position: relative;
+  isolation: isolate;
+}
+
+.someone.waiting .someone-line:first-child::before {
+  content: "";
+  position: absolute;
+  inset: -3px -8px;
+  z-index: -1;
+  background: color-mix(in srgb, var(--pen-clay) var(--swash-strength), transparent);
+  -webkit-mask: var(--pen-swash) center / 100% 100% no-repeat;
+  mask: var(--pen-swash) center / 100% 100% no-repeat;
+  transition: background-color var(--hover) ease;
+}
+
+.someone.waiting:hover {
+  background: none;
+}
+
+.someone.waiting:hover .someone-line:first-child::before {
+  background: color-mix(in srgb, var(--pen-clay) calc(var(--swash-strength) + 10%), transparent);
+}
+
+.ask {
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-full);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  transform: scale(var(--breath-scale));
+  opacity: var(--breath-alpha);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+.someone-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.someone-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--size-ui);
+  line-height: var(--leading-ui);
+}
+
+.someone-name {
+  font-family: var(--font-emphasis);
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+
+.someone-since {
+  margin-left: auto;
+  padding-left: var(--space-2);
+  font-size: var(--size-small);
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.someone-origin,
+.someone-doing,
+.someone-trouble {
+  font-size: var(--size-small);
+  line-height: var(--leading-ui);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.someone-doing .where {
+  color: var(--text-2);
+}
+
+.someone-doing .where::after {
+  content: "·";
+  margin: 0 0.45em;
+  color: var(--text-3);
+}
+
+.someone.waiting .someone-doing {
+  color: var(--accent);
+}
+
+.someone-trouble {
+  color: var(--caution);
+}
+
+.someone-go {
+  align-self: center;
+  color: var(--text-3);
+  transform: rotate(-90deg);
+  opacity: 0;
+  transition: opacity var(--hover) ease;
+}
+
+.someone:hover .someone-go {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .someone-go {
+    opacity: 1;
+  }
+}
+
+/* Jobs nobody watches any more. */
+.job {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: var(--space-3);
+  row-gap: 2px;
+  padding: var(--space-2) 0;
+  font-size: var(--size-ui);
+}
+
+.job-id {
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-code);
+  color: var(--text);
+}
+
+.job-where {
+  color: var(--text-2);
+  font-size: var(--size-small);
+  align-self: center;
+}
+
+.job-command {
+  grid-column: 1 / -1;
+  font-family: var(--font-code);
+  font-variation-settings: var(--code-axes);
+  font-size: var(--size-code);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job .detail {
+  grid-column: 1 / -1;
+}
+
+/* Whose a job is, on a machine whose agents assist several accounts. */
+.tag.tag-account {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: var(--space-2);
+  vertical-align: 1px;
+}
+
+.tag.tag-account .glyph {
+  color: var(--text-3);
+}
+
+:root[data-reduced] .ask {
+  animation: none;
+}

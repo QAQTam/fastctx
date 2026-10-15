@@ -1,0 +1,426 @@
+//! Machine changes are read by the machines page and account members.
+//! They share the directory's atomic disk commit, so a completed change
+//! and its record survive together. The hub deletes each record after
+//! 90 days, including when nobody reads or changes anything.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+
+use fastctx_net::directory::{Account, Directory};
+use fastctx_net::sign::PublicKey;
+use fastctx_net::wire::{Change, Down, Told};
+use fastctx_types::machine_log::{Action, Actor, Outcome, Page, Record};
+use fastctx_types::{AccountName, MachineName};
+use jiff::{SignedDuration, Timestamp};
+use serde::{Deserialize, Serialize};
+
+use crate::store::{Book, Store};
+
+const RETENTION: SignedDuration = SignedDuration::from_hours(90 * 24);
+
+pub(crate) async fn expire(hub: &crate::Hub) -> io::Result<()> {
+    loop {
+        // Nothing changes while the hub hands its records over.
+        hub.moving.unfrozen().await;
+        let notified = hub.machine_log_changed.notified();
+        let expires = {
+            let mut store = hub.store();
+            // Nothing changes while the hub hands its records over.
+            if !hub.moving.frozen() && store.book.machine_log.expire(Timestamp::now()) {
+                store.save_book()?;
+            }
+            store.book.machine_log.expires()
+        };
+        match expires {
+            Some(expires) => {
+                let wait = expires.duration_since(Timestamp::now()).as_secs_f64().max(0.0);
+                tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_secs_f64(wait)) => {},
+                    () = notified => {},
+                }
+            }
+            None => notified.await,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct History {
+    #[serde(default)]
+    next: u64,
+    #[serde(default)]
+    records: Vec<Kept>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Kept {
+    record: Record,
+    /// An account name reused after deletion is a different reader.
+    accounts: BTreeMap<AccountName, Timestamp>,
+    /// Device keys preserve visibility when a name is removed and reused.
+    members: BTreeSet<PublicKey>,
+}
+
+impl History {
+    pub(crate) fn expire(&mut self, now: Timestamp) -> bool {
+        let before = self.records.len();
+        self.records.retain(|kept| kept.record.at.checked_add(RETENTION).expect("timestamp in range") > now);
+        before != self.records.len()
+    }
+
+    pub(crate) fn expires(&self) -> Option<Timestamp> {
+        self.records.iter().map(|kept| kept.record.at.checked_add(RETENTION).expect("timestamp in range")).min()
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        directory: &Directory,
+        current_accounts: &[Account],
+        actor: Actor,
+        action: Action,
+        outcome: Outcome,
+    ) -> io::Result<()> {
+        let mut accounts: BTreeSet<AccountName> = actor.account.iter().cloned().collect();
+        let mut names: BTreeSet<MachineName> = BTreeSet::new();
+        match &action {
+            Action::Share { machine, to, .. }
+            | Action::Assist { machine, to, .. }
+            | Action::AssistEnded { machine, to, .. } => {
+                names.insert(machine.clone());
+                accounts.insert(to.clone());
+            }
+            Action::StopActing { machine }
+            | Action::Plan { machine, .. }
+            | Action::Relays { machine, .. }
+            | Action::RelayAt { machine, .. }
+            | Action::Direct { machine, .. }
+            | Action::AllowActing { machine, .. } => {
+                names.insert(machine.clone());
+            }
+            Action::Remove { name, .. } => {
+                names.insert(name.clone());
+            }
+            Action::Rename { machine, .. } | Action::Group { machine, .. } => {
+                names.insert(machine.clone());
+            }
+            Action::RenameGroup { owner, .. } => {
+                accounts.insert(owner.clone());
+            }
+            Action::Joined { .. } => {
+                names.extend(actor.member.iter().cloned());
+            }
+            Action::Left { name, account, .. } => {
+                names.insert(name.clone());
+                accounts.insert(account.clone());
+            }
+            Action::ActingStopped { machine, account } => {
+                names.insert(machine.clone());
+                accounts.insert(account.clone());
+            }
+            Action::Token { name, .. } => {
+                names.extend(name.iter().cloned());
+            }
+            Action::PasswordStart { target } | Action::PasswordFinish { target } => {
+                accounts.insert(target.clone());
+            }
+            Action::OpenAccount { name, .. } | Action::SetAccount { name, .. } | Action::SetRole { name, .. } => {
+                accounts.insert(name.clone());
+            }
+            Action::AcceptRole { .. } | Action::RevokeToken { .. } => {}
+            Action::DeleteAccount { name } => {
+                accounts.insert(name.clone());
+                names.extend(
+                    directory
+                        .members
+                        .iter()
+                        .filter(|member| member.home.as_ref() == Some(name) || member.logins.contains(name))
+                        .map(|member| member.name.clone()),
+                );
+                names.extend(
+                    directory.shares.iter().filter(|share| share.account == *name).map(|share| share.machine.clone()),
+                );
+                names.extend(
+                    directory
+                        .assists
+                        .iter()
+                        .filter(|assist| assist.account == *name)
+                        .map(|assist| assist.machine.clone()),
+                );
+                for project in &directory.projects {
+                    if project.owner == *name || project.granted.contains(name) {
+                        accounts.insert(project.owner.clone());
+                        accounts.extend(project.granted.iter().cloned());
+                    }
+                }
+            }
+            Action::Transfer { to } => {
+                accounts.insert(to.clone());
+                accounts.extend(directory.accounts.iter().map(|account| account.name.clone()));
+            }
+            Action::OpenProject { town, .. } | Action::ShareProject { town, .. } | Action::MoveProject { town, .. } => {
+                if let Some(project) = directory.project(town) {
+                    accounts.insert(project.owner.clone());
+                    accounts.extend(project.granted.iter().cloned());
+                }
+                match &action {
+                    Action::ShareProject { with, .. } => {
+                        accounts.insert(with.clone());
+                    }
+                    Action::MoveProject { to, .. } => {
+                        accounts.insert(to.clone());
+                    }
+                    _ => {}
+                }
+            }
+            Action::Logout => {
+                names.extend(actor.member.iter().cloned());
+            }
+            Action::Settings { .. } | Action::Updates { .. } | Action::Dissolve { .. } => {
+                accounts.extend(directory.accounts.iter().map(|account| account.name.clone()));
+            }
+            Action::Collab { .. } | Action::Forget { .. } | Action::Forgotten { .. } => {}
+        }
+        let mut members = BTreeSet::new();
+        for name in names {
+            if let Some(member) = directory.member(&name) {
+                members.insert(member.key);
+                accounts.extend(member.home.iter().cloned());
+                if matches!(action, Action::Remove { .. }) {
+                    accounts.extend(member.logins.iter().cloned());
+                }
+            }
+            if matches!(
+                action,
+                Action::Remove { .. } | Action::Left { .. } | Action::DeleteAccount { .. } | Action::Rename { .. }
+            ) {
+                let machine = directory.canonical(&name);
+                accounts.extend(
+                    directory
+                        .shares
+                        .iter()
+                        .filter(|share| share.machine == *machine)
+                        .map(|share| share.account.clone()),
+                );
+                accounts.extend(
+                    directory
+                        .assists
+                        .iter()
+                        .filter(|assist| assist.machine == *machine)
+                        .map(|assist| assist.account.clone()),
+                );
+            }
+        }
+        // A conversation's record is its account's alone: the member that
+        // asked or did it reads it by that account.
+        if let Some(member) = actor.member.as_ref().and_then(|name| directory.member(name))
+            && !action.of_conversation()
+        {
+            members.insert(member.key);
+            accounts.extend(member.home.iter().cloned());
+        }
+        self.next = self.next.checked_add(1).ok_or_else(|| io::Error::other("machine log numbering exhausted"))?;
+        let at = Timestamp::now();
+        self.expire(at);
+        let accounts = accounts
+            .into_iter()
+            .filter_map(|name| {
+                directory
+                    .account(&name)
+                    .or_else(|| current_accounts.iter().find(|account| account.name == name))
+                    .map(|account| (name, account.opened))
+            })
+            .collect();
+        self.records.push(Kept { record: Record { id: self.next, at, actor, action, outcome }, accounts, members });
+        Ok(())
+    }
+
+    /// The records `me` reads for `account`, newest first. Renames, and the
+    /// records of conversations deleted, are left out for a member whose
+    /// release does not read them (`reads`, renames and deletions): it
+    /// could read nothing of a page with one. The super administrator reads
+    /// every record but those of conversations, which only their account
+    /// reads.
+    pub(crate) fn read(
+        &self,
+        directory: &Directory,
+        me: &MachineName,
+        account: &AccountName,
+        before: Option<u64>,
+        (renames, forgets, versions): (bool, bool, bool),
+    ) -> Result<Page, String> {
+        if !directory.may_act_for(account, me) {
+            return Err(format!("{me} may not read the machine log of the account {account}"));
+        }
+        let member = directory.member(me).ok_or_else(|| format!("there is no member {me}"))?;
+        let whole = directory.logged_in(me, account) && directory.is_super(account);
+        let opened = directory.account(account).map(|account| account.opened);
+        let now = Timestamp::now();
+        let mut page = Page { records: Vec::new(), next_before: None };
+        let envelope = Down::Told {
+            id: u64::MAX,
+            answer: Ok(Told::MachineLog { page: Page { records: Vec::new(), next_before: Some(u64::MAX) } }),
+        };
+        let mut bytes = fastctx_net::wire::encode(&envelope).len();
+        let mut visible = self
+            .records
+            .iter()
+            .rev()
+            .filter(|kept| {
+                let private = kept.record.action.of_conversation();
+                before.is_none_or(|before| kept.record.id < before)
+                    && (renames || !matches!(kept.record.action, Action::Rename { .. }))
+                    && (versions || !matches!(kept.record.action, Action::Updates { .. }))
+                    && (forgets || !private)
+                    && kept.record.at.checked_add(RETENTION).expect("timestamp in range") > now
+                    && ((whole && !private)
+                        || kept.accounts.get(account).copied().is_some_and(|kept| Some(kept) == opened)
+                        || kept.members.contains(&member.key))
+            })
+            .peekable();
+        while let Some(kept) = visible.next() {
+            // The envelope reserves the largest request id and cursor; each
+            // record is encoded once, with its separator counted exactly.
+            let added = fastctx_net::wire::encode(&kept.record).len() + usize::from(!page.records.is_empty());
+            if bytes + added > fastctx_net::wire::MAX_CONTROL_FRAME {
+                let last = page.records.last().ok_or("one machine log record exceeds a control frame")?;
+                page.next_before = Some(last.id);
+                break;
+            }
+            bytes += added;
+            page.records.push(kept.record.clone());
+            page.next_before = visible.peek().map(|_| kept.record.id);
+        }
+        Ok(page)
+    }
+}
+
+pub(crate) fn action(change: &Change, book: &Book) -> Action {
+    let project_name = |town| {
+        book.directory
+            .projects
+            .iter()
+            .chain(&book.archived)
+            .find(|project| &project.town == town)
+            .map(|project| project.name.clone())
+    };
+    match change {
+        Change::Collab { collab } => Action::Collab { version: collab.version },
+        Change::Share { machine, to, shared } => {
+            Action::Share { machine: machine.clone(), to: to.clone(), shared: *shared }
+        }
+        Change::Assist { machine, to, agent, home, assisting, until, weekly } => Action::Assist {
+            machine: machine.clone(),
+            to: to.clone(),
+            agent: agent.clone(),
+            home: home.clone(),
+            assisting: *assisting,
+            until: until.filter(|_| *assisting),
+            weekly: weekly.filter(|_| *assisting),
+        },
+        Change::Plan { machine, agent, home, plan } => {
+            Action::Plan { machine: machine.clone(), agent: agent.clone(), home: home.clone(), plan: *plan }
+        }
+        Change::StopActing { machine } => Action::StopActing { machine: machine.clone() },
+        Change::Direct { machine, at } => Action::Direct { machine: machine.clone(), at: at.clone() },
+        Change::Remove { name, reason } => Action::Remove { name: name.clone(), reason: reason.clone() },
+        Change::Rename { machine, to } => Action::Rename { machine: machine.clone(), to: to.clone() },
+        Change::Group { machine, group } => Action::Group { machine: machine.clone(), group: group.clone() },
+        Change::RenameGroup { owner, from, to } => {
+            Action::RenameGroup { owner: owner.clone(), from: from.clone(), to: to.clone() }
+        }
+        Change::Logout => Action::Logout,
+        Change::Token { register, name, kind, expires, managed, label, uses, way } => Action::Token {
+            register: *register,
+            name: name.clone(),
+            kind: *kind,
+            expires: *expires,
+            managed: *managed,
+            label: label.clone(),
+            uses: *uses,
+            way: *way,
+        },
+        Change::RevokeToken { token } => {
+            let record = book.tokens.iter().find(|record| record.key == *token);
+            Action::RevokeToken {
+                label: record.and_then(|record| record.label.clone()),
+                way: record.and_then(|record| record.way),
+                managed: record.is_some_and(|record| record.managed),
+            }
+        }
+        Change::SetRole { name, visitor } => Action::SetRole { name: name.clone(), visitor: *visitor },
+        Change::AcceptRole { accept } => Action::AcceptRole { accept: *accept },
+        Change::PasswordStart { target, .. } => Action::PasswordStart { target: target.clone() },
+        Change::PasswordFinish { target, .. } => Action::PasswordFinish { target: target.clone() },
+        Change::OpenAccount { name, visitor } => Action::OpenAccount { name: name.clone(), visitor: *visitor },
+        Change::SetAccount { name, locked } => Action::SetAccount { name: name.clone(), locked: *locked },
+        Change::Transfer { to } => Action::Transfer { to: to.clone() },
+        Change::DeleteAccount { name } => Action::DeleteAccount { name: name.clone() },
+        Change::Settings { self_registration } => Action::Settings { self_registration: *self_registration },
+        Change::Updates { policy } => Action::Updates { channel: policy.channel, minimum: policy.minimum.clone() },
+        Change::Dissolve { name } => Action::Dissolve { name: name.clone() },
+        Change::OpenProject { town, name } => Action::OpenProject { town: town.clone(), name: name.clone() },
+        Change::ShareProject { town, with, shared } => {
+            Action::ShareProject { town: town.clone(), name: project_name(town), with: with.clone(), shared: *shared }
+        }
+        Change::MoveProject { town, to } => {
+            Action::MoveProject { town: town.clone(), name: project_name(town), to: to.clone() }
+        }
+    }
+}
+
+pub(crate) fn keep(
+    store: &mut Store,
+    directory: &Directory,
+    actor: Actor,
+    action: Action,
+    outcome: Outcome,
+) -> Result<(), String> {
+    store
+        .book
+        .machine_log
+        .push(directory, &store.book.directory.accounts, actor, action, outcome)
+        .and_then(|()| store.save_book())
+        .map_err(|error| format!("the hub could not keep the machine log: {error}"))
+}
+
+pub(crate) fn effects(store: &mut Store, before: &Directory, actor: &Actor, action: &Action) -> Result<(), String> {
+    let after = &store.book.directory;
+    let mut effects = Vec::new();
+    for member in &before.members {
+        let current = after.member(&member.name);
+        for account in &member.logins {
+            if current.is_none_or(|current| !current.logins.contains(account)) {
+                let reason = match action {
+                    Action::Remove { reason, .. } => reason.clone(),
+                    Action::DeleteAccount { name } => format!("the account {name} was deleted"),
+                    _ => "logged out".to_string(),
+                };
+                effects.push(Action::Left {
+                    name: member.name.clone(),
+                    account: account.clone(),
+                    kind: member.kind,
+                    unregistered: member.home.as_ref() == Some(account),
+                    reason,
+                });
+            }
+        }
+    }
+    for acting in &before.acting {
+        if !after
+            .acting
+            .iter()
+            .any(|current| current.account == acting.account && after.same(&current.machine, &acting.machine))
+            && !matches!(action, Action::StopActing { machine } if machine == &acting.machine && actor.account.as_ref() == Some(&acting.account))
+        {
+            effects.push(Action::ActingStopped { machine: acting.machine.clone(), account: acting.account.clone() });
+        }
+    }
+    for effect in effects {
+        store
+            .book
+            .machine_log
+            .push(before, &store.book.directory.accounts, actor.clone(), effect, Outcome::Done)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}

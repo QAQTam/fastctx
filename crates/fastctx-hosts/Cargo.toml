@@ -1,0 +1,28 @@
+[package]
+name = "fastctx-hosts"
+description = "Everything the World knows of each agent host: Codex's app-server and Claude Code's plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+tempfile = "3"
+fastctx-platform = { path = "../fastctx-platform" }
+fastctx-types = { path = "../fastctx-types" }
+filetime = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+jiff.workspace = true
+jsonschema = { version = "0.33", default-features = false }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+jsonc-parser = "0.33.1"
+sha2 = "0.10"
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
+toml = "0.9"
+unicode-normalization = "0.1"
+roxmltree = "0.21"

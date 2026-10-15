@@ -1,6 +1,11 @@
-tests/compat/v0_1_1/cases/**/expected.text -text
-tests/compat/v0_1_1/raw/** -text
-# Upstream license texts are reproduced byte for byte; some carry CRLF of their
-# own. Normalising them would both edit third-party legal text and make the CI
-# staleness check fail forever on Linux.
-THIRD_PARTY_LICENSES_RUST.md -text
+# Shell scripts run on Linux and in WSL; keep them LF on every checkout.
+*.sh text eol=lf
+/gui/scripts/AppRun text eol=lf
+# The contract check compares serde's generated output byte for byte.
+gui/fixtures/wire.json text eol=lf
+# Embedded legal texts must have the same bytes in every release checkout.
+/LICENSE-APACHE text eol=lf
+/NOTICE text eol=lf
+/licenses/** text eol=lf
+/gui/licenses/** text eol=lf
+/gui/licenses/linux-runtime/*.gz binary

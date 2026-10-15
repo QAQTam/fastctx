@@ -1,0 +1,1155 @@
+import { presentation } from './presentation.js'
+
+// The World's mod for Claude Code.
+//
+// It tells the World the session exists and what it does, turn by turn and
+// tool by tool, and it hands the session what the World has for it: in a
+// new turn at once when the session is idle, beside the next tool result
+// when it is busy, and at the end of the turn for whatever is still held
+// then.
+//
+// It talks to the fastctx node only through files in the session's own
+// directory, reserved by the node before its first write:
+//   session.json       written when the session starts
+//   transcript.json    where Claude Code keeps the session's own record
+//   limits.json        the account's limits as the session last read them
+//   events/<n>.json    a report or an ordered batch of stream events, and
+//   events/<n>.done    written after it, once it is whole
+//   inbox/<id>.json    what the node has for the session; read, never changed
+//   receipts/<id>      written once something was handed to the model
+//   stop.json          the turn the node asks to be stopped; read, never changed
+//   focus.md           the machines and folders the user pointed the
+//                      conversation at; read, never changed
+// Before a call to the World's own tools goes through, it writes which
+// session makes it to `calls/<call id>.json` there; the node takes
+// that file when the call arrives, and sweeps those of ended sessions.
+// Which turn took what it handed over is an event of its own, before the
+// end of that turn: the node owes that turn's end to whoever it was from.
+// Controls add $.command.list/run and $.config.list. A public request waits
+// in $.process.spawn, released when its node, host, turn or viewers leave.
+// MCP ownership is resolved from $.mcp.connect and $.session.usage at startup.
+// The inbox address identifies native-shell commands, never MCP calls.
+//
+// Nothing here runs on a clock while all is well: the session's control
+// helper says `look` whenever the node leaves the session something (words,
+// a stop, a control), and turn boundaries look on their own. A clock runs
+// only to try again what failed.
+
+const WORLD = __FASTCTX_WORLD__
+const FASTCTX = __FASTCTX_COMMAND__
+// How soon what failed is tried again, and how long an answer to whether
+// fastctx is being removed is kept.
+const LOOK_MS = __FASTCTX_LOOK_MS__
+// Claude Code limits each fs read/write to 4 MiB of UTF-8.
+const FILE_BYTES = 4 * 1024 * 1024
+// fastctx's root holds the World's directory and, from the moment a removal
+// starts, its `uninstalled.json`.
+const ROOT = WORLD.slice(0, WORLD.lastIndexOf('/'))
+const gone = { seen: false, checked: null }
+
+// Whether fastctx is being removed from this computer. From then on the mod
+// stands aside for the rest of this process: it writes nothing, starts no
+// helper and passes every event on untouched, so an open conversation neither
+// puts files back into the directory being removed nor holds a program the
+// removal must delete. A cached answer is at most LOOK_MS old; the removal
+// waits two looks after writing its marker before it takes any file. Only a
+// listing that shows the marker counts: a listing that fails proves nothing.
+async function removed($, fresh = false) {
+  if (gone.seen) return true
+  const now = Date.now()
+  if (!fresh && gone.checked !== null && Math.abs(now - gone.checked) < LOOK_MS) return false
+  gone.checked = now
+  try {
+    gone.seen = (await $.fs.list(ROOT)).some((entry) => entry.name === 'uninstalled.json')
+  } catch (error) {
+    return false
+  }
+  return gone.seen
+}
+
+__FASTCTX_CONTROLS__
+__FASTCTX_COMMANDS__
+__FASTCTX_SELECTION__
+__FASTCTX_REWIND__
+__FASTCTX_OBSERVATIONS__
+__FASTCTX_FAILURES__
+
+// /clear may replace even the same session ID. Keep the old object alive for
+// its timers, queued writes and late turn/tool results; never reset it in place.
+function conversation(sessionId, previous) {
+  const context = {
+    sessionId, previous, ready: null,
+    dir: null,
+    closed: false,
+    timer: null,
+    busy: false,
+    turn: null,
+    sequence: 0,
+    logicalTime: 0,
+    hostProcess: null,
+    registration: null,
+    // Submissions Claude Code took, oldest first, each waiting for its turn.
+    accepted: [],
+    // Rows of this plugin's prompts kept since the last turn started.
+    entered: 0,
+    // Set while this plugin appends a row of its own at a tool boundary.
+    appending: false,
+    handled: new Set(),
+    failing: new Set(),
+    held: [],
+    // What rode in beside a prompt that has not started its turn yet.
+    alongTaken: [],
+    submitting: [],
+    owed: [],
+    looking: false,
+    // A look was asked for while one ran; it runs again before it ends.
+    again: false,
+    // Something a later look can settle failed in this one.
+    unsettled: false,
+    stopped: null,
+    writing: Promise.resolve(),
+    streamBatch: null,
+    unwritten: new Map(),
+    failedReports: new Set()
+  }
+  context.shown = presentation(() => reserved(context), () => context.turn)
+  return context
+}
+
+function chunks(text) {
+  const parts = []
+  let start = 0, position = 0, bytes = 0
+  for (const character of text) {
+    const point = character.codePointAt(0)
+    const count = point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+    if (bytes + count > FILE_BYTES) {
+      parts.push(text.slice(start, position))
+      start = position
+      bytes = 0
+    }
+    bytes += count
+    position += character.length
+  }
+  parts.push(text.slice(start))
+  return parts
+}
+
+async function writeReport($, path, body) {
+  const parts = chunks(body)
+  if (parts.length === 1) return $.fs.write(path + '.json', body)
+  for (let index = 0; index < parts.length; index++) await $.fs.write(path + '.parts/' + index, parts[index])
+  await $.fs.write(path + '.json', JSON.stringify({ parts: parts.length }))
+}
+
+async function readReport($, path) {
+  let value = JSON.parse(await $.fs.read(path + '.json'))
+  if (value.parts !== undefined) {
+    let body = ''
+    for (let index = 0; index < value.parts; index++) body += await $.fs.read(path + '.parts/' + index)
+    value = JSON.parse(body)
+  }
+  return value
+}
+
+function reserved(context) {
+  const id = nextName(context)
+  // Six sequence digits fill the six sub-millisecond digits of a Rust
+  // timestamp. The counter's carry in nextName keeps this monotonic.
+  const at = new Date(context.logicalTime).toISOString().replace('Z', String(context.sequence).padStart(6, '0') + 'Z')
+  return { id, at }
+}
+
+function nextName(context) {
+  const now = Date.now()
+  if (now > context.logicalTime) { context.logicalTime = now; context.sequence = 0 }
+  context.sequence += 1
+  // Carry at the six-digit field boundary so lexical order remains causal.
+  if (context.sequence === 1000000) { context.logicalTime += 1; context.sequence = 0 }
+  return String(context.logicalTime).padStart(15, '0') + '-' + String(context.sequence).padStart(6, '0')
+}
+
+function event($, context, kind, fields) {
+  if (!context.dir) return context.writing
+  context.streamBatch = null
+  const { id: name, at } = reserved(context)
+  const pending = [...context.unwritten.keys()].map((name) => name + '.json')
+  const body = JSON.stringify({ kind, at, ...fields, pending })
+  context.unwritten.set(name, { body })
+  const written = context.writing.then(() => writePending($, context, name))
+  // A failed report fails its caller; it never counts as an acknowledgment.
+  context.writing = written.catch(() => {
+    context.failedReports.add(name)
+    retry($, context)
+  })
+  return written
+}
+
+async function writePending($, context, name) {
+  const report = context.unwritten.get(name)
+  // A batch's filename predates its last fragment. Keep the allocator's
+  // watermark even after acknowledgment deletes the batch, so reload in the
+  // same millisecond (or a clock rollback) cannot reuse fragment timestamps.
+  if (report.sequence !== undefined) await $.fs.write(context.dir + '/applied/' + report.sequence + '.sequence', '')
+  const path = context.dir + '/events/' + name
+  await writeReport($, path, report.body)
+  await $.fs.write(path + '.done', '')
+  context.unwritten.delete(name)
+}
+
+// A stream only appends observations in memory. The zero-delay timer starts
+// serialization outside the generator; while earlier IO runs, arriving pieces
+// share this batch. Other reports seal it so they cannot overtake any piece.
+function streamEvent($, context, entry) {
+  let batch = context.streamBatch
+  if (batch === null) {
+    const { id: name } = reserved(context)
+    batch = { kind: 'batch', events: [], pending: [...context.unwritten.keys()].map((name) => name + '.json') }
+    context.streamBatch = batch
+    const report = { body: null, sequence: null }
+    context.unwritten.set(name, report)
+    const ready = new Promise((resolve) => { $.clock.after(0, resolve) })
+    const written = context.writing.then(() => ready).then(async () => {
+      if (context.streamBatch === batch) context.streamBatch = null
+      report.body = JSON.stringify(batch)
+      report.sequence = nextName(context)
+      await writePending($, context, name)
+    })
+    // Keep the batch to be written again; failure must not reject or cancel
+    // the host stream, which has already received the same pieces. A stream
+    // can expose prose even after session.end.
+    context.writing = written.catch(() => {
+      context.failedReports.add(name)
+      retry($, context)
+    })
+  }
+  batch.events.push({ ...entry, at: reserved(context).at })
+}
+
+// The scanner follows $ only through this file's top-level functions. Give
+// presentation callbacks bound to this dispatch and conversation, never $.
+function reports($, context) {
+  return {
+    event: (kind, fields) => event($, context, kind, fields),
+    stream: context.observe,
+    stored: context.stored,
+    thought: context.thought,
+    save: (state) => {
+      context.streamBatch = null
+      const body = JSON.stringify({ process: context.hostProcess, ...state })
+      const saved = context.writing.then(() => writeReport($, context.dir + '/presentation', body))
+      context.writing = saved.catch(() => {})
+      return saved
+    },
+  }
+}
+
+function stamp() {
+  return new Date().toISOString()
+}
+
+function activity($, context) {
+  context.streamBatch = null
+  const body = JSON.stringify({ process: context.hostProcess, turn: context.busy ? context.turn : null })
+  const saved = context.writing.then(() => $.fs.write(context.dir + '/activity.json', body))
+  context.writing = saved.catch(() => {})
+  return saved
+}
+
+// A receipt tells the node the model has it. One that cannot be written is
+// written at a later look; meanwhile it is not handed over again.
+async function receipt($, context, delivery, how, acceptedTurn = context.turn) {
+  try {
+    await $.fs.write(context.dir + '/receipts/' + delivery.id, JSON.stringify({ at: stamp(), how, turn: acceptedTurn }))
+  } catch (error) {
+    context.owed.push([delivery, how, acceptedTurn])
+    retry($, context)
+  }
+}
+
+async function settle($, context) {
+  for (const [delivery, how, acceptedTurn] of context.owed.splice(0, context.owed.length)) await receipt($, context, delivery, how, acceptedTurn)
+}
+
+// What the model reads when the World speaks on its own account. The user's
+// own words go in as they are, as the user's.
+function framed(delivery) {
+  return 'A message from fastctx, not typed by the user:\n\n' + delivery.text
+}
+
+// The user's own words, sent into a turn already running: the model reads
+// them beside the tool's result in the words Claude Code itself gives a
+// prompt typed while a turn runs (2.1.300).
+function userFramed(delivery) {
+  return 'The user sent a new message while you were working:\n' + delivery.text
+    + '\n\nThis is how Claude Code surfaces messages the user sends mid-turn \u2014 within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.'
+}
+
+// Says which turn took what was handed over.
+function handed($, context, deliveries, turn, how) {
+  return event($, context, 'handed', { deliveries: deliveries.map((delivery) => delivery.id), turn, how })
+}
+
+// Submits words as a new turn. Returns whether Claude Code took them.
+//
+// Which turn takes them is not read from any text: Claude Code keeps the
+// prompt as a row stamped with this plugin as its origin, and finishes every
+// `session.append` hook on a turn's rows before it starts that turn. So the
+// turn that starts after such a row is the one that took it (`entered`,
+// `startTurn`), whether the prompt began its turn at once or waited behind a
+// running one. Until then nothing else is submitted, so each submission is
+// one turn of its own and the order of rows is the order of submissions.
+async function submit($, context, deliveries, prompt) {
+  if (context.closed || context.submitting.length > 0 || context.accepted.length > 0) return false
+  context.submitting.push(...deliveries)
+  try {
+    if ((await $.session.id()) !== context.sessionId) return false
+    for (const delivery of deliveries) {
+      await $.fs.write(context.dir + '/attempts/' + delivery.id, JSON.stringify({ at: stamp(), turn: context.turn, state: 'submitting' }))
+    }
+    // What rides with the next turn goes in just before the prompt that
+    // starts it: this plugin's own prompt reaches none of its own hooks.
+    await alongBefore($, context)
+    // Its row and turn can come before the call answers.
+    context.accepted.push(deliveries)
+    let refusal = null
+    try {
+      const result = await $.prompt.submit(prompt)
+      if (result.drop !== undefined) refusal = result.drop
+    } catch (error) {
+      refusal = String(error)
+    }
+    if (refusal === null) return true
+    const waiting = context.accepted.indexOf(deliveries)
+    // A turn took them already; whatever the call said after that, they went.
+    if (waiting < 0) {
+      worldFailure($, 'prompt.submit', new Error(refusal))
+      return true
+    }
+    context.accepted.splice(waiting, 1)
+    for (const delivery of deliveries) await $.fs.write(context.dir + '/attempts/' + delivery.id, JSON.stringify({ state: 'refused' }))
+    context.unsettled = true
+    await trouble($, context, deliveries[0].id, 'it could not be handed over: ' + refusal)
+    return false
+  } finally {
+    context.submitting.splice(0, context.submitting.length)
+  }
+}
+
+// A row of a prompt this plugin submitted was kept; the next turn takes it.
+function entered(context) {
+  context.entered += 1
+}
+
+// Says that `acceptedTurn` took what was submitted.
+async function submitted($, context, deliveries, acceptedTurn) {
+  const report = handed($, context, deliveries, acceptedTurn, 'submitted')
+  await Promise.all([report, ...deliveries.map((delivery) => receipt($, context, delivery, 'submitted', acceptedTurn))])
+}
+
+// Hands everything held to the model in one new turn; on failure it is
+// held again, before anything held since.
+async function flush($, context, how) {
+  if (context.closed || context.busy || waiting(context)) return
+  // What rides with the next turn starts none: it waits for one.
+  const at = context.held.findIndex((delivery) => delivery.along === undefined)
+  if (at < 0) return
+  const deliveries = context.held.splice(at, 1)
+  if (deliveries[0].as_user !== true) {
+    while (at < context.held.length && context.held[at].as_user !== true && context.held[at].along === undefined) deliveries.push(...context.held.splice(at, 1))
+  }
+  const prompt = deliveries[0].as_user === true
+    ? { text: deliveries[0].text, asUser: true }
+    : { text: deliveries.map(framed).join('\n\n') }
+  if (!(await submit($, context, deliveries, prompt))) context.held.splice(at, 0, ...deliveries)
+}
+
+// Told again before they went in, these never will: receipts keep them from
+// being handed over again, and the node settles them.
+async function replaced($, context, deliveries) {
+  await Promise.all(deliveries.map((delivery) => receipt($, context, delivery, 'replaced', null)))
+  await event($, context, 'replaced', { deliveries: deliveries.map((delivery) => delivery.id) })
+}
+
+// What waits to ride with the next turn goes in as a row of its own just
+// before a prompt this plugin submits; the turn that prompt starts takes it
+// (`startTurn`), and the model reads both in the one request.
+async function alongBefore($, context) {
+  const along = context.held.filter((delivery) => delivery.along !== undefined)
+  if (along.length === 0) return
+  for (const delivery of along) context.held.splice(context.held.indexOf(delivery), 1)
+  let appended
+  try {
+    context.appending = true
+    appended = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: along.map(framed).join('\n\n') }] } })
+  } catch (error) {
+    context.held.unshift(...along)
+    worldFailure($, 'session.append', error)
+    return
+  } finally {
+    context.appending = false
+  }
+  if (appended.deny !== undefined) context.held.unshift(...along)
+  else context.alongTaken.push(...along)
+}
+
+// What waits to ride with the next turn goes in beside a prompt someone typed
+// that starts it; the turn it starts takes it (`startTurn`).
+async function alongPrompt($, context, e, next) {
+  if (e.turnId !== undefined || e.command !== undefined || context.closed) return next(e)
+  const along = context.held.filter((delivery) => delivery.along !== undefined)
+  if (along.length === 0) return next(e)
+  for (const delivery of along) context.held.splice(context.held.indexOf(delivery), 1)
+  let result
+  try {
+    result = await next({ ...e, context: [...(e.context ?? []), ...along.map(framed)] })
+  } catch (error) {
+    context.held.unshift(...along)
+    throw error
+  }
+  if (result.drop !== undefined) context.held.unshift(...along)
+  else context.alongTaken.push(...along)
+  return result
+}
+
+// Whether a submission is still on its way into a turn of its own.
+function waiting(context) {
+  return context.submitting.length > 0 || context.accepted.length > 0
+}
+
+// The names in one of the session's directories, or null when they cannot
+// be listed.
+async function listing($, context, sub) {
+  try {
+    return (await $.fs.list(context.dir + '/' + sub)).map((entry) => entry.name)
+  } catch (error) {
+    return null
+  }
+}
+
+// Tells the World, once, that an inbox file could not be handed over yet;
+// it is tried again at every look until it goes through.
+async function uncertain($, context, ids, text) {
+  const key = 'uncertain:' + ids.join(',')
+  if (context.failing.has(key)) return
+  context.failing.add(key)
+  await event($, context, 'uncertain', { deliveries: ids, text })
+}
+
+async function trouble($, context, name, text) {
+  if (context.failing.has(name)) return
+  context.failing.add(name)
+  await event($, context, 'trouble', { file: name, text })
+}
+
+// Tries again, a while later, what a look could not settle. One try waits at
+// a time; a look in between settles it sooner.
+function retry($, context) {
+  if (context.timer !== null || gone.seen) return
+  context.timer = $.clock.after(LOOK_MS, () => {
+    context.timer = null
+    look($, context).catch((error) => worldFailure($, 'look', error))
+  })
+}
+
+// Takes what the node left the session: a stop, words, failed reports and
+// receipts to write again. Asked while it runs, it runs once more after.
+async function look($, context) {
+  if (await removed($)) {
+    if (context.timer) {
+      context.timer.cancel()
+      context.timer = null
+    }
+    return
+  }
+  const current = !context.closed && (await $.session.id()) === context.sessionId
+  if (current) await stopping($, context)
+  if (context.looking) {
+    context.again = true
+    return
+  }
+  context.looking = true
+  try {
+    do {
+      context.again = false
+      context.unsettled = false
+      await settle($, context)
+      const written = context.writing.then(async () => {
+        for (const name of context.failedReports) {
+          await writePending($, context, name)
+          context.failedReports.delete(name)
+        }
+      })
+      context.writing = written.catch(() => {})
+      try {
+        await written
+        if (!context.closed && current) await looked($, context)
+      } catch (error) {
+        context.unsettled = true
+        worldFailure($, 'look', error)
+      }
+    } while (context.again)
+  } finally {
+    context.looking = false
+  }
+  if (context.unsettled || context.failedReports.size > 0 || context.owed.length > 0) retry($, context)
+}
+
+// Stops the running turn when the node asks for it. Only the turn that is
+// running can be stopped, and only by its id; a request for a turn that has
+// ended is left as it is.
+async function stopping($, context) {
+  let asked = null
+  try {
+    asked = JSON.parse(await $.fs.read(context.dir + '/stop.json')).turn
+  } catch (error) {
+    return
+  }
+  if (!context.busy || asked !== context.turn) return false
+  if (asked === context.stopped) return true
+  context.stopped = asked
+  try {
+    await $.turn.abort({ turnId: asked })
+  } catch (error) {
+    // Claude Code refuses an abort only for a turn that is not running: the
+    // turn held as running had ended unseen, and is ended here.
+    await staleTurn($, context, asked)
+  }
+  return true
+}
+
+// Ends a turn this plugin held as running that Claude Code says is not:
+// the session is idle, and what waited for the turn's end goes on.
+async function staleTurn($, context, turn) {
+  if (context.turn !== turn) return
+  context.busy = false
+  context.turn = null
+  await completeControlTurn($, { turnId: turn })
+  const completed = event($, context, 'turn_complete', { turn, aborted: true, reason: 'aborted', refusal: null, ms: null, answer: null, streamed: true })
+  const saved = activity($, context)
+  await Promise.all([completed, saved])
+  await flush($, context, 'submitted at the end of a turn')
+}
+
+async function looked($, context) {
+  await settle($, context)
+  // What has a receipt was handed over already, perhaps before this mod
+  // loaded again. Without knowing which, anything handed over could repeat.
+  const receipts = await listing($, context, 'receipts')
+  if (receipts === null) {
+    context.unsettled = true
+    return
+  }
+  if (!context.busy) await flush($, context, 'submitted')
+  const receipted = new Set(receipts)
+  // Node acknowledgment writes receipts before retiring handed reports.
+  // Scan both, then receipts again, so that transition cannot fall between
+  // two snapshots taken while this mod is reloading.
+  for (const name of (await listing($, context, 'events')) || []) {
+    if (!name.endsWith('.json')) continue
+    try {
+      const report = await readReport($, context.dir + '/events/' + name.slice(0, -5))
+      if (report.kind === 'handed') for (const id of report.deliveries) receipted.add(id)
+    } catch (error) {
+      const latest = await listing($, context, 'receipts')
+      if (latest === null) throw error
+      for (const id of latest) receipted.add(id)
+    }
+  }
+  for (const id of (await listing($, context, 'receipts')) || []) receipted.add(id)
+  const attempts = new Set((await listing($, context, 'attempts')) || [])
+  const fresh = ((await listing($, context, 'inbox')) || [])
+    .filter((name) => name.endsWith('.json') && !context.handled.has(name) && !receipted.has(name.slice(0, -5)))
+    .sort()
+  const read = []
+  for (const name of fresh) {
+    if (attempts.has(name.slice(0, -5)) && JSON.parse(await $.fs.read(context.dir + '/attempts/' + name.slice(0, -5))).state !== 'refused') {
+      await uncertain($, context, [name.slice(0, -5)], 'a prior mod stopped during submission; acceptance is unknown')
+      continue
+    }
+    let delivery = null
+    try {
+      delivery = JSON.parse(await $.fs.read(context.dir + '/inbox/' + name))
+      if (delivery.text_parts !== undefined) {
+        delivery.text = ''
+        for (let index = 0; index < delivery.text_parts; index++) {
+          delivery.text += await $.fs.read(context.dir + '/inbox-parts/' + delivery.id + '/' + index)
+        }
+      }
+    } catch (error) {
+      context.unsettled = true
+      await trouble($, context, name, 'it could not be read: ' + error)
+      continue
+    }
+    read.push([name, delivery])
+  }
+  // What the World told again before it went in replaces what it told
+  // before: only the latest goes in.
+  const replacing = new Set(read.flatMap(([, delivery]) => delivery.replaces ?? []))
+  for (const [name, delivery] of read) {
+    if (replacing.has(delivery.id)) {
+      context.handled.add(name)
+      await replaced($, context, [delivery])
+      continue
+    }
+    const older = context.held.filter((held) => (delivery.replaces ?? []).includes(held.id))
+    for (const one of older) context.held.splice(context.held.indexOf(one), 1)
+    if (older.length > 0) await replaced($, context, older)
+    // What rides with the next turn starts none: it waits for one, or goes
+    // into the one running at its next tool boundary.
+    if (context.busy || waiting(context) || delivery.along !== undefined) {
+      context.held.push(delivery)
+      context.handled.add(name)
+      continue
+    }
+    // Taken before the session is asked, so no other look takes it too.
+    context.handled.add(name)
+    // The user's own words, typed on one of the user's machines: only these
+    // go in as the user.
+    const prompt = delivery.as_user === true ? { text: delivery.text, asUser: true } : { text: framed(delivery) }
+    if (!(await submit($, context, [delivery], prompt))) {
+      context.handled.delete(name)
+      continue
+    }
+    context.failing.delete(name)
+    // The turn that takes it writes the receipt together with handed.
+  }
+}
+
+// The conversation the World started this session for, as the settings it
+// was started with (`--settings`) name it: the World's sessions stand in
+// their project's directory together, so nothing else tells them apart
+// before Claude Code says which session it started. Claude Code's daemon
+// starts and wakes a background session with those settings (2.1.296).
+async function startedFor($) {
+  const flag = await $.settings.read({ source: 'flag' })
+  const named = flag.env === undefined || flag.env === null ? undefined : flag.env.FASTCTX_CONVERSATION
+  return typeof named === 'string' && named !== '' ? named : null
+}
+
+async function startSession($, context) {
+  const id = context.sessionId
+  const command = [FASTCTX, 'claude-session-directory', WORLD, id]
+  command.push('--cwd', await $.session.cwd())
+  if (context.previous !== null && context.previous !== undefined) command.push('--previous', context.previous)
+  const conversation = await startedFor($)
+  if (conversation !== null) command.push('--conversation', conversation)
+  const reservedDirectory = await $.process.run(command)
+  if (reservedDirectory.exitCode !== 0) throw new Error('reserving the Claude session directory: ' + reservedDirectory.stderr)
+  context.dir = JSON.parse(reservedDirectory.stdout)
+  // A reload can happen in the same clock tick, with old reports still
+  // pending. Their reserved names survive in events or applied.
+  for (const sub of ['events', 'applied']) {
+    await $.fs.write(context.dir + '/' + sub + '/.created', '')
+    const names = await listing($, context, sub)
+    if (names === null) throw new Error('cannot recover the report sequence')
+    for (const name of names) {
+      const match = /^(\d+)-(?:end-)?(\d+)\./.exec(name)
+      if (!match) continue
+      const time = Number(match[1]), count = Number(match[2])
+      if (time > context.logicalTime) { context.logicalTime = time; context.sequence = count }
+      else if (time === context.logicalTime) context.sequence = Math.max(context.sequence, count)
+    }
+  }
+  const instance = reserved(context)
+  // A session can be resumed in the same process, even in the same clock
+  // tick. Preserve the registration's generation independently of reports.
+  await $.fs.write(context.dir + '/applied/' + instance.id + '.sequence', '')
+  const registration = { session: id, previous: context.previous, at: instance.at, instance: instance.id }
+  const parent = await $.process.run([FASTCTX, 'parent-process'])
+  if (parent.exitCode !== 0) throw new Error('identifying the Claude host: ' + parent.stderr)
+  registration.process = JSON.parse(parent.stdout)
+  context.hostProcess = registration.process
+  const files = (await $.fs.list(context.dir)).map((entry) => entry.name)
+  if (files.includes('activity.json')) {
+    const previous = JSON.parse(await $.fs.read(context.dir + '/activity.json'))
+    if (previous.process && previous.process.pid === context.hostProcess.pid && previous.process.token === context.hostProcess.token) {
+      context.turn = previous.turn
+      context.busy = context.turn !== null
+    }
+  }
+  if (files.includes('presentation.json')) {
+    const state = await readReport($, context.dir + '/presentation')
+    if (state.process.pid !== context.hostProcess.pid || state.process.token !== context.hostProcess.token) {
+      state.tools = []
+      state.requests = []
+    }
+    context.shown.restore(state)
+  }
+  const ask = async (name, get) => {
+    try {
+      registration[name] = await get()
+    } catch (error) {
+      registration[name] = null
+    }
+  }
+  // Native-shell commands can carry this address. MCP connections need the
+  // per-call proof below because their environment is a startup snapshot.
+  await ask('inbox_address', () => $.env.get('CLAUDE_CODE_MESSAGING_SOCKET'))
+  await ask('entrypoint', () => $.env.get('CLAUDE_CODE_ENTRYPOINT'))
+  await ask('cwd', () => $.session.cwd())
+  await ask('model', () => $.session.model())
+  await ask('surfaces', () => $.session.surfaces())
+  await ask('version', () => $.session.version())
+  // The receipts directory exists from the start, so failing to list it
+  // means a failure, never "nothing handed over yet".
+  await $.fs.write(context.dir + '/receipts/.created', '')
+  await $.fs.write(context.dir + '/session.json', JSON.stringify(registration))
+  context.registration = registration
+  await observeModels($, context)
+  // What already waits when the session starts again is handed over, not
+  // skipped: a closed session's answers are what it should see on return.
+  // After that, the session's control helper says when there is more.
+  controlWake(id, () => look($, context).catch((error) => worldFailure($, 'look', error)))
+  $.clock.after(0, () => look($, context).catch((error) => worldFailure($, 'look', error)))
+  // Background observations retain this conversation even after /clear.
+  context.observe = (happened) => {
+    try {
+      streamEvent($, context, { kind: 'session', happened })
+    } catch (error) {
+      worldFailure($, 'observation', error)
+    }
+  }
+  // Claude Code keeps a record before its file has it; the node waits for
+  // the last one kept when it reads the file.
+  context.stored = (uuid) => streamEvent($, context, { kind: 'stored', uuid })
+  // Which live thinking item a stored row ended: the node finds that row in
+  // the file for Claude Code's own measure of it and the request's usage.
+  context.thought = ({ uuid, turn, item }) => streamEvent($, context, { kind: 'thought', uuid, turn, item })
+}
+
+async function startTurn($, context, e, next) {
+  // A subagent's run is a turn of its own loop: the main loop's turn, its
+  // state and what it takes are untouched (Claude Code reports one since
+  // 2.1.300; its end is `completeTurn`'s agent branch).
+  if (e.agentId !== undefined) return next(e)
+  await startControlTurn($, e)
+  context.busy = true
+  context.turn = e.turnId
+  // The rows of this plugin's prompts kept since the last turn began are
+  // what this turn takes (`submit`).
+  const took = context.accepted.splice(0, context.entered)
+  context.entered = 0
+  // So did what rode in beside its prompt (`alongPrompt`).
+  const along = context.alongTaken.splice(0, context.alongTaken.length)
+  if (along.length > 0) took.push(along)
+  const started = event($, context, 'turn_start', { turn: context.turn })
+  const saved = activity($, context)
+  await Promise.all([started, saved])
+  for (const deliveries of took) await submitted($, context, deliveries, e.turnId)
+  return next(e)
+}
+
+async function completeTurn($, context, e, next) {
+  await completeControlTurn($, e)
+  if (e.agentId !== undefined) {
+    const reported = agentReports(reports($, context), e.agentId)
+    const how = e.isAborted ? 'interrupted' : e.reason === 'error' || e.reason === 'refusal' ? 'failed' : 'completed'
+    await agentPresentation(context, e.agentId).end(reported, e.turnId)
+    await reported.event('session', { happened: { event: 'turn_ended', turn: e.turnId,
+      end: { how, reason: e.reason, duration_ms: e.durationMs, last_message: e.answer, error: null } } })
+    // Its tokens as Claude Code counts an agent's in its Agent call's answer:
+    // the last request's input, cached and fresh, and its output.
+    const usage = e.usage
+    const tokens = usage == null ? null : ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']
+      .reduce((sum, key) => sum + (typeof usage[key] === 'number' ? usage[key] : 0), 0)
+    await event($, context, 'session', { happened: { event: 'changed', turn: null, change: { kind: 'agent_ended', agent_id: e.agentId,
+      end: { how, reason: how === 'completed' ? null : e.reason, duration_ms: e.durationMs ?? null, tokens, tools: null,
+        answer: e.answer ?? null, task: null, told: false } } } })
+    await observeAgents($, context)
+    return next(e)
+  }
+  await context.shown.end(reports($, context), e.turnId)
+  if (context.turn === e.turnId) { context.busy = false; context.turn = null }
+  const completed = event($, context, 'turn_complete', {
+    turn: e.turnId,
+    aborted: e.isAborted,
+    reason: e.reason,
+    refusal: e.reason === 'refusal' ? e.refusal : null,
+    ms: e.durationMs,
+    answer: e.answer ?? null,
+    streamed: true,
+  })
+  const saved = activity($, context)
+  await Promise.all([completed, saved])
+  await flush($, context, 'submitted at the end of a turn')
+  return next(e)
+}
+
+// Both successful and failed main-tool boundaries can append World facts.
+// Appending preserves the text without the classic context-size rewrite.
+async function boundary($, context, e, next) {
+  if (e.agent_id !== undefined) return next(e)
+  const result = await next(e)
+  if (context.closed || (await $.session.id()) !== context.sessionId) return result
+  if (await stopping($, context)) return result
+  const acceptedTurn = context.turn
+  if (!context.busy || acceptedTurn === null) return result
+  // Whatever waits goes in beside this result: the World's telling, and
+  // the user's words sent while the turn runs (`world-colleagues.md`).
+  const deliveries = [...context.held]
+  if (deliveries.length === 0) return result
+  const selected = new Set(deliveries)
+  for (let i = context.held.length - 1; i >= 0; i--) if (selected.has(context.held[i])) context.held.splice(i, 1)
+  try {
+    for (const delivery of deliveries) await $.fs.write(context.dir + '/attempts/' + delivery.id, JSON.stringify({ state: 'appending', turn: acceptedTurn }))
+  } catch (error) {
+    // No native append was attempted. Keep these words ahead of later
+    // deliveries; only an uncertain host append must not be replayed.
+    context.held.unshift(...deliveries)
+    throw error
+  }
+  try {
+    context.appending = true
+    let appended
+    try {
+      const text = deliveries.map((delivery) => (delivery.as_user === true ? userFramed(delivery) : framed(delivery))).join('\n\n')
+      appended = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+    } finally {
+      context.appending = false
+    }
+    if (appended.deny !== undefined) {
+      for (const delivery of deliveries) await $.fs.write(context.dir + '/attempts/' + delivery.id, JSON.stringify({ state: 'refused' }))
+      context.held.unshift(...deliveries)
+      await trouble($, context, deliveries[0].id, appended.deny)
+      return result
+    }
+    for (const delivery of deliveries) await receipt($, context, delivery, 'appended at a main tool boundary', acceptedTurn)
+    await handed($, context, deliveries, acceptedTurn, 'appended at a main tool boundary')
+  } catch (error) {
+    // append may already have crossed the host boundary: retain its
+    // evidence rather than replaying an unconfirmed external effect.
+    await trouble($, context, deliveries[0].id, 'append acceptance needs reconciliation: ' + error)
+    throw error
+  }
+  return result
+}
+
+async function endSession($, context, e, next) {
+  await endControls($, e)
+  context.closed = true
+  // The node may restart while this process runs another conversation.
+  // Process liveness alone would otherwise resurrect this closed one.
+  await $.fs.write(context.dir + '/closed/' + context.registration.instance, '')
+  context.streamBatch = null
+  for (const deliveries of context.accepted.splice(0, context.accepted.length)) {
+    await uncertain($, context, deliveries.map((delivery) => delivery.id), 'the session ended before a turn took what was submitted')
+  }
+  const along = context.alongTaken.splice(0, context.alongTaken.length)
+  if (along.length > 0) await uncertain($, context, along.map((delivery) => delivery.id), 'the session ended before a turn took what went in beside its prompt')
+  context.entered = 0
+  const { id: name, at } = reserved(context)
+  const body = JSON.stringify({ kind: 'session_end', at, instance: context.registration.instance, reason: e.reason, pending: [...context.unwritten.keys()].map((name) => name + '.json') })
+  context.unwritten.set(name, { body })
+  try {
+    await writePending($, context, name)
+  } catch (error) {
+    context.failedReports.add(name)
+    retry($, context)
+    throw error
+  }
+  return next(e)
+}
+
+// Where Claude Code keeps this session's own record, as its hooks are told
+// (`transcript_path`): the World reads the session's past there. Without
+// this file the node says it does not know where that record is.
+async function transcript($, context, path) {
+  if (typeof path !== 'string' || path === '' || !context.dir) return
+  try {
+    await $.fs.write(context.dir + '/transcript.json', JSON.stringify({ path }))
+  } catch (error) {
+    // A session start must not fail for the World's sake.
+  }
+}
+
+// The machines and folders the user pointed a conversation the World opened
+// at, as the node keeps them in the session's directory: a block of the
+// context the first message carries, beside the instruction files, read
+// again whenever Claude Code reads that context again, as after compacting
+// the conversation. None where the node keeps none.
+const FOCUS_BLOCK = 'machinesAndFolders'
+
+async function focus($, context) {
+  try {
+    const text = await $.fs.read(context.dir + '/focus.md')
+    return text.trim() === '' ? null : text
+  } catch (error) {
+    return null
+  }
+}
+
+async function session($, registry, id, renew = false) {
+  let context = registry.sessions.get(id)
+  if (!context || (renew && context.closed)) {
+    context = conversation(id, registry.cleared)
+    // Session switches keep their order even within one clock tick or when
+    // the wall clock moves backwards. The node uses registration time to
+    // keep late reports from moving the resident's delivery address back.
+    for (const prior of registry.sessions.values()) {
+      if (prior.logicalTime > context.logicalTime) {
+        context.logicalTime = prior.logicalTime
+        context.sequence = prior.sequence
+      } else if (prior.logicalTime === context.logicalTime) {
+        context.sequence = Math.max(context.sequence, prior.sequence)
+      }
+    }
+    registry.cleared = null
+    registry.sessions.set(id, context)
+    context.ready = startSession($, context)
+  }
+  await context.ready
+  return context
+}
+
+async function route($, registry, name, e) {
+  const id = name === 'session.end' ? e.sessionId : await $.session.id()
+  const resultId = name === 'session.append' && e.agentId === undefined
+    ? e.message.content.find((block) => block.type === 'tool_result')?.tool_use_id : undefined
+  const context = (name === 'turn.complete' && registry.turns.get(e.turnId))
+    || (resultId !== undefined && registry.toolOwners.get(resultId)) || await session($, registry, id)
+  if (name === 'turn.start') registry.turns.set(e.turnId, context)
+  if (name === 'tool.call' && e.agentId === undefined) registry.toolOwners.set(e.tool_use_id, context)
+  return context
+}
+
+export function register(on) {
+  const registry = { sessions: new Map(), turns: new Map(), toolOwners: new Map(), cleared: null, worldTools: new Set(), provedCalls: new Set() }
+  // Every handler first steps aside once fastctx is being removed. Each keeps
+  // its literal on('…') call, the shape the official loader reads.
+  on('session.start', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await startControls($)
+    await worldTools($, registry)
+    await session($, registry, await $.session.id(), true)
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'session.start', e, next))
+  on('turn.start', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    return startTurn($, await route($, registry, 'turn.start', e), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'turn.start', e, next))
+  on('turn.complete', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    return completeTurn($, await route($, registry, 'turn.complete', e), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'turn.complete', e, next))
+  on('turn.step', async function* ($, e, next) {
+    if (await removed($)) {
+      const stream = next(e)
+      for await (const chunk of stream) yield chunk
+      return await stream.result
+    }
+    const context = registry.turns.get(e.turnId) || await session($, registry, await $.session.id())
+    await sessionPolicy($, context)
+    const input = await controlStep($, e)
+    const base = reports($, context)
+    const shown = e.agentId === undefined ? context.shown : agentPresentation(context, e.agentId)
+    const reported = e.agentId === undefined ? base : agentReports(base, e.agentId)
+    return yield* shown.step(reported, input, next)
+  }).catch(async function* ($, e, next) { return yield* streamWithoutWorld($, 'turn.step', e, next) })
+  on('tool.call', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    registry.provedCalls.delete(e.tool_use_id)
+    const context = await route($, registry, 'tool.call', e)
+    if (registry.worldTools.has(e.tool)) {
+      try {
+        await proveCall($, context, e.tool_use_id)
+        registry.provedCalls.add(e.tool_use_id)
+      } catch (error) {
+        return unidentifiedWorldCall(error)
+      }
+    }
+    const shown = e.agentId === undefined ? context.shown : agentPresentation(context, e.agentId)
+    const reported = e.agentId === undefined ? reports($, context) : agentReports(reports($, context), e.agentId)
+    const result = await shown.call(reported, e, (input) => controlCall($, input, next))
+    registry.provedCalls.delete(e.tool_use_id)
+    return result
+  }).catch(($, e, next) => continueToolWithoutWorld($, registry, e, next))
+  on('tool.check', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    return controlPermission($, e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'tool.check', e, next))
+  on('session.append', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    const context = await route($, registry, 'session.append', e)
+    const state = e.agentId === undefined ? await controlBegin($, sessions) : null
+    if (state !== null && state.checkpoints.full !== true) await controlCheckpoint($, state, null, true)
+    if (state !== null && e.door === 'prompt' && state.busy === false) {
+      state.promptCheckpoint = await controlCheckpoint($, state, null, true)
+      state.promptUuid = state.lastUuid
+    }
+    const shown = e.agentId === undefined ? context.shown : agentPresentation(context, e.agentId)
+    const reported = e.agentId === undefined ? reports($, context) : agentReports(reports($, context), e.agentId)
+    const result = await shown.append(reported, e, next)
+    if (e.agentId === undefined && e.door === 'prompt' && result.deny === undefined && !context.appending
+      && e.origin?.kind === 'plugin' && e.origin.name === $.plugin.name) entered(context)
+    if (state !== null && result.deny === undefined && ['user', 'assistant', 'attachment', 'system'].includes(result.message.type)) {
+      state.lastRawUuid = result.uuid
+      state.checkpoints.last_raw_uuid = result.uuid
+    }
+    if (state !== null && result.deny === undefined && ['user', 'assistant'].includes(result.message.type)) {
+      if (await trackCheckpoint($, state, result)) state.lastUuid = result.uuid
+      if (!state.busy && state.completedTurn !== undefined && e.door !== 'prompt') {
+        await controlCheckpoint($, state, state.completedTurn, false)
+      }
+    }
+    return result
+  }).catch(($, e, next) => continueWithoutWorld($, 'session.append', e, next))
+  on('session.compact', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    const context = await route($, registry, 'session.compact', e)
+    return context.shown.compact(reports($, context), e, (input) => controlCompaction($, input, next))
+  }).catch(($, e, next) => continueWithoutWorld($, 'session.compact', e, next))
+  on('prompt.submit', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    return alongPrompt($, await session($, registry, await $.session.id()), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'prompt.submit', e, next))
+  on('prompt.context', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    const result = await next(e)
+    const text = await focus($, await session($, registry, await $.session.id()))
+    if (text === null) return result
+    return { ...result, blocks: [...result.blocks.filter((block) => block.name !== FOCUS_BLOCK), { name: FOCUS_BLOCK, text }] }
+  }).catch(($, e, next) => continueWithoutWorld($, 'prompt.context', e, next))
+  on('prompt.section', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    if (!['env_info_simple', 'env_info_static'].includes(e.name)) return next(e)
+    const context = await session($, registry, await $.session.id())
+    return (await sessionPolicy($, context)).assisting ? { text: null } : next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'prompt.section', e, next))
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await controlModelSwitch($, e)
+    const context = await session($, registry, await $.session.id())
+    const reported = e.agent_id === undefined ? reports($, context) : agentReports(reports($, context), e.agent_id)
+    await reported.event('session', { happened: { event: 'changed', turn: null, change: {
+      kind: 'model_switch', from_model: e.from_model, to_model: e.to_model, source: e.source, requested_model: e.requested_model, raw: e } } })
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.PostModelSwitch', e, next))
+  on('classic.Elicitation', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await startControls($)
+    // Classic mod results cannot carry action/content. The official command
+    // hook under next publishes the answerable request with that contract.
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.Elicitation', e, next))
+  on('command.describe', async ($, e, next) => {
+    const result = await next(e)
+    if (await removed($)) return result
+    const id = await $.session.id()
+    if (!commandDescriptions.has(id)) commandDescriptions.set(id, new Map())
+    const descriptions = commandDescriptions.get(id)
+    if (!controlSame(descriptions.get(e.command), result)) {
+      descriptions.set(e.command, result)
+      const context = registry.sessions.get(id)
+      if (context?.observe !== undefined) context.observe({ event: 'changed', turn: null, change: { kind: 'commands_changed' } })
+    }
+    return result
+  }).catch(($, e, next) => continueWithoutWorld($, 'command.describe', e, next))
+  // Which call started which agent is known only as it starts: the agent's
+  // own events carry its id, its Agent call's answer comes when it ends.
+  // The agent has started once `next` answers: telling of it never fails
+  // the spawn, nor runs it again.
+  on('agent.spawn', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    const result = await next(e)
+    if (result.agentId === undefined) return result
+    try {
+      const context = await session($, registry, await $.session.id())
+      context.shown.spawned(result.agentId)
+      await event($, context, 'session', { happened: { event: 'changed', turn: null, change: { kind: 'agent_started', agent: {
+        id: result.agentId, call: e.tool_use_id || null, parent: e.parentAgentId ?? null, kind: e.subagentType || null,
+        name: e.name ?? null, task: e.description || null, prompt: e.prompt || null, model: result.model || null,
+        background: e.background === true, live: true } } } })
+    } catch (error) {
+      worldFailure($, 'agent.spawn', error)
+    }
+    return result
+  }).catch(($, e, next) => continueWithoutWorld($, 'agent.spawn', e, next))
+  on('classic.SubagentStart', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await observeAgents($, await session($, registry, await $.session.id()))
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.SubagentStart', e, next))
+  on('classic.SubagentStop', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await observeAgents($, await session($, registry, await $.session.id()))
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.SubagentStop', e, next))
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await observeTitle($, await session($, registry, await $.session.id()), e)
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.UserPromptSubmit', e, next))
+  on('session.measure', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    const context = await route($, registry, 'session.measure', e)
+    if (Array.isArray(e.changed) && e.changed.includes('rateLimits')) {
+      try {
+        await keepLimits($, context, e.rateLimits)
+      } catch (error) {
+        // The node then shows the last reading it has; the report goes on.
+      }
+    }
+    return context.shown.measure(reports($, context), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'session.measure', e, next))
+  on('classic.PostToolUse', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    return boundary($, await route($, registry, 'classic.PostToolUse', e), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.PostToolUse', e, next))
+  on('classic.PostToolUseFailure', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    return boundary($, await route($, registry, 'classic.PostToolUseFailure', e), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.PostToolUseFailure', e, next))
+  on('session.end', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    registry.cleared = e.reason === 'clear' ? e.sessionId : null
+    return endSession($, await route($, registry, 'session.end', e), e, next)
+  }).catch(($, e, next) => continueWithoutWorld($, 'session.end', e, next))
+  on('classic.SessionStart', async ($, e, next) => {
+    if (await removed($)) return next(e)
+    await startControls($)
+    await worldTools($, registry)
+    const context = await session($, registry, await $.session.id(), e.source === 'clear' || e.source === 'resume')
+    await transcript($, context, e.transcript_path)
+    await observeTitle($, context, e)
+    return next(e)
+  }).catch(($, e, next) => continueWithoutWorld($, 'classic.SessionStart', e, next))
+}
+
+// The account's limits as Claude Code read them from its own answers, kept
+// for the node with when they came: the host gives no time, and reads them
+// only while a session works. An empty reading is none and is not kept.
+// Nothing is shown in Claude Code's own interface: the World's interface
+// shows them (`world.md`, 不改官方程序自己的界面).
+async function keepLimits($, context, rateLimits) {
+  if (!Array.isArray(rateLimits) || !rateLimits.length || !context.dir) return
+  await $.fs.write(context.dir + '/limits.json', JSON.stringify({ at: new Date().toISOString(), rateLimits }))
+}
+
+// The file is whole before the call leaves the host, so the node reads it
+// whole. Its name spells each UTF-16 unit of the id in four hex digits.
+async function proveCall($, context, id) {
+  if (typeof id !== 'string' || id.length === 0) throw new Error('the call has no tool_use_id to identify it by')
+  let name = ''
+  for (let i = 0; i < id.length; i++) name += id.charCodeAt(i).toString(16).padStart(4, '0')
+  await $.fs.write(context.dir + '/calls/' + name + '.json', JSON.stringify({ tool_use_id: id, registration: context.registration }))
+}
+
+async function worldTools($, registry) {
+  registry.worldTools = new Set()
+  const connected = await $.mcp.connect('fastctx')
+  if (!connected.isConnected) return
+  // connect answers the server's name as /mcp lists it, which for a
+  // deduplicated server is the name it runs under; a tool carries the
+  // name's tool-name spelling, every character outside [A-Za-z0-9_-] made
+  // `_` (`claude.ai Gmail`, `claude_ai_Gmail` in the mod reference; 2.1.289
+  // lists `plugin:fastctx-world:fastctx` and `plugin_fastctx-world_fastctx`).
+  const spelled = connected.server.replace(/[^A-Za-z0-9_-]/g, '_')
+  const usage = await $.session.usage({ breakdown: 'summary' })
+  if (usage.context.breakdown === undefined) throw new Error('the host did not provide its MCP tool ownership map')
+  const owners = new Map()
+  for (const tool of usage.context.breakdown.mcpTools) {
+    if (owners.has(tool.name) && owners.get(tool.name) !== tool.serverName) owners.set(tool.name, null)
+    else if (!owners.has(tool.name)) owners.set(tool.name, tool.serverName)
+  }
+  registry.worldTools = new Set([...owners].filter(([, server]) => server === connected.server || server === spelled).map(([name]) => name))
+}

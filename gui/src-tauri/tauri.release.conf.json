@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/fastctx"
+    ],
+    "createUpdaterArtifacts": true,
+    "resources": {
+      "linux/fastctx-x86_64-unknown-linux-gnu.tar.gz": "linux/fastctx-x86_64-unknown-linux-gnu.tar.gz",
+      "linux/fastctx-aarch64-unknown-linux-gnu.tar.gz": "linux/fastctx-aarch64-unknown-linux-gnu.tar.gz"
+    }
+  }
+}

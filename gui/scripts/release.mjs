@@ -1,7 +1,9 @@
 // Builds World's installer for this computer's platform, carrying a checked release kernel: the one
 // `--kernel` names, as the release workflow builds and tests it in a job of its own, or one built
 // here. Nothing is signed for the updater here: the release's signing step signs each package bound
-// to its version. A macOS application is signed ad hoc, so it runs where its owner allows it.
+// to its version. A macOS application and the kernel it carries are signed with the identity
+// FASTCTX_MACOS_IDENTITY names, the release's fixed certificate, so the privacy a Mac's user grants
+// Fastctx holds from one version to the next (`world-upgrade.md`); without one, ad hoc.
 //   node scripts/release.mjs [--kernel PATH] [--target TRIPLE] [--out DIR]
 //   node scripts/release.mjs --prepare [--target TRIPLE]
 //   node scripts/release.mjs --prepared --kernel PATH [--target TRIPLE] [--out DIR]
@@ -20,6 +22,13 @@ import { buildKernel, toolchain } from "../../scripts/kernel.mjs";
 
 const gui = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
+// A flag this script does not know fails it, rather than a release built as it was not asked.
+const takesValue = ["--kernel", "--target", "--out"];
+const known = [...takesValue, "--prepare", "--prepared", "--kernel-signed"];
+for (let at = 0; at < args.length; at += 1) {
+  if (!known.includes(args[at])) throw new Error(`release.mjs does not take ${args[at]}`);
+  if (takesValue.includes(args[at])) at += 1;
+}
 const option = (name) => {
   const at = args.indexOf(name);
   return at === -1 ? undefined : args[at + 1];
@@ -48,11 +57,17 @@ const sidecar = join(binaries, `fastctx-${target}${exe}`);
 // added, over SSH is installed from.
 const release = JSON.parse(readFileSync(join(gui, "src-tauri", "tauri.release.conf.json"), "utf8"));
 const config = { bundle: { ...release.bundle, externalBin: ["binaries/fastctx"], createUpdaterArtifacts: false } };
+// With `--kernel-signed`, the kernel's official signature lies beside it, and is installed beside the
+// kernel the application carries: a Windows boot service takes a new release by it, with no
+// administrator (`world-upgrade.md`, 换版不要人确认).
+const signed = process.argv.includes("--kernel-signed");
+const signatureResource = `binaries/fastctx${exe}.sig`;
+if (signed) config.bundle.resources = { ...config.bundle.resources, [signatureResource]: `fastctx${exe}.sig` };
 const resources = Object.keys(config.bundle.resources ?? {}).map(resource => join(gui, "src-tauri", resource));
 if (platform === "win32") config.bundle.targets = ["nsis"];
 if (platform === "darwin") {
   config.bundle.targets = ["app", "dmg"];
-  config.bundle.macOS = { signingIdentity: "-" };
+  config.bundle.macOS = { signingIdentity: process.env.FASTCTX_MACOS_IDENTITY || "-" };
 }
 if (platform === "linux") {
   config.bundle.targets = ["deb", "appimage"];
@@ -108,6 +123,10 @@ if (guiMetadata.packages.find(pkg => pkg.name === "fastctx-gui").version !== ver
 }
 mkdirSync(binaries, { recursive: true });
 copyFileSync(kernel.binary, sidecar);
+if (signed) {
+  if (!existsSync(`${kernel.binary}.sig`)) throw new Error(`--kernel-signed names no signature beside ${kernel.binary}`);
+  copyFileSync(`${kernel.binary}.sig`, join(gui, "src-tauri", signatureResource));
+}
 for (const resource of resources) {
   if (!existsSync(resource) || standsIn(resource)) throw new Error(`the installer carries ${resource}, which is not there`);
 }

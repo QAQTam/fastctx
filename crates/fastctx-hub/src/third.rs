@@ -133,7 +133,7 @@ pub fn migrate(from: &Path, to: &Path, new: Migrated) -> anyhow::Result<Report> 
         });
         if machine { report.machines.push(name) } else { report.devices.push(name) }
     }
-    report.letters = count_files(&from.join("outbox"))?;
+    report.letters = count_files(&from.join("outbox"))? + count_files(&from.join("outboxes"))?;
     let hub = HubFile {
         id,
         name: new.name,
@@ -142,6 +142,7 @@ pub fn migrate(from: &Path, to: &Path, new: Migrated) -> anyhow::Result<Report> 
         self_registration: false,
         dissolved: None,
         updates: Default::default(),
+        due: Vec::new(),
     };
     Store::create(to, &hub, &certificate, &secrets.to_bytes(), &book)?;
     Ok(report)

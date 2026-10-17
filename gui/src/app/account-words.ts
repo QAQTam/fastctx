@@ -984,7 +984,17 @@ export const zhMachines: MachinesWords = {
       case "direct":
         return a.at.length ? `允许直接连到 ${a.machine}` : `不再允许直接连到 ${a.machine}`;
       case "remove":
-        return `移除 ${a.name}`;
+        return a.then === "everything"
+          ? `移除 ${a.name} 并彻底卸载`
+          : a.then === "uninstall"
+            ? `移除 ${a.name} 并卸载，保留数据`
+            : `移除 ${a.name}`;
+      case "uninstall_left":
+        return `${a.name} 没卸完：${a.left}`;
+      case "update_due":
+        return a.version ? `${a.machine} 上线就更新到 ${a.version}` : `撤销 ${a.machine} 上线就更新`;
+      case "updated":
+        return `${a.by} 把 ${a.machine} 从 ${a.from} 更新到 ${a.to}`;
       case "rename":
         return `把 ${a.machine} 改名为 ${a.to}`;
       case "group":
@@ -1015,7 +1025,9 @@ export const zhMachines: MachinesWords = {
       case "dissolve":
         return `解散网络 ${a.name}`;
       case "updates":
-        return `网络的更新改为${a.channel === "beta" ? "测试版" : "正式版"}${a.minimum ? `，至少 ${a.minimum}` : ""}`;
+        return a.managed_auto === undefined
+          ? `网络的更新改为${a.channel === "beta" ? "测试版" : "正式版"}${a.minimum ? `，至少 ${a.minimum}` : ""}`
+          : `网络的更新改为${a.minimum ? `至少 ${a.minimum}` : "不要求最低版本"}，受管机器${a.managed_auto ? "自动更新" : "不自动更新"}`;
       default:
         return null;
     }
@@ -1277,7 +1289,17 @@ export const enMachines: MachinesWords = {
       case "direct":
         return a.at.length ? `Allowed direct connections to ${a.machine}` : `No more direct connections to ${a.machine}`;
       case "remove":
-        return `Removed ${a.name}`;
+        return a.then === "everything"
+          ? `Removed ${a.name} and everything Fastctx wrote there`
+          : a.then === "uninstall"
+            ? `Removed ${a.name} and uninstalled Fastctx, keeping its data`
+            : `Removed ${a.name}`;
+      case "uninstall_left":
+        return `${a.name} did not finish uninstalling: ${a.left}`;
+      case "update_due":
+        return a.version ? `${a.machine} updates to ${a.version} once it is back` : `${a.machine} no longer updates once it is back`;
+      case "updated":
+        return `${a.by} updated ${a.machine} from ${a.from} to ${a.to}`;
       case "rename":
         return `Renamed ${a.machine} to ${a.to}`;
       case "group":
@@ -1308,7 +1330,9 @@ export const enMachines: MachinesWords = {
       case "dissolve":
         return `Dissolved the network ${a.name}`;
       case "updates":
-        return `Network updates set to ${a.channel === "beta" ? "beta" : "stable"}${a.minimum ? `, at least ${a.minimum}` : ""}`;
+        return a.managed_auto === undefined
+          ? `Network updates set to ${a.channel === "beta" ? "beta" : "stable"}${a.minimum ? `, at least ${a.minimum}` : ""}`
+          : `Network updates set to ${a.minimum ? `at least ${a.minimum}` : "no minimum"}; managed machines ${a.managed_auto ? "update by themselves" : "do not update by themselves"}`;
       default:
         return null;
     }
@@ -1331,6 +1355,8 @@ export interface AccessWords {
   /** The assist sheet's own: whom it assists, until when, changing it and
    *  ending it. */
   assistWho: string;
+  /** The accounts listed under the name as it is typed. */
+  assistNames: string;
   assistUntil: string;
   endAssist: string;
   changeUntil: string;
@@ -1373,6 +1399,7 @@ export const zhAccess: AccessWords = {
   assisting: "正在协助",
   assistGo: "协助",
   assistWho: "协助谁",
+  assistNames: "对得上的账号",
   assistUntil: "截止",
   endAssist: "结束",
   changeUntil: "改截止时间",
@@ -1414,6 +1441,7 @@ export const enAccess: AccessWords = {
   assisting: "Assisting",
   assistGo: "Assist",
   assistWho: "Assist",
+  assistNames: "Matching accounts",
   assistUntil: "Ends",
   endAssist: "End",
   changeUntil: "Change when it ends",
@@ -1493,13 +1521,16 @@ export interface TokenWords {
    *  where a line may wrap, between phrases, never inside one. */
   steps: [string, string, string];
   /** How each way in is used, in three steps each, under its drawings. */
-  joinSteps: Record<"computer" | "phone" | "line", [string, string, string]>;
+  joinSteps: Record<"computer" | "phone" | "line" | "windows", [string, string, string]>;
   line: string;
   /** A Linux host as a managed machine: the switch, what it means behind a
    *  pointer's rest, and why it cannot be had. */
   managed: string;
   managedWhat: string;
   managedOld: string;
+  /** How a managed machine comes in, and what its Windows line is run as. */
+  managedWays: { code: string; windows: string };
+  windowsCommand: string;
 }
 
 /** How many devices a code lets in, as its line under it says. */
@@ -1510,6 +1541,8 @@ export const zhToken: TokenWords = {
   title: "添加设备",
   kinds: { computer: "电脑", phone: "手机", server: "Linux 主机", managed: "受管机器" },
   ways: { ssh: "经 SSH", line: "一行命令" },
+  managedWays: { code: "入网码", windows: "Windows 一行命令" },
+  windowsCommand: "以管理员身份运行",
   added: (machine) => `${machine} 已加入`,
   hub: "中枢服务器地址",
   account: "账号",
@@ -1547,6 +1580,7 @@ export const zhToken: TokenWords = {
     computer: ["在那台电脑上\u200b装好 Fastctx，\u200b打开", "点「加入网络」", "填上面的\u200b地址和账号，\u200b输入密码"],
     phone: ["在手机上\u200b装好 Fastctx，\u200b打开", "点「加入网络」", "扫\u200b这里生成的码"],
     line: ["生成\u200b下面这一行", "在服务器的终端里\u200b粘贴运行", "它装好 Fastctx，\u200b加入网络"],
+    windows: ["生成\u200b下面这一行", "以管理员身份\u200b打开命令提示符，\u200b粘贴运行", "它装好 Fastctx，\u200b成为受管机器"],
   },
   line: "或在那个账户的终端里运行",
   managed: "受管机器",
@@ -1558,6 +1592,8 @@ export const enToken: TokenWords = {
   title: "Add a device",
   kinds: { computer: "Computer", phone: "Phone", server: "Linux host", managed: "Managed" },
   ways: { ssh: "Over SSH", line: "One command" },
+  managedWays: { code: "Code", windows: "Windows command" },
+  windowsCommand: "Run as administrator",
   added: (machine) => `${machine} joined`,
   hub: "Hub address",
   account: "Account",
@@ -1595,6 +1631,7 @@ export const enToken: TokenWords = {
     computer: ["Install Fastctx on that computer and open it", "Choose Join a network", "Enter the address and account above, and the password"],
     phone: ["Install Fastctx on the phone and open it", "Choose Join a network", "Scan the code made here"],
     line: ["Make the line below", "Paste it in the server's terminal and run it", "It installs Fastctx and joins"],
+    windows: ["Make the line below", "Paste it in a Command Prompt run as administrator", "It installs Fastctx as a managed machine"],
   },
   line: "Or run in that account's terminal",
   managed: "Managed machine",

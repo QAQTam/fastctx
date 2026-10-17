@@ -81,7 +81,6 @@ pub async fn upload(
     composer: Option<fastctx_types::composer::UploadScope>,
     mut source: FrameReader,
 ) -> Result<Uploaded, Failure> {
-    let _operation = node.data_operations.read().await;
     validate_file(&file)?;
     let machine = match machine {
         Some(machine) => machine,
@@ -93,6 +92,7 @@ pub async fn upload(
         None => node.machine(),
     };
     if node.is_me(&machine) {
+        let _place = using_target(node, &target).await;
         let (mut arriving, mut guard) =
             match arrival(node, &node.machine(), target, file, composer.as_ref(), true).await? {
                 Arrival::Ended(uploaded) => return Ok(uploaded),
@@ -107,7 +107,7 @@ pub async fn upload(
                     .map_err(broke)?
                     .ok_or_else(|| broke("the uploader disconnected before ending the file"))?;
                 if piece.is_empty() {
-                    return finish(arriving, guard.as_mut()).await;
+                    return finish(arriving, guard.as_mut(), None).await;
                 }
                 arriving.write(held.past(&piece))?;
             }
@@ -225,8 +225,22 @@ async fn arrival(
     }
 }
 
-async fn finish(arriving: Arriving, guard: Option<&mut crate::composer::uploads::Guard>) -> Result<Uploaded, Failure> {
-    let attachment = arriving.finish()?;
+async fn finish(
+    arriving: Arriving,
+    guard: Option<&mut crate::composer::uploads::Guard>,
+    work: Option<fastctx_net::data::ReceiptWork>,
+) -> Result<Uploaded, Failure> {
+    let attachment = if let Some(writing) = work.as_ref().map(|work| work.begin()) {
+        tokio::task::spawn_blocking(move || {
+            let _settling = writing;
+            arriving.finish()
+        })
+        .await
+        .map_err(failure)??
+    } else {
+        arriving.finish()?
+    };
+    let _settling = work.as_ref().map(|work| work.begin());
     let composer = match guard {
         Some(guard) => Some(guard.finish(&attachment).await),
         None => None,
@@ -304,7 +318,7 @@ pub async fn receive(
     resumes: bool,
     mut stream: Stream,
 ) -> Result<Uploaded, Failure> {
-    let _operation = node.data_operations.read().await;
+    let _place = using_target(node, &target).await;
     validate_file(&file)?;
     let size = file.size;
     let (mut arriving, mut guard) = match arrival(node, from, target, file, composer.as_ref(), resumes).await? {
@@ -315,16 +329,17 @@ pub async fn receive(
         if resumes {
             stream.say(&UploadStart { from: arriving.received }).await.map_err(broke)?;
         }
-        let mut refused = None;
-        let taken = stream
-            .take(size - arriving.received, |piece| {
+        let ((back, refused), taken) = stream
+            .take_writing(size - arriving.received, (arriving, None), |(arriving, refused), piece| {
                 arriving.write(piece).map_err(|error| {
                     let message = error.message.clone();
-                    refused = Some(error);
+                    *refused = Some(error);
                     message
                 })
             })
-            .await;
+            .await
+            .map_err(failure)?;
+        arriving = back;
         if let Err(why) = taken {
             return Err(refused.unwrap_or_else(|| broke(why)));
         }
@@ -332,7 +347,7 @@ pub async fn receive(
         if end != "uploaded" {
             return Err(failure("the uploader did not end the file"));
         }
-        let uploaded = finish(arriving, guard.as_mut()).await?;
+        let uploaded = finish(arriving, guard.as_mut(), Some(stream.receipt_work())).await?;
         stream.done().await.map_err(failure)?;
         Ok(uploaded)
     }
@@ -353,6 +368,17 @@ fn validate_file(file: &UploadFile) -> Result<(), Failure> {
         return Err(failure("sha256 must be 64 lowercase hexadecimal digits"));
     }
     Ok(())
+}
+
+/// Shares the place an upload for `target` lands in: the conversation's, or
+/// the draft's; a new draft's is its own, which nothing else knows yet.
+async fn using_target(node: &Arc<Node>, target: &UploadTarget) -> Option<crate::data::places::Using> {
+    match target {
+        UploadTarget::Resident { resident } | UploadTarget::Draft { resident, .. } => {
+            Some(node.places.using(resident.as_str()).await)
+        }
+        UploadTarget::New { .. } => None,
+    }
 }
 
 async fn prepare(node: &Arc<Node>, target: UploadTarget, file: UploadFile) -> Result<Arriving, Failure> {
@@ -844,9 +870,12 @@ pub async fn take_placed(
     attachment: Attachment,
     mut stream: Stream,
 ) -> Result<Attachment, Failure> {
-    let _operation = node.data_operations.read().await;
     validate_file(&attachment.file)?;
     let origin = Address { machine: from.clone(), resident: resident.clone() };
+    let _place = match crate::data::places::of_owner(node, &origin) {
+        Some(place) => Some(node.places.using(&place).await),
+        None => None,
+    };
     if attachment.owner != origin {
         return Err(Failure::not_run(format!("{from} places files only of its own sessions")));
     }
@@ -863,13 +892,23 @@ pub async fn take_placed(
     }
     stream.say(&Need { bytes: true }).await.map_err(failure)?;
     let size = wanted.file.size;
-    let mut arriving = arriving_in(&directory, wanted, false)?;
-    stream.take(size, |piece| arriving.write(piece).map_err(|error| error.message)).await.map_err(Failure::new)?;
+    let arriving = arriving_in(&directory, wanted, false)?;
+    let (arriving, taken) = stream
+        .take_writing(size, arriving, |arriving, piece| arriving.write(piece).map_err(|error| error.message))
+        .await
+        .map_err(failure)?;
+    taken.map_err(failure)?;
     let end: String = stream.hear().await.map_err(failure)?;
     if end != "placed" {
         return Err(failure("the sender did not end the file"));
     }
-    let placed = arriving.finish()?;
+    let settling = stream.settling();
+    let placed = tokio::task::spawn_blocking(move || {
+        let _settling = settling;
+        arriving.finish()
+    })
+    .await
+    .map_err(failure)??;
     stream.done().await.map_err(failure)?;
     Ok(placed)
 }

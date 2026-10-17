@@ -14,7 +14,9 @@ use fastctx_platform::{FileLock, is_alive, user_home, world_process_environment}
 use fastctx_types::ipc::Failure;
 use fastctx_types::layout::WorldDir;
 use fastctx_types::residents::Action;
-use fastctx_types::run::{Answered, Ended, EndedHow, JobRecord, RunReply, RunRequest, RunState};
+use fastctx_types::run::{
+    Answered, Ended, EndedHow, JobRecord, OutputPiece, OutputWindow, RunReply, RunRequest, RunState,
+};
 use fastctx_types::{JobId, TownName};
 use jiff::Timestamp;
 use tokio::sync::{broadcast, watch};
@@ -82,7 +84,10 @@ impl Jobs {
         registration: Option<crate::on::Registration>,
         account: Option<fastctx_types::access::HubAccount>,
     ) -> Result<run::Launched, Failure> {
-        let _operation = node.data_operations.read().await;
+        let _place = match owner.resident().and_then(|address| crate::data::places::of_owner(node, address)) {
+            Some(place) => Some(node.places.using(&place).await),
+            None => None,
+        };
         if let Some(address) = owner.resident()
             && node.is_me(&address.machine)
         {
@@ -252,6 +257,14 @@ impl Jobs {
                 .map_err(|error| failure("reading completion receipts", error))?;
         }
         let consumed = (!consumed.is_empty()).then(|| Box::new(consumed));
+        // What it ran was refused something: on a Mac, the node looks
+        // whether macOS keeps its user's private places from it, which the
+        // command's own words cannot tell.
+        let privacy = if cfg!(target_os = "macos") && refused_something(&output) {
+            tokio::task::spawn_blocking(fastctx_platform::privacy::refused_now).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut reply = RunReply {
             run: None,
             machine: machine.clone(),
@@ -261,6 +274,7 @@ impl Jobs {
             visited,
             answered,
             consumed,
+            privacy,
         };
         if record.call_id.is_some() {
             let mut facts = crate::run_facts::assemble(&reply, &launched.record)
@@ -416,6 +430,17 @@ async fn came(words: &mut Option<watch::Receiver<u64>>) {
 
 fn seconds(span: Duration) -> u32 {
     u32::try_from(span.as_secs()).unwrap_or(u32::MAX)
+}
+
+/// Whether a command's output says something was refused it, in the words
+/// macOS gives what its privacy protection refuses.
+fn refused_something(output: &OutputWindow) -> bool {
+    output.pieces.iter().any(|piece| match piece {
+        OutputPiece::Text { text, .. } | OutputPiece::PartOfLine { text, .. } => {
+            text.contains("Operation not permitted")
+        }
+        _ => false,
+    })
 }
 
 /// The action a `run` was, as its resident's `actions` record it.
@@ -642,20 +667,22 @@ pub struct Reconciled {
     pub problems: Vec<(PathBuf, std::io::Error)>,
 }
 
-/// Marks every job whose supervisor is gone, as after the machine
-/// restarted.
+/// Marks jobs whose supervisor is gone, excluding this node's launches:
+/// their records can precede the supervisor taking its lock.
 pub fn reconcile(world: &WorldDir) -> std::io::Result<Reconciled> {
     let mut found = Reconciled::default();
+    let starter = fastctx_platform::current_identity()?;
     for residents in world.job_parents()? {
         for resident in read_dir(&residents)? {
             for entry in read_dir(&resident.join("jobs"))? {
                 if entry.extension().is_none_or(|extension| extension != "json") {
                     continue;
                 }
-                let checked = record::read(&entry).and_then(|job| match job.end {
-                    Some(_) => Ok(false),
-                    None => interrupt_now(&entry, "its supervisor was gone when the node started")
-                        .map(|job| job.end.is_some()),
+                let checked = record::read(&entry).and_then(|job| {
+                    if job.end.is_some() || job.program.as_ref().is_some_and(|program| program.starter == starter) {
+                        return Ok(false);
+                    }
+                    interrupt_now(&entry, "its supervisor was gone when the node started").map(|job| job.end.is_some())
                 });
                 match checked {
                     Ok(true) => found.interrupted.push(entry),

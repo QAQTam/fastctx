@@ -50,6 +50,14 @@ pub fn keep(directory: &ConversationDir, pending: &Pending) -> io::Result<bool> 
     }
 }
 
+/// Whether durable business custody already exists under this delivery id.
+pub(crate) fn knows(directory: &ConversationDir, id: &NoticeId) -> io::Result<bool> {
+    let _transaction = crate::resident_storage::lock();
+    Ok(delivered_here(directory, id)?
+        || path(directory, id).try_exists()?
+        || directory.uncertain().join(format!("{id}.json")).try_exists()?)
+}
+
 /// Retains words whose host acceptance cannot be established.
 pub fn retain_uncertain(directory: &ConversationDir, pending: &Pending) -> io::Result<()> {
     let _transaction = crate::resident_storage::lock();
@@ -64,6 +72,32 @@ pub fn retain_uncertain(directory: &ConversationDir, pending: &Pending) -> io::R
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     }
+}
+
+/// Words judged not known to have gone in that their host now says it took:
+/// they are kept again, on their way, for the turn that took them to settle
+/// as any words do (`specs/world-concurrency.md`, 「不知是否送到」是暂时的判断).
+pub fn reclaim(directory: &ConversationDir, ids: &[String]) -> io::Result<()> {
+    let _transaction = crate::resident_storage::lock();
+    for id in ids {
+        let Ok(id) = NoticeId::try_from(id.as_str()) else { continue };
+        let uncertain = directory.uncertain().join(format!("{id}.json"));
+        let bytes = match std::fs::read(&uncertain) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if delivered_here(directory, &id)? {
+            continue;
+        }
+        ensure_private_dir(&directory.inbox())?;
+        let kept = path(directory, &id);
+        if !kept.exists() {
+            publish(&kept, &bytes, Permissions::Private)?;
+        }
+        std::fs::remove_file(&uncertain)?;
+    }
+    Ok(())
 }
 
 /// Returns a definitely refused composer input to its own queue, before any host accepted it.
@@ -81,6 +115,10 @@ pub fn set_state(directory: &ConversationDir, id: &NoticeId, state: PendingState
     let _transaction = crate::resident_storage::lock();
     let Some(mut pending) = read_here(directory, id)? else { return Ok(()) };
     pending.state = state;
+    // Which host activation has them is told by when they went to it.
+    if matches!(state, PendingState::Handed | PendingState::Waking) {
+        pending.since = Some(jiff::Timestamp::now());
+    }
     publish(&path(directory, id), &json(&pending)?, Permissions::Private)
 }
 
@@ -290,7 +328,7 @@ fn parse_pending(directory: &ConversationDir, path: &Path, bytes: &[u8]) -> io::
     } else {
         PendingState::Waiting
     };
-    let pending = Pending { delivery, readers, state, working, session: None };
+    let pending = Pending { delivery, readers, state, working, session: None, since: None };
     publish(&self::path(directory, &pending.delivery.id), &json(&pending)?, Permissions::Private)?;
     Ok(pending)
 }

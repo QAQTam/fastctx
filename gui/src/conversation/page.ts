@@ -820,14 +820,16 @@ export class ConversationPage {
     this.update();
   }
 
-  /** Asks the agent to stop: the button says it is stopping until the turn
-   *  ends. A World that says no turn runs is believed: what still looked
-   *  under way here had ended. */
+  /** Asks the agent to stop: what runs shows stopped at once, and the
+   *  button says it is stopping until the turn ends. A World that says no
+   *  turn runs is believed: what still looked under way here had ended. A
+   *  stop that did not get there shows it going on again, and says why. */
   private stop(): void {
     const asked = this.options.stop();
     if (!asked) return;
     this.stopping = true;
-    this.drawAction();
+    this.options.conversation.halt();
+    this.update();
     asked.then(
       (stopped) => {
         if (stopped) return;
@@ -837,9 +839,10 @@ export class ConversationPage {
       },
       (error: unknown) => {
         this.stopping = false;
+        this.options.conversation.unhalt();
         const why = error instanceof Error ? error.message : String(error);
         this.say(this.options.words.turnNotStopped(why), why, true);
-        this.drawAction();
+        this.update();
       },
     );
   }
@@ -914,6 +917,9 @@ export class ConversationPage {
           return;
         }
         const landed = updated.landed;
+        // The node has them: what they wait on is for its telling of now
+        // to say (`Fold.now`).
+        if (landed) conversation.named(key, null);
         if (!landed) conversation.unsend(key);
         else if (landed.kind === "waiting" || landed.kind === "sent" || landed.kind === "uncertain") {
           conversation.sent(key, { state: "landed", how: landed.kind, machine: this.options.someone.machine, why: "why" in landed ? landed.why : null });
@@ -1860,6 +1866,16 @@ export class ConversationPage {
     this.drawState();
   }
 
+  /** Its machine refused this account: what is shown stays, and the bar
+   *  says so; on hover, the machine's words. */
+  refused(why: string): void {
+    this.view.unfollowed();
+    this.gone = this.options.words.watchRefused;
+    this.goneWhy = why;
+    this.interrupted = false;
+    this.drawState();
+  }
+
   /** The live stream broke and is being read again: what is shown stays,
    *  and the bar says it is reconnecting; on hover, why and for how long. */
   broken(why: string | null, since: Date): void {
@@ -1921,7 +1937,9 @@ export class ConversationPage {
         : waiting
           ? words.waitingForYou
           : working
-            ? words.working
+            ? conversation.halting()
+              ? words.stopping
+              : words.working
             : words.idle);
     // A screen reader hears the conversation change state, once each time:
     // its words as they stream would be too many to hear.

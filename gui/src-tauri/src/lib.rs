@@ -233,12 +233,25 @@ enum Piece {
         at: usize,
         event: Box<serde_json::value::RawValue>,
     },
+    /// Whether the conversation works now, and on which turn, as its
+    /// machine holds it; told after every event before it. A machine too
+    /// old to tell this never sends it.
+    Now {
+        busy: bool,
+        turn: Option<String>,
+        kept: Vec<fastctx_types::session::KeptWords>,
+    },
     /// The watch is over: the node ended it, or the connection broke.
     Ended {
         error: Option<String>,
     },
     /// The conversation was deleted: nothing more of it comes.
     Deleted {
+        error: String,
+    },
+    /// Its machine refused this account: watching again changes nothing
+    /// until the account may see it.
+    Refused {
         error: String,
     },
 }
@@ -250,35 +263,54 @@ impl Piece {
 
     /// How a watch that failed for `error` is over.
     fn failed(error: &fastctx_client::Error) -> Self {
-        match error.is_deleted() {
-            true => Piece::Deleted { error: error.to_string() },
-            false => Piece::Ended { error: Some(error.to_string()) },
+        if error.is_deleted() {
+            Piece::Deleted { error: error.to_string() }
+        } else if error.is_refused() {
+            Piece::Refused { error: error.to_string() }
+        } else {
+            Piece::Ended { error: Some(error.to_string()) }
         }
     }
 
     /// Whether nothing comes after it.
     fn last(&self) -> bool {
-        matches!(self, Piece::Ended { .. } | Piece::Deleted { .. })
+        matches!(self, Piece::Ended { .. } | Piece::Deleted { .. } | Piece::Refused { .. })
     }
 }
 
 /// Why a conversation could not be watched: `deleted` when it was deleted,
-/// so the page asks no more.
+/// `refused` when its machine refused this account, so the page asks no
+/// more.
 #[derive(Serialize)]
 pub(crate) struct NotWatched {
     message: String,
     deleted: bool,
+    refused: bool,
 }
 
 impl From<fastctx_client::Error> for NotWatched {
     fn from(error: fastctx_client::Error) -> Self {
-        Self { deleted: error.is_deleted(), message: error.to_string() }
+        Self { deleted: error.is_deleted(), refused: error.is_refused(), message: error.to_string() }
+    }
+}
+
+impl NotWatched {
+    /// How a watch that could not be opened again is over.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    fn piece(self) -> Piece {
+        if self.deleted {
+            Piece::Deleted { error: self.message }
+        } else if self.refused {
+            Piece::Refused { error: self.message }
+        } else {
+            Piece::Ended { error: Some(self.message) }
+        }
     }
 }
 
 impl From<String> for NotWatched {
     fn from(message: String) -> Self {
-        Self { message, deleted: false }
+        Self { message, deleted: false, refused: false }
     }
 }
 
@@ -298,6 +330,9 @@ struct Watch {
 struct Spoken {
     to: Address,
     landed: Landed,
+    /// The words' id where they went, to know them among what that machine
+    /// keeps (`Piece::Now`).
+    delivery: Option<fastctx_types::NoticeId>,
 }
 
 /// Why words were not said: `again` when no answer came, so the page says
@@ -414,7 +449,7 @@ async fn talk(
         )
         .await
         .map_err(|error| NotSaid { message: error.to_string(), again: World::unanswered(&error) })?;
-    Ok(Spoken { to: said.to, landed: said.landed })
+    Ok(Spoken { to: said.to, landed: said.landed, delivery: said.delivery })
 }
 
 /// Carries a file on this computer to a machine, for words to an agent
@@ -535,7 +570,7 @@ async fn open(
         .open_with_attachments(agent, town, machine(machine_name)?, text, options, attachments, choices)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(Spoken { to: said.to, landed: said.landed })
+    Ok(Spoken { to: said.to, landed: said.landed, delivery: said.delivery })
 }
 
 /// What happened in the World after a moment, as each machine's records
@@ -594,13 +629,40 @@ async fn find_files(
 
 /// The folders in a folder of `machine_name` (this node when absent), for
 /// pointing a conversation at some; with no `path`, where a choice starts.
+/// A failure keeps its code: a folder macOS keeps private is said so.
 #[fastctx_gui_command::command]
 async fn folders(
     shell: tauri::State<'_, Shell>,
     machine_name: Option<String>,
     path: Option<String>,
-) -> Result<fastctx_types::focus::Folders, String> {
-    shell.world().folders(machine(machine_name)?, path).await.map_err(|error| error.to_string())
+) -> Result<fastctx_types::focus::Folders, fastctx_types::ipc::Failure> {
+    let machine = machine(machine_name).map_err(fastctx_types::ipc::Failure::new)?;
+    shell.world().folders(machine, path).await.map_err(|error| match error {
+        fastctx_client::world::Error::Call(fastctx_client::CallError::Failed(failure)) => failure,
+        other => fastctx_types::ipc::Failure::new(other.to_string()),
+    })
+}
+
+/// Where a Mac's user lets Fastctx into what macOS keeps private: System
+/// Settings at Full Disk Access, and the World program shown in the Finder
+/// beside it, to be put on that list (`world-gui.md`, 设置).
+#[fastctx_gui_command::command]
+async fn allow_privacy(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_opener::OpenerExt as _;
+        let program = fastctx_platform::fastctx_root().map_err(|error| error.to_string())?.join("bin").join("fastctx");
+        std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()
+            .map_err(|error| error.to_string())?;
+        app.opener().reveal_item_in_dir(program).map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("only macOS keeps folders private from a program this way".to_string())
+    }
 }
 
 /// How `machine_name` (this computer when absent) is doing, for its details
@@ -1089,7 +1151,9 @@ pub fn run() {
             updates::update_look,
             updates::update_set,
             updates::update_fetch,
+            updates::update_choose,
             updates::update_machine,
+            updates::machine_updates,
             updates::update_install,
             #[cfg(desktop)]
             removal::removal_plan,
@@ -1217,6 +1281,7 @@ pub fn run() {
             save_as,
             pick_folder,
             reveal,
+            allow_privacy,
             read_binary,
             control,
             offers,

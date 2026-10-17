@@ -9,6 +9,16 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub fn run_outside(request: &Request) -> anyhow::Result<()> {
+    run_from_copy(request, None)
+}
+
+/// As `run_outside`, handing each line of the worker's progress
+/// (`fastctx_types::uninstall::Event`) to `line` instead of showing it.
+pub(crate) fn run_outside_reading(request: &Request, line: &mut dyn FnMut(&str)) -> anyhow::Result<()> {
+    run_from_copy(request, Some(line))
+}
+
+fn run_from_copy(request: &Request, line: Option<&mut dyn FnMut(&str)>) -> anyhow::Result<()> {
     // Nothing is copied or started for a removal a managed machine refuses
     // (`crate::execute::run`).
     if let Some(managed) = &request.plan.managed
@@ -16,7 +26,8 @@ pub fn run_outside(request: &Request) -> anyhow::Result<()> {
     {
         anyhow::bail!("{}", managed.refusal());
     }
-    let temporary = tempfile::Builder::new().prefix("fastctx-uninstall-").tempdir()?;
+    let temporary =
+        tempfile::Builder::new().prefix("fastctx-uninstall-").tempdir_in(scratch_for(&request.installation.root))?;
     fastctx_platform::ensure_private_dir(temporary.path())?;
     let original = std::env::current_exe()?;
     let program = temporary.path().join(if cfg!(windows) { "fastctx.exe" } else { "fastctx" });
@@ -32,7 +43,7 @@ pub fn run_outside(request: &Request) -> anyhow::Result<()> {
         .args(["uninstall", "worker", "--request"])
         .arg(&input)
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
+        .stdout(if line.is_some() { Stdio::piped() } else { Stdio::inherit() })
         .stderr(Stdio::inherit());
     #[cfg(windows)]
     {
@@ -47,6 +58,12 @@ pub fn run_outside(request: &Request) -> anyhow::Result<()> {
         let caller = fastctx_platform::current_identity()?;
         schedule_cleanup(temporary.path(), &[caller, worker])?;
     }
+    if let (Some(line), Some(out)) = (line, child.stdout.take()) {
+        use std::io::BufRead as _;
+        for read in std::io::BufReader::new(out).lines() {
+            line(&read?);
+        }
+    }
     let status = child.wait()?;
     #[cfg(windows)]
     {
@@ -56,6 +73,29 @@ pub fn run_outside(request: &Request) -> anyhow::Result<()> {
     temporary.close()?;
     anyhow::ensure!(status.success(), "the uninstall worker exited {status}");
     Ok(())
+}
+
+/// Where the removal's own copy runs from: the system's temporary directory,
+/// or beside the World where that is on another volume. On Windows the
+/// invoking image keeps a second name there, and a name does not cross
+/// volumes.
+fn scratch_for(root: &Path) -> std::path::PathBuf {
+    let temporary = std::env::temp_dir();
+    #[cfg(windows)]
+    {
+        let volume = |path: &Path| match path.components().next() {
+            Some(std::path::Component::Prefix(prefix)) => Some(prefix.as_os_str().to_ascii_uppercase()),
+            _ => None,
+        };
+        if volume(&temporary) != volume(root)
+            && let Some(beside) = root.parent()
+        {
+            return beside.to_path_buf();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = root;
+    temporary
 }
 
 /// Starts only an OS-provided waiting process; it never runs from the files

@@ -178,7 +178,9 @@ pub(crate) async fn here(node: &Arc<Node>, after: Option<Timestamp>) -> Result<M
             )
             .then((b.received + b.sent).cmp(&(a.received + a.sent)))
     });
-    let fresh = |when: Timestamp| after.is_none_or(|after| when > after);
+    // What came after the reading before; all of it again when that reading
+    // is later than now, this machine's clock having gone back since.
+    let fresh = |when: Timestamp| after.is_none_or(|after| when > after || after > at);
     let lines = node
         .links()
         .iter()
@@ -232,6 +234,19 @@ pub(crate) async fn here(node: &Arc<Node>, after: Option<Timestamp>) -> Result<M
             version: env!("CARGO_PKG_VERSION").to_string(),
             started: node.started,
             service: node.lifetime.supervised,
+            stuck: node
+                .stuck
+                .now()
+                .into_iter()
+                .map(|stuck| fastctx_types::stats::StuckWork {
+                    doing: stuck.doing,
+                    what: stuck.what,
+                    seconds: stuck.since.as_secs(),
+                })
+                .collect(),
+            refused: fastctx_platform::privacy::last().and_then(|(path, at)| {
+                Some(fastctx_types::stats::Refused { path, at: jiff::Timestamp::try_from(at).ok()? })
+            }),
         },
     })
 }
@@ -260,7 +275,7 @@ async fn gpus() -> Vec<Gpu> {
             const NO_WINDOW: u32 = 0x0800_0000;
             command.creation_flags(NO_WINDOW);
         }
-        command.output()
+        fastctx_platform::bounded::output(command, "nvidia-smi", std::time::Duration::from_secs(10))
     })
     .await;
     let gpus = match read {

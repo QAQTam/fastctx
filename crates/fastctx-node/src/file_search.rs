@@ -1,7 +1,10 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+mod sessions;
 
-use fastctx_file_search::Search;
+use std::sync::Arc;
+
+pub(crate) use sessions::Searches;
+use sessions::Session;
+
 use fastctx_types::MachineName;
 use fastctx_types::access::{Acting, Purpose};
 use fastctx_types::file_search::{FileSearchReply, FileSearchRequest, FileSearchResult, FileSearchScope};
@@ -14,51 +17,15 @@ fn failed(error: impl std::fmt::Display) -> Failure {
     Failure::new(error.to_string())
 }
 
-struct Session {
-    scope: FileSearchScope,
-    state: Mutex<SessionIndex>,
-    closed: tokio::sync::watch::Sender<bool>,
-}
-
-struct SessionIndex {
-    roots: Vec<String>,
-    index: Arc<Search>,
-}
-
-type Sessions = HashMap<(MachineName, String), Arc<Session>>;
-
-#[derive(Default)]
-pub(crate) struct Searches {
-    sessions: Mutex<Sessions>,
-}
-
 pub(crate) enum Lease {
-    Local {
-        node: Arc<Node>,
-        from: MachineName,
-        search: String,
-        ended: tokio::sync::watch::Receiver<bool>,
-        close_on_drop: bool,
-    },
+    Local(sessions::Lease),
     Remote(fastctx_net::file_search::Lease),
-}
-
-impl Drop for Lease {
-    fn drop(&mut self) {
-        if let Self::Local { node, from, search, close_on_drop: true, .. } = self {
-            let session =
-                node.file_searches.sessions.lock().expect("searches poisoned").remove(&(from.clone(), search.clone()));
-            tokio::task::spawn_blocking(move || drop(session));
-        }
-    }
 }
 
 impl Lease {
     pub async fn closed(&mut self) {
         match self {
-            Self::Local { ended, .. } => {
-                let _ = ended.wait_for(|closed| *closed).await;
-            }
+            Self::Local(lease) => lease.closed().await,
             Self::Remote(lease) => lease.closed().await,
         }
     }
@@ -78,25 +45,13 @@ pub(crate) async fn open(
         let (reply, lease) = fastctx_net::file_search::open(link, machine, account, scope).await?;
         return Ok((reply, Lease::Remote(lease)));
     }
-    let roots = roots(node, &scope).await?;
-    let session = tokio::task::spawn_blocking(move || {
-        let index = Search::new(roots.clone())?;
-        Ok::<_, std::io::Error>(Session {
-            scope,
-            state: Mutex::new(SessionIndex { roots, index: Arc::new(index) }),
-            closed: tokio::sync::watch::channel(false).0,
-        })
-    })
-    .await
-    .map_err(failed)?
-    .map_err(failed)?;
+    let initializing = crate::initializing::take()?;
+    let roots = roots(node, &scope, Some(&initializing)).await?;
+    let session = initializing.run(move || Session::new(scope, roots)).await?.map_err(failed)?;
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(failed)?;
     let search = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    let ended = session.closed.subscribe();
-    let lease =
-        Lease::Local { node: node.clone(), from: from.clone(), search: search.clone(), ended, close_on_drop: true };
-    node.file_searches.sessions.lock().expect("searches poisoned").insert((from, search.clone()), Arc::new(session));
+    let lease = Lease::Local(node.file_searches.insert((from, search.clone()), session));
     let reply = FileSearchReply { machine: node.machine(), result: FileSearchResult::Started { search } };
     Ok((reply, lease))
 }
@@ -108,7 +63,15 @@ pub(crate) async fn serve(
     scope: FileSearchScope,
     mut stream: fastctx_net::data::Stream,
 ) -> Result<RemoteReply, Failure> {
-    let (reply, mut lease) = open(node, &Acting::Here, from, None, scope).await?;
+    let opening = open(node, &Acting::Here, from, None, scope);
+    tokio::pin!(opening);
+    let (reply, mut lease) = tokio::select! {
+        result = &mut opening => result?,
+        () = stream.closed() => {
+            drop(opening.await);
+            return Err(failed("the file search's owner disconnected"));
+        },
+    };
     stream.say(&link.sign(fastctx_net::sign::Domain::Event, &reply)).await.map_err(failed)?;
     tokio::select! { () = stream.closed() => {}, () = lease.closed() => {} }
     Ok(RemoteReply::FilesFound(FileSearchReply { machine: node.machine(), result: FileSearchResult::Closed }))
@@ -138,61 +101,43 @@ pub(crate) async fn here(
 ) -> Result<FileSearchReply, Failure> {
     let result = match request {
         FileSearchRequest::Start { scope } => {
-            let (reply, mut lease) = open(node, &Acting::Here, from, None, scope).await?;
-            if let Lease::Local { close_on_drop, .. } = &mut lease {
-                *close_on_drop = false;
-            }
+            let (reply, lease) = open(node, &Acting::Here, from, None, scope).await?;
+            let Lease::Local(lease) = lease else { unreachable!("opened on this node") };
+            lease.keep_until_idle();
             return Ok(reply);
         }
         FileSearchRequest::Open { .. } => {
             return Err(Failure::new("opening a file search requires its owning connection"));
         }
         FileSearchRequest::Query { search, query, limit } => {
-            let session = node
-                .file_searches
-                .sessions
-                .lock()
-                .expect("searches poisoned")
-                .get(&(from, search))
-                .cloned()
-                .ok_or_else(|| Failure::new("file search is closed or belongs to another caller"))?;
+            let session = node.file_searches.get(&(from, search))?;
             let scope = session.scope.clone();
-            let current = roots(node, &scope).await?;
+            let current = roots(node, &scope, None).await?;
             let expected = current.clone();
             let original_query = query.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                let index = {
-                    let mut state = session.state.lock().expect("search session poisoned");
-                    if state.roots != current {
-                        state.index = Arc::new(Search::new(current.clone())?);
-                        state.roots = current;
-                    }
-                    state.index.clone()
-                };
-                index.query(query, limit)
-            })
-            .await
-            .map_err(failed)?
-            .map_err(failed)?;
-            if roots(node, &scope).await? != expected {
+            let result =
+                tokio::task::spawn_blocking(move || session.query(current, query, limit)).await.map_err(failed)?;
+            if roots(node, &scope, None).await? != expected {
                 FileSearchResult::Matches { query: original_query, ready: false, total: 0, files: vec![] }
             } else {
-                result
+                result.map_err(failed)?
             }
         }
         FileSearchRequest::Close { search } => {
-            let session = node.file_searches.sessions.lock().expect("searches poisoned").remove(&(from, search));
-            if let Some(session) = &session {
-                session.closed.send_replace(true);
+            if let Some(closing) = node.file_searches.close(&(from, search)) {
+                closing.await.map_err(failed)?;
             }
-            tokio::task::spawn_blocking(move || drop(session)).await.map_err(failed)?;
             FileSearchResult::Closed
         }
     };
     Ok(FileSearchReply { machine: node.machine(), result })
 }
 
-async fn roots(node: &Arc<Node>, scope: &FileSearchScope) -> Result<Vec<String>, Failure> {
+async fn roots(
+    node: &Arc<Node>,
+    scope: &FileSearchScope,
+    initializing: Option<&crate::initializing::Guard>,
+) -> Result<Vec<String>, Failure> {
     match scope {
         FileSearchScope::Roots { roots } => Ok(roots.clone()),
         FileSearchScope::Resident { resident, roots } => {
@@ -204,11 +149,13 @@ async fn roots(node: &Arc<Node>, scope: &FileSearchScope) -> Result<Vec<String>,
                 return Ok(roots.clone());
             };
             let world = node.world.clone();
-            let record = tokio::task::spawn_blocking(move || crate::town::read::latest(&world, &town))
-                .await
-                .map_err(failed)?
-                .map_err(failed)?
-                .ok_or_else(|| Failure::new("the resident's project has no local address book"))?;
+            let reading = move || crate::town::read::latest(&world, &town);
+            let record = match initializing {
+                Some(initializing) => initializing.run(reading).await?,
+                None => tokio::task::spawn_blocking(reading).await.map_err(failed)?,
+            }
+            .map_err(failed)?
+            .ok_or_else(|| Failure::new("the resident's project has no local address book"))?;
             Ok(record
                 .places
                 .into_iter()

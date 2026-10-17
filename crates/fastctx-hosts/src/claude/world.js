@@ -43,6 +43,8 @@ const FASTCTX = __FASTCTX_COMMAND__
 const LOOK_MS = __FASTCTX_LOOK_MS__
 // Claude Code limits each fs read/write to 4 MiB of UTF-8.
 const FILE_BYTES = 4 * 1024 * 1024
+// How long a session whose start failed waits before an event tries again.
+const START_AGAIN_MS = 5000
 // fastctx's root holds the World's directory and, from the moment a removal
 // starts, its `uninstalled.json`.
 const ROOT = WORLD.slice(0, WORLD.lastIndexOf('/'))
@@ -108,6 +110,8 @@ function conversation(sessionId, previous) {
     // Something a later look can settle failed in this one.
     unsettled: false,
     stopped: null,
+    // The user stopped the last turn, which the next one is to hear.
+    toldStopped: false,
     writing: Promise.resolve(),
     streamBatch: null,
     unwritten: new Map(),
@@ -371,25 +375,46 @@ async function replaced($, context, deliveries) {
   await event($, context, 'replaced', { deliveries: deliveries.map((delivery) => delivery.id) })
 }
 
+// What the next turn reads of the last one the user stopped. Claude Code
+// ends a turn a plugin stops as one ended to deliver a following message,
+// and says so to a call it cut short: the model would not otherwise know
+// the user stopped it.
+const STOPPED = 'The user stopped your previous turn on purpose. A tool call it cut short may have partly taken effect, whatever its result says about why it ended. The commands it was waiting on were stopped; any already left running in the background go on.'
+
+// What rides with the next turn, the World's words for it: that the user
+// stopped the last turn, and what is held to go along. Taken as it is read;
+// `keep` puts back what did not go in.
+function alongNext(context) {
+  const along = context.held.filter((delivery) => delivery.along !== undefined)
+  for (const delivery of along) context.held.splice(context.held.indexOf(delivery), 1)
+  const stopped = context.toldStopped
+  context.toldStopped = false
+  const texts = [...(stopped ? [framed({ text: STOPPED })] : []), ...along.map(framed)]
+  const keep = () => {
+    context.held.unshift(...along)
+    if (stopped) context.toldStopped = true
+  }
+  return { along, texts, keep }
+}
+
 // What waits to ride with the next turn goes in as a row of its own just
 // before a prompt this plugin submits; the turn that prompt starts takes it
 // (`startTurn`), and the model reads both in the one request.
 async function alongBefore($, context) {
-  const along = context.held.filter((delivery) => delivery.along !== undefined)
-  if (along.length === 0) return
-  for (const delivery of along) context.held.splice(context.held.indexOf(delivery), 1)
+  const { along, texts, keep } = alongNext(context)
+  if (texts.length === 0) return
   let appended
   try {
     context.appending = true
-    appended = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: along.map(framed).join('\n\n') }] } })
+    appended = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: texts.join('\n\n') }] } })
   } catch (error) {
-    context.held.unshift(...along)
+    keep()
     worldFailure($, 'session.append', error)
     return
   } finally {
     context.appending = false
   }
-  if (appended.deny !== undefined) context.held.unshift(...along)
+  if (appended.deny !== undefined) keep()
   else context.alongTaken.push(...along)
 }
 
@@ -397,17 +422,16 @@ async function alongBefore($, context) {
 // that starts it; the turn it starts takes it (`startTurn`).
 async function alongPrompt($, context, e, next) {
   if (e.turnId !== undefined || e.command !== undefined || context.closed) return next(e)
-  const along = context.held.filter((delivery) => delivery.along !== undefined)
-  if (along.length === 0) return next(e)
-  for (const delivery of along) context.held.splice(context.held.indexOf(delivery), 1)
+  const { along, texts, keep } = alongNext(context)
+  if (texts.length === 0) return next(e)
   let result
   try {
-    result = await next({ ...e, context: [...(e.context ?? []), ...along.map(framed)] })
+    result = await next({ ...e, context: [...(e.context ?? []), ...texts] })
   } catch (error) {
-    context.held.unshift(...along)
+    keep()
     throw error
   }
-  if (result.drop !== undefined) context.held.unshift(...along)
+  if (result.drop !== undefined) keep()
   else context.alongTaken.push(...along)
   return result
 }
@@ -510,6 +534,7 @@ async function stopping($, context) {
   context.stopped = asked
   try {
     await $.turn.abort({ turnId: asked })
+    context.toldStopped = true
   } catch (error) {
     // Claude Code refuses an abort only for a turn that is not running: the
     // turn held as running had ended unseen, and is ended here.
@@ -627,16 +652,25 @@ async function startedFor($) {
   return typeof named === 'string' && named !== '' ? named : null
 }
 
-async function startSession($, context) {
-  const id = context.sessionId
-  const command = [FASTCTX, 'claude-session-directory', WORLD, id]
+// The session's directory, reserved by the node, which moves it into its
+// conversation then; the controls wait for it (`reservations`).
+async function reserveDirectory($, context) {
+  const command = [FASTCTX, 'claude-session-directory', WORLD, context.sessionId]
   command.push('--cwd', await $.session.cwd())
   if (context.previous !== null && context.previous !== undefined) command.push('--previous', context.previous)
   const conversation = await startedFor($)
   if (conversation !== null) command.push('--conversation', conversation)
-  const reservedDirectory = await $.process.run(command)
-  if (reservedDirectory.exitCode !== 0) throw new Error('reserving the Claude session directory: ' + reservedDirectory.stderr)
-  context.dir = JSON.parse(reservedDirectory.stdout)
+  const reserved = await $.process.run(command)
+  // The program's own words already say what it was reserving.
+  if (reserved.exitCode !== 0) throw new Error(reserved.stderr.replace(/^fastctx:\s*/, '').trim() || 'the Claude session directory was not reserved')
+  return JSON.parse(reserved.stdout)
+}
+
+async function startSession($, context) {
+  const id = context.sessionId
+  const reserving = reserveDirectory($, context)
+  reservations.set(id, reserving)
+  context.dir = await reserving
   // A reload can happen in the same clock tick, with old reports still
   // pending. Their reserved names survive in events or applied.
   for (const sub of ['events', 'applied']) {
@@ -891,8 +925,11 @@ async function focus($, context) {
 
 async function session($, registry, id, renew = false) {
   let context = registry.sessions.get(id)
-  if (!context || (renew && context.closed)) {
-    context = conversation(id, registry.cleared)
+  // A start that failed is tried again after a pause rather than kept for
+  // the whole session: what failed may have been passing (#48).
+  const retried = context !== undefined && context.failedAt !== undefined && Date.now() - context.failedAt >= START_AGAIN_MS
+  if (!context || (renew && context.closed) || retried) {
+    context = conversation(id, retried ? context.previous : registry.cleared)
     // Session switches keep their order even within one clock tick or when
     // the wall clock moves backwards. The node uses registration time to
     // keep late reports from moving the resident's delivery address back.
@@ -904,9 +941,11 @@ async function session($, registry, id, renew = false) {
         context.sequence = Math.max(context.sequence, prior.sequence)
       }
     }
-    registry.cleared = null
+    if (!retried) registry.cleared = null
     registry.sessions.set(id, context)
+    const starting = context
     context.ready = startSession($, context)
+    context.ready.catch(() => { starting.failedAt = Date.now() })
   }
   await context.ready
   return context
@@ -929,9 +968,11 @@ export function register(on) {
   // its literal on('…') call, the shape the official loader reads.
   on('session.start', async ($, e, next) => {
     if (await removed($)) return next(e)
-    await startControls($)
     await worldTools($, registry)
+    // The session's directory is reserved before its controls make or
+    // watch anything in it (`reservations`).
     await session($, registry, await $.session.id(), true)
+    await startControls($)
     return next(e)
   }).catch(($, e, next) => continueWithoutWorld($, 'session.start', e, next))
   on('turn.start', async ($, e, next) => {

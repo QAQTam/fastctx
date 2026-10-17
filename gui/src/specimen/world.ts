@@ -9,6 +9,8 @@ import type { About, Action, HubNodes, LinkState, MachineFacts, Node, ProjectRec
 import type { Away, WorldState } from "../home/model";
 import type { AgentFacts, WorldAgents } from "../world/agents";
 import type { WorldNow } from "../world/bridge";
+import { specimenRemoved } from "./machine-log";
+import { runningOn } from "./versions";
 
 const at = (time: string) => `2026-10-04T${time}Z`;
 /** An assistance's deadline some days from the moment the specimen is opened, at
@@ -68,7 +70,7 @@ function facts(name: string, os: string, home: string): MachineFacts {
   const form = os === "linux" ? "server" : name === "laptop" ? "laptop" : "desktop";
   return {
     name, os, arch: "x86_64", home, temp: os === "windows" ? `${home}/AppData/Local/Temp` : "/tmp",
-    shell: "", path_separator: os === "windows" ? "\\" : "/", case_sensitive: os !== "windows", version: name === "gpu" ? "0.9.0" : "1.0.0", form,
+    shell: "", path_separator: os === "windows" ? "\\" : "/", case_sensitive: os !== "windows", version: runningOn(name), form,
     ...(name === "gpu" ? {} : { stats: true }),
   };
 }
@@ -173,6 +175,9 @@ function hubs(two: boolean): { nodes: HubNodes[]; accounts: HubAccounts[] } {
       roles: true,
       groups: true,
       dissolves: true,
+      versions: true,
+      due: true,
+      uninstalls: true,
       accounts: [
         { name: "me", level: "super", locked: false, opened: at("00:00:00") },
         { name: "ada", level: "member", locked: false, opened: at("00:05:00") },
@@ -622,6 +627,8 @@ export function specimenAgents(machine: string, at: Date = new Date()): WorldAge
  *  nothing really connects. Anything else it refuses. */
 export function specimenChange(world: WorldNow | null, hub: string, made: AccountChange): WorldNow | null {
   if (!world) return null;
+  // An update kept for a machine away is the hub's, not the World's.
+  if (made.change === "update_due") return world;
   if (made.change === "rename") return renamed(world, hub, made.machine, made.to);
   if (made.change === "revoke_token") {
     const hubs = world.accounts.hubs.map((one) => (one.hub === hub ? { ...one, tokens: (one.tokens ?? []).filter((token) => token.key !== made.token) } : one));
@@ -689,6 +696,7 @@ function peopleChanged(world: WorldNow, hub: string, made: AccountChange): World
     case "seen":
       return change((one) => ({ ...one, arrivals: one.arrivals.filter((arrival) => arrival.name !== made.name) }));
     case "remove":
+      specimenRemoved(made.name, made.then);
       return change((one) => ({ ...one, members: one.members.filter((member) => member.name !== made.name), arrivals: one.arrivals.filter((arrival) => arrival.name !== made.name) }));
     case "share_project":
       return change((one) => ({

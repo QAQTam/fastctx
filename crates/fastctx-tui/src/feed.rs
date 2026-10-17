@@ -206,6 +206,8 @@ async fn watch(
             }
             Ok(fastctx_client::Update::Moment(moment)) => Data::Event(moment.event),
             Ok(fastctx_client::Update::History(history)) => Data::History(history),
+            // The listing says whether it works; the feed shows the session.
+            Ok(fastctx_client::Update::Now { .. }) => continue,
             Ok(fastctx_client::Update::Extended(history)) => {
                 for event in history {
                     if sender.send((page, Data::Event(event))).is_err() {
@@ -330,7 +332,7 @@ async fn work(world: &World, job: Job) -> Result<Done, fastctx_client::Error> {
         Job::ServerLine { hub, account, hours } => {
             let expires = Timestamp::now() + jiff::SignedDuration::from_hours(i64::from(hours));
             Done::ServerLine {
-                text: world.server_command(Some(hub), account, None, expires, false, None, None).await?,
+                text: world.server_command(Some(hub), account, None, expires, false, None, None, false).await?,
                 expires,
             }
         }
@@ -350,7 +352,11 @@ async fn work(world: &World, job: Job) -> Result<Done, fastctx_client::Error> {
         }
         Job::Remove { hub, account, name, reason, seen } => {
             world
-                .account(Some(hub.clone()), account.clone(), AccountChange::Remove { name: name.clone(), reason })
+                .account(
+                    Some(hub.clone()),
+                    account.clone(),
+                    AccountChange::Remove { name: name.clone(), reason, then: None },
+                )
                 .await?;
             if seen {
                 world.account(Some(hub), account, AccountChange::Seen { name }).await?;

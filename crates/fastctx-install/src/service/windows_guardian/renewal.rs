@@ -65,11 +65,15 @@ pub(crate) fn replace(service: &Service, digest: &str) -> anyhow::Result<()> {
 pub(crate) fn restart(service: &Service, digest: &str) -> anyhow::Result<()> {
     let config = Config::new(service)?;
     ensure!(staged(service, digest)?, "the approved guardian image is not in place");
-    let registered = scm::open(&config.name, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START)?
-        .context("guardian registration disappeared")?;
+    let registered = scm::open(
+        &config.name,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::USER_DEFINED_CONTROL,
+    )?
+    .context("guardian registration disappeared")?;
     // SCM's existing failure action and independent check remain enabled.
     // A crash here cannot leave boot startup disabled or require another UAC.
     let mut requested = false;
+    let mut started = false;
     let mut stopped = None;
     loop {
         let status = registered.query_status()?;
@@ -77,13 +81,14 @@ pub(crate) fn restart(service: &Service, digest: &str) -> anyhow::Result<()> {
             match status.current_state {
                 ServiceState::Running => {
                     stopped = status.process_id.map(fastctx_platform::identity_of).transpose()?.flatten();
+                    super::adopt::planned(&registered);
                     registered.stop()?;
                     requested = true;
                     continue;
                 }
                 ServiceState::Stopped => {
-                    registered.start::<&str>(&[])?;
-                    requested = true;
+                    start(&registered)?;
+                    (requested, started) = (true, true);
                     continue;
                 }
                 ServiceState::StopPending => {
@@ -93,6 +98,13 @@ pub(crate) fn restart(service: &Service, digest: &str) -> anyhow::Result<()> {
                 _ => {}
             }
         }
+        // A planned stop ends well, so the service manager does not start
+        // the guardian again as after a failure: it is started here.
+        if requested && !started && status.current_state == ServiceState::Stopped {
+            start(&registered)?;
+            started = true;
+            continue;
+        }
         if requested && status.current_state == ServiceState::Running && current(service, digest)? {
             let running: Option<Running> = images::read_json(&config.root()?.join("running.json"))?;
             if running.is_some_and(|running| Some(running.process) != stopped) {
@@ -100,5 +112,17 @@ pub(crate) fn restart(service: &Service, digest: &str) -> anyhow::Result<()> {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Starts the guardian, unless its independent check started it first.
+fn start(registered: &windows_service::service::Service) -> anyhow::Result<()> {
+    match registered.start::<&str>(&[]) {
+        Err(windows_service::Error::Winapi(error))
+            if error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_SERVICE_ALREADY_RUNNING as i32) =>
+        {
+            Ok(())
+        }
+        started => started.map_err(Into::into),
     }
 }

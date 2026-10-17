@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use fastctx_types::access::Purpose;
 use fastctx_types::{AccountName, MachineName};
 use futures_util::{SinkExt as _, StreamExt as _};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -21,6 +21,18 @@ use crate::peer::{self, Frame, Intent};
 use crate::sign::{Domain, PublicKey};
 use crate::transport::Socket;
 use crate::wire::{CallStatus, HEARTBEAT, SILENCE};
+
+/// The most frames that wait for a direct link's writer, and the most
+/// bytes of them: past that the other machine takes nothing, and the link
+/// ends (`crate::queue`).
+const QUEUED: usize = 8192;
+const QUEUED_BYTES: usize = 64 * 1024 * 1024;
+
+/// A frame for the writer, as it is written; and whom to tell once it is.
+pub(crate) struct Queued {
+    bytes: Vec<u8>,
+    written: Option<oneshot::Sender<()>>,
+}
 
 /// One live direct link.
 pub(crate) struct PeerConn {
@@ -35,7 +47,10 @@ pub(crate) struct PeerConn {
     pub dialed: bool,
     /// Where the other machine was reached, when this one dialed it.
     pub at: Vec<SocketAddr>,
-    out: mpsc::UnboundedSender<Frame>,
+    /// Whether the other machine reads `Frame::Cancel`.
+    pub cancels: bool,
+    /// Frames for the writer, as they are written.
+    out: crate::queue::Sender<Queued>,
     ms: Mutex<Option<u32>>,
     closed: watch::Sender<Option<String>>,
 }
@@ -46,8 +61,9 @@ impl PeerConn {
         key: PublicKey,
         dialed: bool,
         at: Vec<SocketAddr>,
-    ) -> (Arc<Self>, mpsc::UnboundedReceiver<Frame>) {
-        let (out, frames) = mpsc::unbounded_channel();
+        cancels: bool,
+    ) -> (Arc<Self>, crate::queue::Receiver<Queued>) {
+        let (out, frames) = crate::queue::bounded(QUEUED, QUEUED_BYTES);
         let (closed, _) = watch::channel(None);
         let conn = Self {
             name,
@@ -55,6 +71,7 @@ impl PeerConn {
             generation: super::super::ways::connection_number(),
             dialed,
             at,
+            cancels,
             out,
             ms: Mutex::new(None),
             closed,
@@ -63,7 +80,22 @@ impl PeerConn {
     }
 
     pub fn send(&self, frame: Frame) -> Result<(), ()> {
-        self.out.send(frame).map_err(|_| ())
+        self.queue(&frame, None)
+    }
+
+    /// Sends `frame` and waits until it is written: an answer holds what it
+    /// holds here until it has gone, not only until it is queued.
+    pub async fn write(&self, frame: Frame) -> Result<(), String> {
+        let (written, received) = oneshot::channel();
+        self.queue(&frame, Some(written))
+            .map_err(|()| "the direct link ended before the frame was queued".to_string())?;
+        received.await.map_err(|_| "the direct link ended before the frame was written".to_string())
+    }
+
+    fn queue(&self, frame: &Frame, written: Option<oneshot::Sender<()>>) -> Result<(), ()> {
+        let bytes = peer::encode(frame);
+        let size = bytes.len();
+        self.out.send(Queued { bytes, written }, size).map_err(|_| ())
     }
 
     /// The round trip as last measured.
@@ -169,6 +201,7 @@ impl Inner {
             if let Some(conn) = call.conn.upgrade() {
                 self.node.log(format!("cut a direct call from {}: {why}", conn.name));
                 let _ = conn.send(Frame::Cut { id: call.id, reason: reason.clone() });
+                self.answers.stop(&conn.on(), call.id, &reason);
             }
             call.cut.send_replace(Some(reason));
         }
@@ -186,8 +219,10 @@ pub(super) async fn keep(inner: Arc<Inner>, peer: MachineName, at: Vec<SocketAdd
             Ok((conn, socket, frames, address, route)) => {
                 inner.node.log(format!("a direct link with {peer} is up, to {address} {route}"));
                 inner.direct_up(&conn);
+                let mut down = Down::new(&inner, &conn);
                 let (reason, moved) = serve(inner.clone(), conn.clone(), socket, frames, Some(&mut network)).await;
-                inner.direct_down(&conn, &reason);
+                down.reason = reason.clone();
+                drop(down);
                 if moved || started.elapsed() >= STABLE {
                     failures = 0;
                 }
@@ -219,7 +254,7 @@ pub(super) async fn keep(inner: Arc<Inner>, peer: MachineName, at: Vec<SocketAdd
     }
 }
 
-type Linked = (Arc<PeerConn>, Socket, mpsc::UnboundedReceiver<Frame>, SocketAddr, fastctx_types::world::Route);
+type Linked = (Arc<PeerConn>, Socket, crate::queue::Receiver<Queued>, SocketAddr, fastctx_types::world::Route);
 
 /// Dials `peer` at `at` and has it prove who it is.
 async fn dial(inner: &Inner, peer: &MachineName, at: &[SocketAddr]) -> Result<Linked, String> {
@@ -231,34 +266,73 @@ async fn dial(inner: &Inner, peer: &MachineName, at: &[SocketAddr]) -> Result<Li
         protocol: peer::PROTOCOL,
         version: env!("CARGO_PKG_VERSION").to_string(),
         hub: inner.hub.clone(),
-        intent: Intent::Link { key: inner.key.public(), proof: inner.key.sign(Domain::Peer, &dialed.binding) },
+        intent: Intent::Link {
+            key: inner.key.public(),
+            proof: inner.key.sign(Domain::Peer, &dialed.binding),
+            cancels: true,
+        },
     };
     peer::send(&mut socket, &hello).await?;
-    match peer::next(&mut socket).await? {
-        Frame::Welcome { name, proof } => {
+    let cancels = match peer::next(&mut socket).await? {
+        Frame::Welcome { name, proof, cancels } => {
             if name != *peer {
                 return Err(format!("{name} answered at {}, not {peer}", dialed.address));
             }
             key.verify(Domain::Peer, &dialed.binding, &proof)
                 .map_err(|_| format!("what answered at {} does not hold {peer}'s key", dialed.address))?;
+            cancels
         }
         Frame::Refused { reason } => return Err(format!("{peer} refused the link: {reason}")),
         _ => return Err(format!("{peer} answered the link with something other than a welcome")),
-    }
-    let (conn, frames) = PeerConn::new(peer.clone(), key, true, at.to_vec());
+    };
+    let (conn, frames) = PeerConn::new(peer.clone(), key, true, at.to_vec(), cancels);
     Ok((conn, socket, frames, dialed.address, dialed.route))
 }
 
-/// A link another machine opened to this one, once it proved who it is.
-pub(super) async fn taken(inner: Arc<Inner>, name: MachineName, key: PublicKey, socket: Socket, from: SocketAddr) {
-    let (conn, frames) = PeerConn::new(name.clone(), key, false, Vec::new());
+/// A link another machine opened to this one, once it proved who it is;
+/// `cancels`, whether it reads `Frame::Cancel`.
+pub(super) async fn taken(
+    inner: Arc<Inner>,
+    name: MachineName,
+    key: PublicKey,
+    cancels: bool,
+    socket: Socket,
+    from: SocketAddr,
+) {
+    let (conn, frames) = PeerConn::new(name.clone(), key, false, Vec::new(), cancels);
     inner.node.log(format!("a direct link from {name} came in from {from}"));
     inner.direct_up(&conn);
+    let mut down = Down::new(&inner, &conn);
     // The machine that dialled keeps the link and dials again, so a change
     // in this machine's network does not end it here; its silence does.
     let (reason, _) = serve(inner.clone(), conn.clone(), socket, frames, None).await;
-    inner.direct_down(&conn, &reason);
+    down.reason = reason.clone();
+    drop(down);
     inner.node.log(format!("the direct link from {name} ended: {reason}"));
+}
+
+/// Takes a link down once it is dropped: when serving it ends, and when
+/// the task keeping it is stopped in the middle, so the calls on it hear so
+/// either way.
+struct Down<'a> {
+    inner: &'a Inner,
+    conn: &'a Arc<PeerConn>,
+    /// Why it went down.
+    reason: String,
+}
+
+impl<'a> Down<'a> {
+    fn new(inner: &'a Inner, conn: &'a Arc<PeerConn>) -> Self {
+        Self { inner, conn, reason: "this machine stopped keeping the link".to_string() }
+    }
+}
+
+impl Drop for Down<'_> {
+    fn drop(&mut self) {
+        self.conn.close(self.reason.clone());
+        self.inner.answers.stop_all(&self.conn.on(), "the direct link it came on ended");
+        self.inner.direct_down(self.conn, &self.reason);
+    }
 }
 
 impl Inner {
@@ -308,22 +382,36 @@ async fn serve(
     inner: Arc<Inner>,
     conn: Arc<PeerConn>,
     socket: Socket,
-    mut frames: mpsc::UnboundedReceiver<Frame>,
+    mut frames: crate::queue::Receiver<Queued>,
     mut network: Option<&mut watch::Receiver<u64>>,
 ) -> (String, bool) {
+    let pulse = crate::transport::pulse_of(&socket);
+    let writing = pulse.clone();
     let (mut sink, mut stream) = socket.split();
     let (writer_done, mut writer_stopped) = tokio::sync::oneshot::channel::<()>();
     let (finish, mut finishing) = tokio::sync::oneshot::channel::<String>();
     // The writer outlives the link by as long as it takes to say why it
     // ended, so whoever ends it is not held up by a peer that went silent.
-    tokio::spawn(async move {
+    // No write goes on once nothing of it went for the silence, and the
+    // link's end stops one under way: what it began is then not finished,
+    // and nothing follows.
+    let writer = tokio::spawn(async move {
         let _done = writer_done;
         loop {
             tokio::select! {
                 frame = frames.recv() => match frame {
-                    Some(frame) => {
-                        if sink.send(WsMessage::Binary(peer::encode(&frame).into())).await.is_err() {
-                            return;
+                    Some(Queued { bytes, written }) => {
+                        let message = WsMessage::Binary(bytes.into());
+                        tokio::select! {
+                            sent = writing.writing(sink.send(message)) => {
+                                if !sent.is_ok_and(|sent| sent.is_ok()) {
+                                    return;
+                                }
+                                if let Some(written) = written {
+                                    let _ = written.send(());
+                                }
+                            }
+                            _ = &mut finishing => return,
                         }
                     }
                     None => break,
@@ -341,14 +429,14 @@ async fn serve(
     });
     let pinged: Arc<Mutex<HashMap<u64, Instant>>> = Arc::default();
     let heartbeat = {
-        let (conn, pinged) = (conn.clone(), pinged.clone());
+        let (conn, pinged, pulse) = (conn.clone(), pinged.clone(), pulse.clone());
         tokio::spawn(async move {
             let mut n = 0;
             loop {
                 tokio::time::sleep(HEARTBEAT).await;
                 n += 1;
                 pinged.lock().expect("never poisoned").insert(n, Instant::now());
-                if conn.send(Frame::Ping { n }).is_err() {
+                if conn.send(Frame::Ping { n, took: Some(pulse.taken()) }).is_err() {
                     return;
                 }
             }
@@ -364,14 +452,22 @@ async fn serve(
         network.mark_unchanged();
     }
     let mut moved = false;
+    // The kinds of frame this machine passed over, each said once.
+    let mut unread = std::collections::BTreeSet::new();
     let reason = loop {
         let next = tokio::select! {
             biased;
             () = tokio::time::sleep_until(heard + SILENCE) => {
+                // A frame still coming in shows it is there.
+                if let Some(at) = pulse.since(heard) {
+                    heard = at;
+                    continue;
+                }
                 break format!("nothing came from it for {} s", SILENCE.as_secs());
             }
             reason = &mut ended => break reason,
             _ = &mut writer_stopped => break "writing to it failed".to_string(),
+            () = conn.out.overflowed() => break "it took nothing while frames for it piled up".to_string(),
             changed = network_changed(&mut network) => {
                 moved = changed;
                 break "this machine's network changed".to_string();
@@ -383,7 +479,22 @@ async fn serve(
             Some(Err(error)) => break crate::dial::describe(&error),
             Some(Ok(WsMessage::Binary(bytes))) => match serde_json::from_slice(&bytes) {
                 Ok(frame) => frame,
-                Err(error) => break format!("an unreadable frame from it: {error}"),
+                // A newer machine's frame this one does not know is passed
+                // over: the link stays, as the line to the hub does.
+                Err(error) => {
+                    heard = Instant::now();
+                    let kind = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .and_then(|frame| frame["f"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| "?".to_string());
+                    if unread.insert(kind.clone()) {
+                        inner.node.log(format!(
+                            "passing over a frame from {} this version cannot read ({kind}): {error}",
+                            conn.name
+                        ));
+                    }
+                    continue;
+                }
             },
             Some(Ok(_)) => {
                 heard = Instant::now();
@@ -392,30 +503,41 @@ async fn serve(
         };
         heard = Instant::now();
         match frame {
-            Frame::Ping { n } => {
-                let _ = conn.send(Frame::Pong { n });
+            // What the other machine says it took keeps this one's writes
+            // to it going (`crate::pulse`).
+            Frame::Ping { n, took } => {
+                if let Some(took) = took {
+                    pulse.told(took);
+                }
+                let _ = conn.send(Frame::Pong { n, took: Some(pulse.taken()) });
             }
-            Frame::Pong { n } => {
+            Frame::Pong { n, took } => {
+                if let Some(took) = took {
+                    pulse.told(took);
+                }
                 if n > last_ping {
                     last_ping = n;
                     if let Some(sent) = pinged.lock().expect("never poisoned").remove(&n) {
-                        let ms = u32::try_from(sent.elapsed().as_millis()).unwrap_or(u32::MAX);
+                        let ms = super::super::line::millis(sent.elapsed());
                         *conn.ms.lock().expect("never poisoned") = Some(ms);
                     }
                     pinged.lock().expect("never poisoned").retain(|sent, _| *sent > n);
                 }
             }
             Frame::Call { id, message } => {
+                let stop = inner.answers.open(&inner, conn.on(), id);
                 tokio::spawn(super::super::answering::answer(
                     inner.clone(),
                     super::super::Replier::Peer(conn.clone(), id),
                     message,
+                    stop,
                 ));
             }
             Frame::Answer { id, message } => inner.call_event(&conn.on(), id, CallEvent::Answered(message)),
             Frame::Cut { id, reason } => {
                 inner.call_event(&conn.on(), id, CallEvent::Status(CallStatus::Cut { reason }));
             }
+            Frame::Cancel { id } => inner.answers.stop(&conn.on(), id, "its caller gave it up"),
             Frame::Refused { reason } => break format!("it ended the link: {reason}"),
             Frame::Hello { .. } | Frame::Welcome { .. } => {
                 let _ = conn.send(Frame::Refused { reason: "a second hello on one link".to_string() });
@@ -425,7 +547,17 @@ async fn serve(
     };
     heartbeat.abort();
     conn.close(reason.clone());
+    // Nobody hears the answers to the calls that came on it.
+    inner.answers.stop_all(&conn.on(), "the direct link it came on ended");
     let _ = finish.send(reason.clone());
+    // The writer says why and closes, or gives up within its own bounds;
+    // past them it is stopped, so no task outlives its link for long.
+    let stopping = writer.abort_handle();
+    tokio::spawn(async move {
+        if tokio::time::timeout(SILENCE * 3, writer).await.is_err() {
+            stopping.abort();
+        }
+    });
     (reason, moved)
 }
 

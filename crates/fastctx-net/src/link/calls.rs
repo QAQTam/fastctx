@@ -51,11 +51,38 @@ impl Via {
         }
     }
 
-    /// Tells the hub the caller gave up the call `id`. Over a direct link
-    /// an answer nobody waits for is dropped where it arrives.
+    /// Tells the machine answering the call `id` that its caller gave it
+    /// up: through the hub, which tells it in turn, or over the direct link
+    /// when the other machine reads that. An answer nobody waits for is
+    /// dropped where it arrives.
     fn cancel(&self, id: u64) {
-        if let Via::Hub(connection) = self {
-            let _ = connection.up.send(Up::Cancel { id });
+        match self {
+            Via::Hub(connection) => {
+                let _ = connection.up.send(Up::Cancel { id });
+            }
+            Via::Peer(conn) if conn.cancels => {
+                let _ = conn.send(crate::peer::Frame::Cancel { id });
+            }
+            Via::Peer(_) => {}
+        }
+    }
+
+    /// The control connection ending also ends an answer still being fetched
+    /// over a separate data connection.
+    async fn ended(&self) -> String {
+        match self {
+            Via::Peer(conn) => conn.ended().await,
+            Via::Hub(connection) => {
+                let mut closed = connection.closed.clone();
+                loop {
+                    if let Some(reason) = closed.borrow_and_update().clone() {
+                        return reason;
+                    }
+                    if closed.changed().await.is_err() {
+                        return "the connection to the hub ended".to_string();
+                    }
+                }
+            }
         }
     }
 
@@ -84,7 +111,7 @@ impl Inner {
         account: &AccountName,
         purpose: Purpose,
         call: RemoteCall,
-        mut feed: Option<Feed>,
+        feed: Option<Feed>,
     ) -> Result<RemoteResult, CallFailure> {
         // What a name the machine had before it was renamed names is called
         // by its name now.
@@ -94,6 +121,33 @@ impl Inner {
         }
         let to = &view.canonical(to).clone();
         drop(view);
+        // How long the answer is waited for, as the call says
+        // (`fastctx_types::contract`), from now, a connection to send it on
+        // waited for included: past that it is given up, and the machine
+        // answering it told so.
+        let within = call.contract().within;
+        let what = format!("{to}'s answer to {}", call.kind());
+        let calling = self.calling(to, account, purpose, call, feed);
+        match within {
+            Some(within) => match fastctx_platform::doing::outside(what, within, calling).await {
+                Ok(answer) => answer,
+                Err(late) => Err(CallFailure::Unknown {
+                    name: to.clone(),
+                    reason: format!("it gave no answer within {} s", late.within.as_secs()),
+                }),
+            },
+            None => calling.await,
+        }
+    }
+
+    async fn calling(
+        self: &Arc<Self>,
+        to: &MachineName,
+        account: &AccountName,
+        purpose: Purpose,
+        call: RemoteCall,
+        mut feed: Option<Feed>,
+    ) -> Result<RemoteResult, CallFailure> {
         // A phone links directly with a machine only while it has calls to
         // it; the first goes through the hub while the link comes up.
         let _demand = self.demand(to);
@@ -166,7 +220,20 @@ impl Inner {
                 (message, Side::Sending(task))
             }
         };
+        // The answer, a large one fetched too, within the one time the call
+        // is waited for.
         let reply = self.route(&via, to, n, message, side, &mut feed).await?;
+        self.answer_of(&via, to, reply).await
+    }
+
+    /// What `reply`, from `to`, says of the call it answers; a large answer
+    /// fetched over the data connection it names.
+    async fn answer_of(
+        self: &Arc<Self>,
+        via: &Via,
+        to: &MachineName,
+        reply: Envelope,
+    ) -> Result<RemoteResult, CallFailure> {
         let broken = |reason: String| CallFailure::Unknown { name: to.clone(), reason };
         match reply.kind {
             Kind::Refused => {
@@ -175,11 +242,23 @@ impl Inner {
             }
             Kind::Answer => match reply.body::<Body>() {
                 Ok(Body::Answer { result }) => Ok(result),
-                Ok(Body::LargeAnswer { carried }) => self.fetch(&via, to, &reply, &carried).await.map_err(|reason| {
-                    broken(format!("its answer was too large for a message, and fetching it failed: {reason}"))
-                }),
+                Ok(Body::LargeAnswer { carried }) => {
+                    let bytes = self.fetch(via, to, &reply, &carried).await.map_err(|reason| {
+                        broken(format!("its answer was too large for a message, and fetching it failed: {reason}"))
+                    })?;
+                    // It answered: what it said cannot be read, as a newer
+                    // release may say, which is not the same as no answer.
+                    serde_json::from_slice(&bytes)
+                        .map_err(|error| CallFailure::Unreadable { name: to.clone(), reason: error.to_string() })
+                }
                 Ok(_) => Err(broken("what came back is not an answer".to_string())),
-                Err(error) => Err(broken(format!("its answer {error}"))),
+                Err(_) => Err(CallFailure::Unreadable {
+                    name: to.clone(),
+                    reason: serde_json::from_value::<Body>(reply.body.clone())
+                        .err()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default(),
+                }),
             },
             kind => Err(broken(format!("it answered the call with {kind:?}"))),
         }
@@ -267,6 +346,7 @@ impl Inner {
                     CallEvent::Status(CallStatus::Delivered) => {}
                     CallEvent::Status(CallStatus::Offline { last_seen }) => {
                         waiting.answered = true;
+                        let last_seen = last_seen.map(|at| self.local(at));
                         return Err(CallFailure::Offline { name: to.clone(), last_seen });
                     }
                     CallEvent::Status(CallStatus::NotMember) => {
@@ -324,22 +404,26 @@ impl Inner {
         Ok(envelope)
     }
 
-    /// Takes a large answer `to` sends over the data connection its answer
-    /// names.
+    /// Takes the bytes of a large answer `to` sends over the data connection
+    /// its answer names.
     async fn fetch(
         self: &Arc<Self>,
         via: &Via,
         to: &MachineName,
         answer: &Envelope,
         carried: &Carried,
-    ) -> Result<RemoteResult, String> {
+    ) -> Result<crate::reassembly::Buffer, String> {
         let ticket = answer.stream.as_ref().ok_or("the answer names no data connection")?;
         let view = self.view();
         if !view.same(&ticket.source, to) || !view.is_me(&ticket.sink) || ticket.stream != carried.stream {
             return Err(format!("its data connection is for {} to {}", ticket.source, ticket.sink));
         }
-        let bytes = crate::data::sink(&via.endpoint(self), &self.key, carried).await?;
-        serde_json::from_slice(&bytes).map_err(|error| format!("the answer cannot be read: {error}"))
+        let endpoint = via.endpoint(self);
+        tokio::select! {
+            biased;
+            reason = via.ended() => Err(reason),
+            bytes = crate::data::sink(&endpoint, &self.key, carried) => bytes,
+        }
     }
 
     /// The next number this machine sends under, for something to `to`.
@@ -383,7 +467,8 @@ impl Inner {
     /// longest id and count it could carry.
     pub(super) fn letter_size(&self, to: &MachineName, account: &AccountName, letter: &Letter) -> usize {
         let message = self.letter(to, account, Purpose::Words, u64::MAX, LetterId::longest(), letter.clone());
-        wire::encode(&Up::Send { seq: u64::MAX, message }).len()
+        let rename_room = 64usize.saturating_sub(message.from.as_str().len());
+        wire::encode(&Up::Send { seq: u64::MAX, message }).len() + rename_room
     }
 
     fn letter(

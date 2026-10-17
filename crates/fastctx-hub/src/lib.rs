@@ -30,12 +30,16 @@ mod data;
 mod direct;
 pub mod dissolve;
 mod forget;
+mod health;
 mod ledger;
 mod log;
 mod login;
 mod machine_log;
+mod mailbox;
 mod manage;
 mod moving;
+mod outq;
+mod records;
 mod releases;
 mod store;
 pub mod third;
@@ -60,7 +64,6 @@ use fastctx_types::{AccountName, HubName, MachineName};
 use futures_util::{SinkExt as _, StreamExt as _};
 use jiff::Timestamp;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -68,7 +71,12 @@ pub use moving::standby::prepare as prepare_arrival;
 pub use store::HubFile;
 use store::{Book, Store};
 
-pub type Socket = WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>;
+pub type Socket = WebSocketStream<tokio_rustls::server::TlsStream<fastctx_net::pulse::Pulsing<TcpStream>>>;
+
+/// When the bytes of `socket` last moved, each way (`fastctx_net::pulse`).
+pub(crate) fn pulse_of(socket: &Socket) -> std::sync::Arc<fastctx_net::pulse::Pulse> {
+    socket.get_ref().get_ref().0.pulse()
+}
 
 /// The directory a hub keeps everything in when none is given.
 pub fn default_dir(fastctx_root: &Path) -> PathBuf {
@@ -131,6 +139,7 @@ pub fn init(dir: &Path, new: New) -> anyhow::Result<CertPin> {
         self_registration: false,
         dissolved: None,
         updates: Default::default(),
+        due: Vec::new(),
     };
     Store::create(dir, &hub, &certificate, &secrets.to_bytes(), &book)?;
     Ok(certificate.pin())
@@ -226,12 +235,25 @@ pub(crate) struct Hub {
     /// Told when the network is dissolved, and as each machine on it is
     /// told so (`dissolve`).
     dissolution: tokio::sync::Notify,
+    /// Told when every member is to look at the directory again
+    /// (`tell_directory`).
+    directory_changed: Arc<tokio::sync::Notify>,
+    /// Told when who is online changed, for the members whose sessions do
+    /// not read that as it changes (`tell_directory`).
+    presence_changed: Arc<tokio::sync::Notify>,
+    /// How many times who is online changed (`Hub::present`).
+    presence: AtomicU64,
+    /// Held while a change in who is online is counted, looked at and
+    /// queued, so that of two at once the later counted is queued later.
+    presenting: Mutex<()>,
+    /// What the hub counts for its health (`health`).
+    health: health::Health,
 }
 
 /// A member's open control connection.
 pub(crate) struct Session {
     generation: u64,
-    out: mpsc::UnboundedSender<Out>,
+    out: outq::Outq,
     since: Timestamp,
     /// Where the connection comes from: the member, or the machine that
     /// forwards it here.
@@ -250,6 +272,10 @@ pub(crate) struct Session {
     forgets: bool,
     /// Whether it reads the network's versions.
     versions: bool,
+    /// Whether it reads that a call it answers is over for its caller.
+    cancels: bool,
+    /// Whether it reads who is online as it changes (`Down::Presence`).
+    presence: bool,
 }
 
 pub(crate) enum Out {
@@ -299,6 +325,7 @@ impl Hub {
                 at: removed.at,
                 reason: removed.reason.clone(),
                 dissolved: removed.dissolved,
+                then: removed.then,
             },
             None => Refusal::NotMember,
         })
@@ -306,8 +333,19 @@ impl Hub {
 
     /// `name`'s view of the directory now.
     fn view_for(&self, name: &MachineName) -> View {
-        let presence: HashMap<MachineName, views::Presence> = self
-            .sessions()
+        // Counted before who is online is read: a change after that is told
+        // past the view, and told again if the view holds it already.
+        let rev = self.presence.load(Ordering::SeqCst);
+        let presence = self.online();
+        let trial = self.trial_of(name);
+        let mut view = views::view_for(self, &self.store(), &presence, name, trial);
+        view.presence = rev;
+        view
+    }
+
+    /// Who is connected, and how, as the hub sees it now.
+    fn online(&self) -> HashMap<MachineName, views::Presence> {
+        self.sessions()
             .iter()
             .map(|(name, session)| {
                 let seen = session.through.is_none().then(|| session.peer.ip());
@@ -319,9 +357,7 @@ impl Hub {
                 };
                 (name.clone(), presence)
             })
-            .collect();
-        let trial = self.trial_of(name);
-        views::view_for(self, &self.store(), &presence, name, trial)
+            .collect()
     }
 
     /// Resolves once `name`'s session ends, at once when it has none.
@@ -332,15 +368,43 @@ impl Hub {
         }
     }
 
-    /// Who is connected, or how they connect, changed: every member is told
-    /// to look again.
-    fn presence_changed(&self) {
-        let outs: Vec<mpsc::UnboundedSender<Out>> =
-            self.sessions().values().map(|session| session.out.clone()).collect();
-        for out in outs {
-            let _ = out.send(Out::Frame(Down::DirectoryChanged));
+    /// Whether `name` is connected, or how, changed: a member whose session
+    /// reads that is told how it is now, as it may see it; the others look
+    /// at the whole directory again. Nothing of who may do what changed, so
+    /// no call or transfer is cut; a session just come is told what is
+    /// afoot.
+    fn present(&self, name: &MachineName) {
+        let mut older = false;
+        {
+            // A change counted later is looked at later and queued later: a
+            // reader is never told an older state past a newer one.
+            let _presenting = self.presenting.lock().expect("never poisoned");
+            let rev = self.presence.fetch_add(1, Ordering::SeqCst) + 1;
+            let online = self.online();
+            let readers: Vec<(MachineName, outq::Outq, bool)> = self
+                .sessions()
+                .iter()
+                .map(|(reader, session)| (reader.clone(), session.out.clone(), session.presence))
+                .collect();
+            let store = self.store();
+            for (reader, out, reads) in readers {
+                if !reads {
+                    older = true;
+                } else if reader != *name
+                    && let Some(presence) = views::presence_for(&store, &online, &reader, name)
+                {
+                    let _ = out.send(Out::Frame(Down::Presence { machine: name.clone(), presence, rev }));
+                }
+            }
         }
-        afoot::settle(self);
+        if older {
+            self.presence_changed.notify_one();
+        }
+        self.machine_log_changed.notify_one();
+        self.assists_changed.notify_one();
+        moving::follow::settle(self);
+        forget::prune(self);
+        afoot::came(self);
     }
 
     /// The directory changed, or who is online did: every member is told to
@@ -348,16 +412,47 @@ impl Hub {
     fn changed(&self) {
         self.machine_log_changed.notify_one();
         self.assists_changed.notify_one();
-        let outs: Vec<mpsc::UnboundedSender<Out>> =
-            self.sessions().values().map(|session| session.out.clone()).collect();
-        for out in outs {
-            let _ = out.send(Out::Frame(Down::DirectoryChanged));
-        }
+        self.directory_changed.notify_one();
         control::cut_calls(self);
         data::cut_streams(self);
         moving::follow::settle(self);
         forget::prune(self);
         afoot::settle(self);
+    }
+}
+
+/// How long the hub waits after telling every member the directory changed
+/// before it tells them again.
+const DIRECTORY_SPACING: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Tells every member to look at the directory again whenever it changed,
+/// and the members whose sessions do not read who is online as it changes
+/// whenever that did, at most once each `DIRECTORY_SPACING`: a machine that
+/// keeps coming and going does not have every member read it all again each
+/// time (`specs/world-concurrency.md`, 机器之间). What lost its standing is cut
+/// at once, by `Hub::changed` itself.
+async fn tell_directory(
+    hub: std::sync::Weak<Hub>,
+    changed: Arc<tokio::sync::Notify>,
+    present: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        let every = tokio::select! {
+            () = changed.notified() => true,
+            () = present.notified() => false,
+        };
+        let Some(hub) = hub.upgrade() else { return };
+        let outs: Vec<outq::Outq> = hub
+            .sessions()
+            .values()
+            .filter(|session| every || !session.presence)
+            .map(|session| session.out.clone())
+            .collect();
+        drop(hub);
+        for out in outs {
+            let _ = out.send(Out::Frame(Down::DirectoryChanged));
+        }
+        tokio::time::sleep(DIRECTORY_SPACING).await;
     }
 }
 
@@ -427,7 +522,7 @@ async fn serving(dir: &Path, kept: Option<Kept>, log: Arc<log::Log>) -> anyhow::
         key: std::fs::read(Store::key_file(dir))?,
     };
     let secrets = HubSecrets::from_bytes(&std::fs::read(Store::secrets_file(dir))?).map_err(anyhow::Error::msg)?;
-    let tls = tokio_rustls::TlsAcceptor::from(certificate.server_config().map_err(anyhow::Error::msg)?);
+    let tls = releases::http::Tls::of(&certificate).map_err(anyhow::Error::msg)?;
     let ledgers = ledger::Ledgers::open(dir)?;
     let listen = store.hub.listen;
     let kept = bind(kept, listen).await?;
@@ -440,6 +535,14 @@ async fn serving(dir: &Path, kept: Option<Kept>, log: Arc<log::Log>) -> anyhow::
     ));
     for line in &store.upgraded {
         log.line(format_args!("took up the directory of an earlier fastctx: {line}"));
+    }
+    for line in &store.tidied {
+        log.line(format_args!("on opening, {line}"));
+    }
+    let mut left = Vec::new();
+    let updates = updates::Updates::new(dir, &mut left);
+    for line in left {
+        log.line(format_args!("on opening, {line}"));
     }
     // A move under way goes on; one called off is told to the new place.
     let driven = store.outgoing.as_ref().is_some_and(|outgoing| {
@@ -464,10 +567,20 @@ async fn serving(dir: &Path, kept: Option<Kept>, log: Arc<log::Log>) -> anyhow::
         assists_changed: tokio::sync::Notify::new(),
         next_assist_end: assists::NextEnd::default(),
         afoots: Mutex::new(afoot::Afoots::default()),
-        updates: Mutex::new(updates::Updates::new(dir)),
+        updates: Mutex::new(updates),
         dissolution: tokio::sync::Notify::new(),
+        directory_changed: Arc::new(tokio::sync::Notify::new()),
+        presence_changed: Arc::new(tokio::sync::Notify::new()),
+        presence: AtomicU64::new(0),
+        presenting: Mutex::new(()),
+        health: health::Health::default(),
     });
+    tokio::spawn(health::keep(Arc::downgrade(&hub)));
+    tokio::spawn(data::expire(Arc::downgrade(&hub)));
     tokio::spawn(updates::look_every(Arc::downgrade(&hub)));
+    tokio::spawn(tell_directory(Arc::downgrade(&hub), hub.directory_changed.clone(), hub.presence_changed.clone()));
+    let letters_changed = hub.store().letters_changed.clone();
+    tokio::spawn(mailbox::keep_records(Arc::downgrade(&hub), letters_changed));
     if driven {
         moving::out::drive(&hub);
     }
@@ -493,10 +606,11 @@ async fn serving(dir: &Path, kept: Option<Kept>, log: Arc<log::Log>) -> anyhow::
             Ok(()) = &mut switch => break true,
             why = &mut settled => {
                 hub.log.line(format_args!("{why}: the hub retires"));
-                // What was still answering a machine lets the data go.
+                hub.moving.stop_taking();
+                hub.moving.stop();
                 let deadline = tokio::time::Instant::now() + SILENCE;
-                while Arc::strong_count(&hub) > 1 && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if !hub.moving.settled(deadline).await {
+                    anyhow::bail!("retirement did not finish: persistent work is still under way after {} s", SILENCE.as_secs());
                 }
                 return Ok(Next::Retire(why));
             }
@@ -506,20 +620,34 @@ async fn serving(dir: &Path, kept: Option<Kept>, log: Arc<log::Log>) -> anyhow::
         // The hub moved away: every connection still open here ends, and the
         // old place forwards on the same port.
         hub.moving.stop();
+        keep_letters_now(&hub);
         return Ok(Next::Again(Some(kept)));
     }
+    hub.moving.stop_taking();
     hub.log.line(format_args!("shutting down"));
-    let sessions: Vec<mpsc::UnboundedSender<Out>> =
-        hub.sessions().values().map(|session| session.out.clone()).collect();
+    let sessions: Vec<outq::Outq> = hub.sessions().values().map(|session| session.out.clone()).collect();
     for out in &sessions {
         let _ = out.send(Out::End(Refusal::ShuttingDown));
     }
-    // Each writer says why and closes; one that cannot is gone anyway.
+    // Each writer says why and closes, and what the sessions began, as a
+    // letter being written, is done; one that cannot is gone anyway.
     let deadline = tokio::time::Instant::now() + SILENCE;
     while !hub.sessions().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    if !hub.moving.settled(deadline).await {
+        anyhow::bail!("shutdown did not finish: persistent work is still under way after {} s", SILENCE.as_secs());
+    }
+    hub.store().save_letters_now()?;
     Ok(Next::Stop)
+}
+
+/// Keeps the records of where the letters stand as they are, as the hub
+/// stops: their writer may not have caught up with the last changes.
+fn keep_letters_now(hub: &Hub) {
+    if let Err(error) = hub.store().save_letters_now() {
+        hub.log.line(format_args!("recording where the letters stand: {error}"));
+    }
 }
 
 pub(crate) async fn shutdown_signal() {
@@ -619,6 +747,11 @@ async fn intended(
                 forgets,
                 roles,
                 versions,
+                due,
+                left,
+                cancels,
+                presence,
+                parts,
             },
         ) => {
             let said = control::Said {
@@ -632,6 +765,11 @@ async fn intended(
                 forgets,
                 roles,
                 versions,
+                due,
+                left,
+                cancels,
+                presence,
+                parts,
             };
             control::session(hub, socket, peer, binding, key, proof, letters, said).await;
         }
@@ -674,10 +812,12 @@ pub(crate) async fn send(socket: &mut Socket, frame: &Down) -> Result<(), String
     socket.send(WsMessage::Binary(wire::encode(frame).into())).await.map_err(|error| error.to_string())
 }
 
-/// Says why the hub will not go on, and closes; whether it was said.
+/// Says why the hub will not go on, and closes; whether it was said. Neither
+/// waits longer than the silence on a machine that does not read.
 pub(crate) async fn refuse(socket: &mut Socket, reason: Refusal) -> bool {
-    let said = send(socket, &Down::Refused { reason }).await.is_ok();
-    let _ = socket.close(None).await;
+    let said =
+        tokio::time::timeout(SILENCE, send(socket, &Down::Refused { reason })).await.is_ok_and(|sent| sent.is_ok());
+    let _ = tokio::time::timeout(SILENCE, socket.close(None)).await;
     said
 }
 

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fastctx_net::wire;
-use fastctx_types::kernel::{AARCH64_ARCHIVE, RELEASE_PATH, SUMS, X86_64_ARCHIVE, release_version};
+use fastctx_types::kernel::{AARCH64_ARCHIVE, RELEASE_PATH, SUMS, WINDOWS_X86_64_ARCHIVE, X86_64_ARCHIVE, release_version};
 use futures_util::TryStreamExt as _;
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt as _, Full, StreamBody};
@@ -43,17 +43,43 @@ impl Host {
 }
 
 type Body = UnsyncBoxBody<Bytes, io::Error>;
-type TlsStream = tokio_rustls::server::TlsStream<TcpStream>;
+type TlsStream = tokio_rustls::server::TlsStream<fastctx_net::pulse::Pulsing<TcpStream>>;
 
-pub(crate) async fn serve(host: Host, tls: tokio_rustls::TlsAcceptor, tcp: TcpStream, peer: SocketAddr) {
+/// The hub's two ways of TLS: TLS 1.3 for everything, and TLS 1.2 for the
+/// release files alone, to a downloader that offers nothing newer.
+#[derive(Clone)]
+pub(crate) struct Tls {
+    session: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
+    download: std::sync::Arc<tokio_rustls::rustls::ServerConfig>,
+}
+
+impl Tls {
+    pub(crate) fn of(certificate: &fastctx_net::tls::HubCertificate) -> Result<Self, String> {
+        Ok(Self { session: certificate.server_config()?, download: certificate.download_config()? })
+    }
+}
+
+pub(crate) async fn serve(host: Host, tls: Tls, tcp: TcpStream, peer: SocketAddr) {
     // Keep the existing initial handshake budget. File transfer itself has
     // no deadline: a slow download must not be cut off by a session policy.
     let deadline = Instant::now() + wire::SILENCE;
     // A connection that never becomes a session or a download is logged
     // with where it came from and why, so a machine that could not get in
     // leaves a trace here as well as in its own log.
-    let stream = match tokio::time::timeout_at(deadline, tls.accept(tcp)).await {
-        Ok(Ok(stream)) => stream,
+    let handshake = async {
+        let start = tokio_rustls::LazyConfigAcceptor::new(
+            tokio_rustls::rustls::server::Acceptor::default(),
+            fastctx_net::pulse::Pulsing::new(tcp),
+        )
+        .await?;
+        // A downloader that stops at TLS 1.2, as Windows 10's own tools
+        // do, is answered with the release files and nothing else.
+        let session = fastctx_net::tls::offers_tls13(&start.client_hello());
+        let config = if session { tls.session.clone() } else { tls.download.clone() };
+        start.into_stream(config).await.map(|stream| (stream, session))
+    };
+    let (stream, session) = match tokio::time::timeout_at(deadline, handshake).await {
+        Ok(Ok(accepted)) => accepted,
         Ok(Err(error)) => {
             host.log().line(format_args!("{peer}: the TLS handshake failed: {error}"));
             return;
@@ -63,13 +89,16 @@ pub(crate) async fn serve(host: Host, tls: tokio_rustls::TlsAcceptor, tcp: TcpSt
             return;
         }
     };
+    // Only a session is bound to its connection; a download needs no
+    // binding, and TLS 1.2 may not give one.
     let mut binding = [0; 32];
-    if let Err(error) = stream.get_ref().1.export_keying_material(&mut binding, wire::EXPORTER_LABEL, None) {
+    if session && let Err(error) = stream.get_ref().1.export_keying_material(&mut binding, wire::EXPORTER_LABEL, None)
+    {
         host.log().line(format_args!("{peer}: the TLS exporter failed: {error}"));
         return;
     }
     let log = host.clone();
-    let service = service_fn(move |request| respond(host.clone(), request, peer, binding, deadline));
+    let service = service_fn(move |request| respond(host.clone(), request, peer, binding, deadline, session));
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.timer(TokioTimer::new()).header_read_timeout(deadline.saturating_duration_since(Instant::now()));
     // keep_alive(false) rewrites Connection: Upgrade and breaks WebSockets.
@@ -84,8 +113,13 @@ async fn respond(
     peer: SocketAddr,
     binding: [u8; 32],
     deadline: Instant,
+    session: bool,
 ) -> Result<Response<Body>, Infallible> {
     let path = request.uri().path().to_owned();
+    if !session && (path == wire::CONTROL_PATH || path == wire::DATA_PATH) {
+        host.log().line(format_args!("{peer}: refused a session over TLS 1.2 on {path}"));
+        return Ok(text(StatusCode::UPGRADE_REQUIRED, "Sessions need TLS 1.3"));
+    }
     if path == wire::CONTROL_PATH || path == wire::DATA_PATH {
         let upgrade = hyper::upgrade::on(&mut request);
         let response = match tokio_tungstenite::tungstenite::handshake::server::create_response(&request.map(|_| ())) {
@@ -141,14 +175,24 @@ async fn respond(
     if !release_version(version) {
         return Ok(text(StatusCode::NOT_FOUND, "Not found"));
     }
-    let gzip = match name {
-        SUMS => false,
-        X86_64_ARCHIVE | AARCH64_ARCHIVE => true,
+    let kind = match name {
+        SUMS => "text/plain; charset=utf-8",
+        X86_64_ARCHIVE | AARCH64_ARCHIVE => "application/gzip",
+        WINDOWS_X86_64_ARCHIVE => "application/zip",
         _ => return Ok(text(StatusCode::NOT_FOUND, "Not found")),
     };
     let (version, name) = (version.to_owned(), name.to_owned());
     let releases = hub.releases.clone();
-    let opened = tokio::task::spawn_blocking(move || releases.file(&version, &name)).await;
+    // The Windows archive placed by hand comes first, as Linux ones do; else
+    // the one held among the update packages, checked when it came.
+    let held = (name == WINDOWS_X86_64_ARCHIVE).then(|| crate::updates::windows_archive(&hub, &version)).flatten();
+    let opened = tokio::task::spawn_blocking(move || match releases.file(&version, &name) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && held.is_some() => {
+            std::fs::File::open(held.expect("checked above"))
+        }
+        opened => opened,
+    })
+    .await;
     let file = match opened {
         Ok(Ok(file)) => file,
         Ok(Err(error)) => {
@@ -194,7 +238,7 @@ async fn respond(
     };
     let mut response = Response::builder()
         .status(status)
-        .header("Content-Type", if gzip { "application/gzip" } else { "text/plain; charset=utf-8" })
+        .header("Content-Type", kind)
         .header("Content-Length", sending)
         .header("Accept-Ranges", "bytes");
     if status == StatusCode::PARTIAL_CONTENT {

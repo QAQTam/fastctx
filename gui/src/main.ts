@@ -20,14 +20,17 @@ import "./longview/longview.css";
 import "./app/shell.css";
 import "./app/sheet.css";
 import "./app/updates.css";
+import "./app/versions.css";
 import "./app/pages.css";
 import "./app/accounts.css";
 import "./app/me.css";
 import "./app/when.css";
 import "./app/assist.css";
 import "./app/machines.css";
+import "./app/machine-framed.css";
 import "./app/machine-list.css";
 import "./app/machine-page.css";
+import "./app/machine-manage.css";
 import "./app/agents.css";
 import "./app/features.css";
 import "./app/removal.css";
@@ -82,6 +85,8 @@ import { ProjectForm } from "./app/project-form";
 import { link, placeOf, talkLink, type Place } from "./app/places";
 import { MachinePage } from "./app/machine-page";
 import { enMachinePage, zhMachinePage } from "./app/machine-page-words";
+import { enManage, zhManage } from "./app/machine-manage-words";
+import { enBatch, zhBatch } from "./app/machine-batch-words";
 import { enNameSaid, zhNameSaid } from "./app/name-words";
 import { specimenStats } from "./specimen/stats";
 import { SettingsPage } from "./app/settings";
@@ -129,7 +134,7 @@ import type { FocusPlace } from "./app/focus-panel";
 import { folders as foldersOf, noFocus, type Focus, type Folders } from "./world/focus";
 import { Details } from "./conversation/details";
 import { ComposerSession } from "./conversation/composer";
-import { attachmentThumbnail, fetchAttachment, fetchFile, openLocal, reveal, saveAs, thumbnail, thumbnailUrl, type Saved, type Thumbnail } from "./world/files";
+import { allowPrivacy, attachmentThumbnail, fetchAttachment, fetchFile, openLocal, reveal, saveAs, thumbnail, thumbnailUrl, type Saved, type Thumbnail } from "./world/files";
 import { specimenComposer } from "./specimen/composer";
 import { ClaudeConsent } from "./app/claude-consent";
 import { Conversation } from "./conversation/conversation";
@@ -254,6 +259,11 @@ import { en, zh } from "./words";
 import { updates as updateSeam } from "./world/updates";
 import { Updates } from "./app/updates";
 import { UpdateCard } from "./app/update-card";
+import { updateOlder } from "./app/update-older";
+import { superLoginOver } from "./app/machine-logins";
+import { VersionWindow } from "./app/version-window";
+import { showAttachedWith } from "./conversation/attached-pictures";
+import { viewPictures } from "./conversation/pictures";
 import { enUpdate, zhUpdate } from "./app/update-words";
 import { specimenUpdates } from "./specimen/updates";
 import { getVersion } from "@tauri-apps/api/app";
@@ -646,7 +656,7 @@ const tokens = new Tokens({
       : specimenCode(login, kind === "phone" ? "scan" : "paste", kind, asked),
   server: (login, asked) =>
     live
-      ? serverCommand(login.hubName, login.account, asked.name, codeExpires(asked), asked.managed, asked.uses === 1 ? null : asked.uses, asked.label)
+      ? serverCommand(login.hubName, login.account, asked.name, codeExpires(asked), asked.managed, asked.uses === 1 ? null : asked.uses, asked.label, asked.windows ?? false)
       : specimenCode(login, "line", "computer", asked).then(() => "echo 'Specimen: no real token or download'"),
   codes: (login) => codesOf(store.world.peek()?.accounts.hubs.find((hub) => hub.hub === login.hub), login, new Date()),
   revoke: revokeCode,
@@ -837,21 +847,69 @@ function idleHere(): boolean {
 }
 
 const updateWords = english ? enUpdate : zhUpdate;
+/** Where updates are asked: this device's node or device, or the specimen's
+ *  stand-in, one for the page's whole life so what it keeps holds. */
+const specimenUpdate = live ? null : specimenUpdates(params, params.has("phone"));
+const updatesAsked = specimenUpdate ? specimenUpdate.seam : updateSeam;
 const appUpdates = (() => {
-  if (live) {
-    const updates = new Updates(updateSeam, idleHere);
+  const updates = new Updates(updatesAsked, idleHere);
+  if (specimenUpdate) updates.know(specimenUpdate.version);
+  else
     void getVersion().then(
       (version) => updates.know(version),
       (error: unknown) => console.error("reading this application's version", error),
     );
-    return updates;
-  }
-  const specimen = specimenUpdates(params, params.has("phone"));
-  const updates = new Updates(specimen.seam, idleHere);
-  updates.know(specimen.version);
   return updates;
 })();
+/** Has a machine of 1.0.1 beta 1 or 2 update itself, its line named first
+ *  under an earlier hub (`app/update-older.ts`). */
+const updateOlderMachine = (name: string) =>
+  updateOlder(name, {
+    network: () => appUpdates.state.peek()?.network,
+    superOver: (machine) => {
+      const world = store.world.peek();
+      // The policy this device knows is its one hub's; on several, whose it
+      // is is not told apart here, and the line is left as it is.
+      if (!world || world.accounts.hubs.length !== 1) return undefined;
+      const found = machinesOf(world).find((one) => one.name === machine);
+      return found ? superLoginOver(found, world) : undefined;
+    },
+    change,
+    machine: (one) => updatesAsked.machine(one),
+  });
 const updateCard = new UpdateCard(appUpdates, updateWords, live ? !onComputer() : params.has("phone"));
+const versionWindow = new VersionWindow(updateWords.versions);
+// A picture attached and not yet sent opens in the same viewer as the
+// conversation's pictures.
+showAttachedWith((images, index) => viewPictures(images, index, (english ? en : zh).pictures));
+
+/** The window of versions picking the network's lowest version, from the
+ *  releases this device knows. */
+function minimumVersions(current: string | null, pick: (version: string | null) => void): void {
+  const state = appUpdates.state.peek();
+  if (!state) return;
+  versionWindow.open(
+    { who: null, running: appUpdates.version, state, look: () => appUpdates.look().then(() => appUpdates.state.peek() ?? state) },
+    { kind: "minimum", current, pick: async (version) => pick(version) },
+  );
+}
+
+/** The window of versions for this device: a version picked comes as the
+ *  newest would, its card saying how. */
+function versionsHere(look: boolean): void {
+  const state = appUpdates.state.peek();
+  if (!state) return;
+  versionWindow.open(
+    {
+      who: null,
+      running: appUpdates.version,
+      state,
+      look: () => appUpdates.look().then(() => appUpdates.state.peek() ?? state),
+    },
+    { kind: "update", pick: (version) => appUpdates.pick(version).then(() => updateCard.open()) },
+    look,
+  );
+}
 
 const shell = new Shell({
   store,
@@ -1412,7 +1470,8 @@ function liveTalk(address: Address): KeepablePage {
   // A conversation just begun here opens with its first words on their way.
   const seed = seeds.get(talkKey(address));
   seeds.delete(talkKey(address));
-  if (seed) conversation.sending(seed.text, here, seed.attached);
+  // The World answered for them as it opened the conversation.
+  if (seed) conversation.named(conversation.sending(seed.text, here, seed.attached), null);
   // Names of files for an `@`, on the agent's machine, in its places.
   const search = new FileSearch(address.machine, address.resident);
   const page: ConversationPage = new ConversationPage({
@@ -1526,7 +1585,8 @@ function liveTalk(address: Address): KeepablePage {
         },
         address.machine,
       )
-        .then(({ to, landed }) => {
+        .then(({ to, landed, delivery }) => {
+          conversation.named(key, delivery ?? null);
           // Words in a turn take their place when the session hears them;
           // words in no turn yet say where they are.
           if (landed.kind === "waiting" || landed.kind === "sent" || landed.kind === "uncertain") {
@@ -1566,6 +1626,11 @@ function liveTalk(address: Address): KeepablePage {
   // it; what is new is shown at once. When the host replaced or removed
   // turns, or what came does not follow what is held, all of it is read
   // again.
+  // Whether its machine tells what holds of it now (`Fold.now`): one too old
+  // to is followed by the World's listing of it instead, once the page has
+  // heard nothing for a while.
+  let nowTold = false;
+  let heardAt = Date.now();
   const reading = watched.open(address, {
     window: (window, parts) => page.reopened(() => conversation.open(window, parts)),
     extended: (start, events) => {
@@ -1577,6 +1642,7 @@ function liveTalk(address: Address): KeepablePage {
       page.update({ read: true });
     },
     happened: (at, event) => {
+      heardAt = Date.now();
       if (!conversation.happened(at, event) || conversation.stale) reading.again();
       page.update();
     },
@@ -1589,6 +1655,15 @@ function liveTalk(address: Address): KeepablePage {
     resumed: () => page.resumed(),
     ended: (why) => {
       page.lost(why);
+      page.update();
+    },
+    refused: (why) => {
+      page.refused(why);
+      page.update();
+    },
+    now: (busy, turn, kept) => {
+      nowTold = true;
+      conversation.now(busy, turn, kept);
       page.update();
     },
     deleted: () => gone(),
@@ -1627,6 +1702,18 @@ function liveTalk(address: Address): KeepablePage {
         if (!left && presence === "deleted") queueMicrotask(gone);
         const known = residentAt(now, address);
         const who = someoneOf(now, address);
+        if (
+          !left &&
+          !nowTold &&
+          known?.now &&
+          known.now.activity !== "busy" &&
+          !known.now.turn &&
+          conversation.busy() &&
+          Date.now() - heardAt > QUIET_BEFORE_LISTED
+        ) {
+          conversation.now(false, null, []);
+          page.update();
+        }
         if (!known || !who || left) return;
         if (shown && who.agent === shown.agent && who.project === shown.project && who.model === shown.model && JSON.stringify(who.focus) === JSON.stringify(shown.focus)) return;
         shown = who;
@@ -1647,6 +1734,10 @@ function liveTalk(address: Address): KeepablePage {
     },
   };
 }
+
+/** How long a page whose machine does not tell what holds of it now hears
+ *  nothing before it holds to the World's listing instead. */
+const QUIET_BEFORE_LISTED = 10_000;
 
 /** The conversations looked at last, alive (`conversation/kept.ts`). */
 const keptTalks = new KeptPages();
@@ -1852,6 +1943,7 @@ function show(next: Place): void {
         stats: (machine, after) => (live ? machineStats(machine, after) : specimenStats(machine, after)),
         nameProblem: (text) => (live ? nameProblem("machine", text) : specimenNameProblem("machine", text)),
         change,
+        log: live ? machineLog : specimenMachineLog,
         renameHere: async (to) => {
           if (live) return renameHere(to);
           const renamed = specimenRenameHere(store.world.peek(), to);
@@ -1862,9 +1954,14 @@ function show(next: Place): void {
         replace: (to) => replacePlace(link(to)),
         updates: {
           state: appUpdates.state,
-          machine: (name) => (live ? updateSeam.machine(name) : specimenUpdates(params, false).seam.machine(name)),
+          machine: updateOlderMachine,
+          remote: (name, call) => updatesAsked.remote(name, call),
+          versions: versionWindow,
+          versionsHere,
           words: updateWords,
         },
+        manage: english ? enManage : zhManage,
+        ...(live ? { allowPrivacy: () => void allowPrivacy().catch((error: unknown) => console.error("opening the Mac's privacy settings", error)) } : {}),
       });
       break;
     }
@@ -1872,9 +1969,16 @@ function show(next: Place): void {
       page = new MachinesPage({
         store,
         updates: {
-          policy: () => appUpdates.state.peek()?.network?.policy ?? { channel: "stable" },
+          policy: () => appUpdates.state.peek()?.network?.policy ?? {},
           words: updateWords,
+          minimum: minimumVersions,
+          state: appUpdates.state,
+          remote: (name, call) => updatesAsked.remote(name, call),
+          older: updateOlderMachine,
+          versions: versionWindow,
         },
+        batch: english ? enBatch : zhBatch,
+        manage: english ? enManage : zhManage,
         words: english ? enMachines : zhMachines,
         access: english ? enAccess : zhAccess,
         people: english ? enPeople : zhPeople,
@@ -2108,7 +2212,7 @@ function show(next: Place): void {
         updates: {
           updates: appUpdates,
           words: updateWords,
-          open: () => updateCard.open(),
+          versions: versionsHere,
           relays: live ? onComputer() : !params.has("phone"),
         },
         notifyChanged: (on) => {

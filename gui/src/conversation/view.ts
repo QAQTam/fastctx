@@ -992,6 +992,8 @@ export class ConversationView {
   private lineSays(blocks: readonly Block[]): LineSays | null {
     if (!this.followed) return null;
     const conversation = this.conversation;
+    // Asked to stop, it is not said to go on while its host ends it.
+    if (conversation.halting()) return null;
     const waiting = conversation.waiting();
     const busy = conversation.busy();
     // The first words are on their way, and nothing has come back.
@@ -1416,7 +1418,7 @@ export class ConversationView {
       // when it is not this one. Words not yet heard say how they stand.
       const who =
         from && from.machine !== this.context.here ? `<div class="bubble-from">${escape(words.you(from.machine))}</div>` : "";
-      const state = sending ? ` ${sending.state}` : "";
+      const state = sending && sending.state !== "settled" ? ` ${sending.state}` : "";
       let note = "";
       if (sending?.state === "failed") note = `<div class="bubble-note wrong" title="${escape(sending.why)}">${escape(words.notSent(sending.why))}</div>`;
       if (sending?.state === "waiting") note = `<div class="bubble-note" title="${escape(sending.why)}">${escape(words.waitingToSend)}</div>`;
@@ -1994,8 +1996,8 @@ export class ConversationView {
       {
         lines,
         ...(Array.isArray(lines) ? { source: new DiffLines(lines as readonly string[]) } : {}),
-        paint: diffPaint(path, this.context.words.unchangedLines),
-        kind: numberedRows ? "diff" : "diff unnumbered",
+        paint: diffPaint(path, this.context.words.unchangedLines, numberedRows),
+        kind: "diff",
       },
       path,
       this.layoutAnchor,

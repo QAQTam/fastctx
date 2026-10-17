@@ -31,7 +31,6 @@ export interface MachinePageWords {
   cpu: string;
   memory: string;
   gpu: string;
-  network: string;
   /** The section listing each network card, apart from the network the
    *  machine is in. */
   cards: string;
@@ -87,6 +86,26 @@ export interface MachinePageWords {
   networks: string;
   /** The group its owner put it in (`world-network.md`, 机器的分组). */
   group: string;
+  /** Its name, among what can be done to it. */
+  name: string;
+  /** How long its node has run, among its facts. */
+  node: string;
+  /** Its direct links, in 「网络」. */
+  direct: string;
+  /** The three tabs, and the tab list as a whole. */
+  tabs: { now: string; net: string; manage: string };
+  tabsLabel: string;
+  /** The Fastctx on it, on its identity line. */
+  fastctxRuns(version: string): string;
+  fastctxLatest: string;
+  fastctxBehind(newer: string): string;
+  /** Work of its own that is stuck, as it says, and for how long. */
+  stuck(doing: string, what: string, span: string): string;
+  /** A place macOS kept private from it: on that Mac with the way to allow
+   *  Fastctx in, elsewhere where it is allowed. */
+  privacyHere(path: string): string;
+  privacyThere(path: string): string;
+  privacyGo: string;
 
   reading: string;
   failed: string;
@@ -133,11 +152,10 @@ export const zhMachinePage: MachinePageWords = {
   cpu: "处理器",
   memory: "内存",
   gpu: "显卡",
-  network: "网络",
   cards: "网卡",
   disks: "磁盘",
   connection: "连线",
-  about: "关于",
+  about: "资料",
   present: "在这台上",
   othersAtWork: (count) => `另有 ${count} 个在跑`,
   sharing: "共享与协助",
@@ -154,7 +172,7 @@ export const zhMachinePage: MachinePageWords = {
   moved: (down, up) => `累计 ↓ ${down} ↑ ${up}`,
   upFor: "已开机",
   bootAt: (stamp) => `开机于 ${stamp}`,
-  nodeFor: (span) => `本机服务已运行 ${span}`,
+  nodeFor: (span) => `已运行 ${span}`,
   service: "开机服务",
   noService: "随登录运行",
 
@@ -177,8 +195,20 @@ export const zhMachinePage: MachinePageWords = {
   home: "主目录",
   booted: "开机于",
   version: "Fastctx",
-  networks: "网络",
+  networks: "所在网络",
   group: "分组",
+  name: "名字",
+  node: "本机服务",
+  direct: "直连",
+  tabs: { now: "状况", net: "网络", manage: "管理" },
+  tabsLabel: "这台的详情",
+  fastctxRuns: (version) => `Fastctx ${version}`,
+  fastctxLatest: "已是最新",
+  fastctxBehind: (newer) => `可更新到 ${newer}`,
+  stuck: (doing, what, span) => `卡住 ${span}：${doing} 在等 ${what}`,
+  privacyHere: (path) => `macOS 没让 Fastctx 进 ${path}：在「完全磁盘访问权限」里打开 Fastctx，授权一次，换版也有效`,
+  privacyThere: (path) => `macOS 没让 Fastctx 进 ${path}：在那台 mac 的「系统设置 › 隐私与安全性 › 完全磁盘访问权限」里打开 Fastctx`,
+  privacyGo: "去授权",
 
   reading: "读取中…",
   failed: "读取失败",
@@ -218,11 +248,10 @@ export const enMachinePage: MachinePageWords = {
   cpu: "Processor",
   memory: "Memory",
   gpu: "Graphics",
-  network: "Network",
   cards: "Network cards",
   disks: "Disks",
   connection: "Connection",
-  about: "About",
+  about: "Details",
   present: "On it",
   othersAtWork: (count) => `${count} more running`,
   sharing: "Sharing",
@@ -239,7 +268,7 @@ export const enMachinePage: MachinePageWords = {
   moved: (down, up) => `in all ↓ ${down} ↑ ${up}`,
   upFor: "Up for",
   bootAt: (stamp) => `Started ${stamp}`,
-  nodeFor: (span) => `Local service up for ${span}`,
+  nodeFor: (span) => `Up for ${span}`,
   service: "Starts with the computer",
   noService: "Runs while signed in",
 
@@ -264,6 +293,18 @@ export const enMachinePage: MachinePageWords = {
   version: "Fastctx",
   networks: "Networks",
   group: "Group",
+  name: "Name",
+  node: "Local service",
+  direct: "Direct links",
+  tabs: { now: "Status", net: "Network", manage: "Manage" },
+  tabsLabel: "This machine's details",
+  fastctxRuns: (version) => `Fastctx ${version}`,
+  fastctxLatest: "Up to date",
+  fastctxBehind: (newer) => `${newer} available`,
+  stuck: (doing, what, span) => `Stuck ${span}: ${doing} waits for ${what}`,
+  privacyHere: (path) => `macOS keeps ${path} from Fastctx: turn Fastctx on in Full Disk Access; once is enough, across versions`,
+  privacyThere: (path) => `macOS keeps ${path} from Fastctx: turn Fastctx on in System Settings › Privacy & Security › Full Disk Access on that Mac`,
+  privacyGo: "Allow",
 
   reading: "Reading…",
   failed: "Couldn't read",

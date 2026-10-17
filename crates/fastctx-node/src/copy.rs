@@ -51,6 +51,15 @@ use crate::Node;
 use crate::again::Again;
 use crate::learned::Holding;
 
+mod accepting;
+
+/// A new caller's optional stream acknowledges business admission before filesystem work.
+pub(crate) async fn accept(stream: Option<Stream>) -> Result<Option<Stream>, Failure> {
+    let Some(mut stream) = stream else { return Ok(None) };
+    stream.say(&accepting::ACCEPTED).await.map_err(Failure::new)?;
+    Ok(Some(stream))
+}
+
 /// What the destination says once it has the manifest.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -113,7 +122,7 @@ fn ended(failure: CallFailure, began: &Began) -> Failure {
 /// A copy asked of `machine` that it did not answer: it may have reached
 /// the machine, which copies on, so the copy began.
 fn asked(failure: CallFailure, began: &Began) -> Failure {
-    if matches!(failure, CallFailure::Unknown { .. }) {
+    if matches!(failure, CallFailure::Unknown { .. } | CallFailure::Unreadable { .. }) {
         began.now();
     }
     ended(failure, began)
@@ -204,12 +213,7 @@ async fn asked_of(
     to: Place,
     began: &Began,
 ) -> Result<CopyReport, Failure> {
-    let call = RemoteCall::CopySend { from, to };
-    match node.call(acting, source, Purpose::Hands, call).await.map_err(|failure| asked(failure, began))? {
-        Ok(RemoteReply::Copied(report)) => Ok(report),
-        Ok(_) => Err(Failure::new(format!("{source} answered something other than a copy"))),
-        Err(failure) => Err(failure),
-    }
+    accepting::ask(node, acting, source, from, to, began).await
 }
 
 fn same_machine(node: &Node, from: &Written, to: &Written) -> Result<bool, Failure> {
@@ -666,17 +670,23 @@ async fn take_files(
         let from = if resumes { from } else { 0 };
         // Going on with a file may read what is here of it.
         let known = holding.known.clone();
-        let (back, (left, mut arriving)) = blocking(move || {
+        let preparing = stream.settling();
+        let (back, (left, arriving)) = blocking(move || {
+            let _preparing = preparing;
             let arrival = receiver.arrive(index, from, &mut known.lock().expect("never poisoned"));
             (receiver, arrival)
         })
         .await?;
         receiver = back;
-        let taken = stream.take(left, |piece| arriving.write(piece)).await;
+        let work = stream.receipt_work();
+        let (arriving, taken) =
+            stream.take_writing(left, arriving, |arriving, piece| arriving.write(piece)).await.map_err(failure)?;
         // Putting a file in place makes it lasting; one the copy broke off
         // in is kept as it stands, for the try after this one.
         let (known, broke_off) = (holding.known.clone(), taken.is_err());
+        let settling = work.begin();
         receiver = blocking(move || {
+            let _settling = settling;
             let known = &mut known.lock().expect("never poisoned");
             if broke_off {
                 receiver.broke(index, arriving, known);
@@ -688,7 +698,13 @@ async fn take_files(
         .await?;
         taken.map_err(failure)?;
     }
-    receiver.link();
+    let settling = stream.settling();
+    let receiver = blocking(move || {
+        let _settling = settling;
+        receiver.link();
+        receiver
+    })
+    .await?;
     Ok(CopyReport {
         from: String::new(),
         from_machine: node.machine(),

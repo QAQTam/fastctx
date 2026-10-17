@@ -14,6 +14,7 @@ pub mod afoot;
 pub mod again;
 #[cfg(target_os = "android")]
 pub mod android;
+pub mod around;
 pub mod arrivals;
 pub mod cancellable;
 pub mod data;
@@ -34,6 +35,9 @@ pub mod message;
 pub mod moving;
 pub mod peer;
 pub mod proxy;
+pub mod pulse;
+mod queue;
+pub mod reassembly;
 pub mod route;
 pub mod sign;
 pub mod tls;

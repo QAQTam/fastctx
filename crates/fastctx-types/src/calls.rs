@@ -399,6 +399,9 @@ pub enum Call {
         /// history then comes as segments, only those it does not hold.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         held: Option<crate::session::held::Held>,
+        /// The viewer reads `session::Watched::Now`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        now: bool,
     },
     /// Opens a session for the user: a resident of `agent` started on this
     /// machine or on `node`, in `town`, with the user's words as its first.
@@ -432,9 +435,17 @@ pub enum Call {
     /// New versions of Fastctx for this machine (`crate::update`).
     Update(crate::update::UpdateCall),
     /// Update `machine`'s World program from the newest release on its
-    /// channel; answered with how updates stand there.
+    /// line; answered with how updates stand there. What interfaces before
+    /// 1.0.1 beta 3 ask; later ones ask `MachineUpdates`.
     UpdateMachine {
         machine: MachineName,
+    },
+    /// New versions of Fastctx on `machine`, this one or another of the
+    /// network's (`crate::update::UpdateCall`); answered with how updates
+    /// stand there.
+    MachineUpdates {
+        machine: MachineName,
+        update: crate::update::UpdateCall,
     },
     /// Manage this resident as the user, on its own machine.
     Manage {
@@ -560,9 +571,9 @@ pub enum Call {
     RenameHere {
         to: MachineName,
     },
-    /// An enrollment token that registers a Linux server as a machine of
-    /// `account`, and the line that installs it there with this node's
-    /// version.
+    /// An enrollment token that registers a Linux server, or a Windows
+    /// computer, as a machine of `account`, and the line that installs it
+    /// there with this node's version.
     ServerCommand {
         hub: Option<crate::HubName>,
         account: crate::AccountName,
@@ -579,6 +590,9 @@ pub enum Call {
         /// What the code in it is called; for several servers, their group.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// The line is for Windows computers, not Linux servers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        windows: bool,
     },
     /// Moving the hub named `hub`, or the one hub, as `account`, its super
     /// administrator (`crate::hub_move`).
@@ -676,6 +690,10 @@ pub enum Reply {
     Spoken {
         to: Address,
         landed: Landed,
+        /// The words' id on the machine they went to, where the device that
+        /// sent them named them (`Watched::Now`'s `kept`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<crate::NoticeId>,
     },
     Opened {
         resident: Address,

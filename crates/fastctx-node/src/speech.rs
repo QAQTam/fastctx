@@ -81,7 +81,17 @@ pub async fn tell(
 /// the way its host lets the World in.
 pub async fn tell_here(node: &Arc<Node>, to: &ResidentId, delivery: Delivery, owed: Owed) -> Result<Landed, Failure> {
     let gate = node.residents.management(to)?;
-    let _reading = gate.read().await;
+    // Someone's words are asked from outside: one being deleted refuses
+    // them at once, and they wait for what changes its life no longer than
+    // anything else asked. What comes of work waits as long as it takes.
+    let _reading = if matches!(delivery.notice, Notice::Words { .. } | Notice::Attached { .. }) {
+        if node.residents.is_deleting(to) {
+            return Err(Failure::new(format!("{to} is being deleted")));
+        }
+        crate::gate_waits::shared(node, to, &gate).await?
+    } else {
+        gate.read().await
+    };
     tell_here_locked(node, to, delivery, owed).await
 }
 
@@ -136,7 +146,7 @@ pub(crate) async fn tell_here_locked(
             }
         }
     }
-    let pending = Pending { delivery, readers, state: PendingState::Waiting, working, session: None };
+    let pending = Pending { delivery, readers, state: PendingState::Waiting, working, session: None, since: None };
     let kept = {
         let (directory, pending) = (directory.clone(), pending.clone());
         tokio::task::spawn_blocking(move || crate::inbox::keep(&directory, &pending))
@@ -212,6 +222,10 @@ pub async fn hand_over(
     directory: &ConversationDir,
     pending: Pending,
 ) -> Result<Landed, Failure> {
+    let _doing = fastctx_platform::doing::doing(format!("handing {} to {to}", pending.delivery.id));
+    // Startup's recovery may need the gate alone, as to finish a deletion:
+    // nothing waits for it holding the gate.
+    node.ready().await;
     let gate = node.residents.management(to)?;
     let _reading = gate.read().await;
     hand_over_locked(node, to, about, directory, pending).await
@@ -299,8 +313,14 @@ pub async fn send_composer(
         let Some(_answering) = node.handoff.call() else {
             return Err(Failure::new(crate::handoff::WAITING));
         };
-        let pending =
-            Pending { delivery, readers: Vec::new(), state: PendingState::Waiting, working: false, session: None };
+        let pending = Pending {
+            delivery,
+            readers: Vec::new(),
+            state: PendingState::Waiting,
+            working: false,
+            session: None,
+            since: None,
+        };
         return submit_thread(node, id, thread, &directory, pending, true, idle_only).await;
     }
     if idle_only && node.residents.now(id).is_some_and(|now| now.activity == fastctx_types::residents::Activity::Busy) {
@@ -456,6 +476,8 @@ async fn submit_thread(
             if single {
                 crate::inbox::withdraw(directory, &pending.delivery.id)
                     .map_err(|error| Failure::new(error.to_string()))?;
+            } else {
+                again_later(node, id, &about, directory, pending.clone());
             }
             return Err(Failure::new(why));
         }
@@ -484,12 +506,45 @@ async fn submit_thread(
         crate::turns::health(node, id, Some(sent.turn.clone()), health)
             .map_err(|error| Failure::new(error.to_string()))?;
     }
+    AGAIN.lock().expect("never poisoned").remove(id);
     // What waited and could not go in with these goes in next, as they would
     // have, rather than waiting for something else to wake it.
     if let Some(next) = left.into_iter().next() {
         hand_over_later(node.clone(), id.clone(), about, directory.clone(), next);
     }
     Ok(Some(if sent.joined { Landed::JoinedTurn { turn: sent.turn } } else { Landed::NewTurn { turn: sent.turn } }))
+}
+
+/// How many times words Codex did not take have been offered again, for each
+/// resident, since it last took any.
+static AGAIN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ResidentId, u32>>> =
+    std::sync::LazyLock::new(Default::default);
+/// How many times they are offered again before they wait for the next
+/// words, or the node's next start, to take them in.
+const AGAIN_TRIES: u32 = 5;
+
+/// Words Codex did not take go in at its next chance, not only with the next
+/// words said (`specs/world-concurrency.md`, 一句话没交出去，下一个机会就交):
+/// they are offered again after a while, longer each time it still does not
+/// take them.
+fn again_later(node: &Arc<Node>, id: &ResidentId, about: &About, directory: &ConversationDir, pending: Pending) {
+    let tries = {
+        let mut again = AGAIN.lock().expect("never poisoned");
+        let tries = again.entry(id.clone()).or_insert(0);
+        if *tries >= AGAIN_TRIES {
+            return;
+        }
+        *tries += 1;
+        *tries
+    };
+    let delay = std::time::Duration::from_secs(5 * 3u64.pow(tries - 1));
+    let (node, id, about, directory) = (node.clone(), id.clone(), about.clone(), directory.clone());
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        if let Err(failure) = hand_over(&node, &id, &about, &directory, pending).await {
+            node.log.line(format_args!("words for {id} wait still: {}", failure.message));
+        }
+    });
 }
 
 /// Hands `pending` over in a task of its own.
@@ -536,6 +591,19 @@ pub async fn bind(
         let owner = crate::delivery::session(directory, turn).map_err(|error| Failure::new(error.to_string()))?;
         let active = owner.is_none() || node.residents.about(id).is_some_and(|(about, _)| about.session == owner);
         node.residents.owe(&node.world, id, turn, &readers, active).map_err(|error| Failure::new(error.to_string()))?;
+    }
+    // A stop asked for while these words were on their way stops the turn
+    // they started, now that it is known.
+    if node.stops.started(id, handover.inputs.iter().map(|input| &input.delivery.id)) {
+        let (node, id) = (node.clone(), id.clone());
+        tokio::spawn(async move {
+            if let Err(failure) = crate::talk::stop_here(&node, &id).await {
+                node.log.line(format_args!(
+                    "stopping {id}'s turn, asked while its words were on their way: {}",
+                    failure.message
+                ));
+            }
+        });
     }
     for input in &handover.inputs {
         crate::composer::bound(node, id, &input.delivery.id, turn).await?;
@@ -685,49 +753,77 @@ pub async fn restore(node: &Arc<Node>) {
     }
 }
 
+/// Classifies interrupted submissions before new submissions are enabled.
+/// Delivery itself waits for the node to open, in separate tasks.
 pub async fn recover(node: &Arc<Node>) {
     for resident in node.residents.everyone() {
-        let node = node.clone();
-        tokio::spawn(async move {
-            let directory = node.world.conversation(&resident.id);
+        let directory = node.world.conversation(&resident.id);
+        let result = async {
             if resident.removed.is_some() {
-                crate::turns::pay(&node, &resident.id, &directory).await;
-                return;
+                return Ok(None);
             }
-            let result = async {
-                let Some(speaking) = node.residents.speaking(&resident.id) else { return Ok(()) };
-                let guard = speaking.lock().await;
-                let handovers = crate::delivery::handovers(&directory)?;
-                let covered: std::collections::BTreeSet<NoticeId> = handovers.iter()
-                    .flat_map(|handover| handover.inputs.iter().map(|input| input.delivery.id.clone())).collect();
-                for mut handover in handovers {
-                    if handover.turn.is_none() && (handover.attempting || handover.unresolved.is_some()) {
-                        let why = format!("the node on {} restarted during a submission; whether {} read it is unknown; its exact contents remain in its handovers record", node.machine(), resident.id);
-                        crate::turns::unresolved(&node, &resident.id, &directory, &mut handover, TurnHow::Interrupted, why).await?;
+            let Some(speaking) = node.residents.speaking(&resident.id) else { return Ok(None) };
+            let _guard = speaking.lock().await;
+            let handovers = crate::delivery::handovers(&directory)?;
+            let covered: std::collections::BTreeSet<NoticeId> = handovers
+                .iter()
+                .flat_map(|handover| handover.inputs.iter().map(|input| input.delivery.id.clone()))
+                .collect();
+            for mut handover in handovers {
+                if handover.turn.is_none() && (handover.attempting || handover.unresolved.is_some()) {
+                    let why = format!(
+                        "the node on {} restarted during a submission; whether {} read it is unknown; \
+                         its exact contents remain in its handovers record",
+                        node.machine(),
+                        resident.id
+                    );
+                    crate::turns::unresolved(node, &resident.id, &directory, &mut handover, TurnHow::Interrupted, why)
+                        .await?;
+                }
+            }
+            // Sending entries from versions without batch records are
+            // retained and settled as one legacy attempt per resident.
+            let kept = crate::inbox::pending(&directory)?;
+            let legacy: Vec<Pending> = kept
+                .iter()
+                .filter(|input| input.state == PendingState::Sending && !covered.contains(&input.delivery.id))
+                .cloned()
+                .collect();
+            if !legacy.is_empty() {
+                let mut handover = crate::delivery::begin(&directory, legacy)?;
+                crate::turns::unresolved(
+                    node,
+                    &resident.id,
+                    &directory,
+                    &mut handover,
+                    TurnHow::Interrupted,
+                    "the prior node stopped during a submission; acceptance was not recorded".to_string(),
+                )
+                .await?;
+            }
+            let waiting =
+                crate::inbox::pending(&directory)?.into_iter().find(|input| input.state == PendingState::Waiting);
+            Ok::<_, std::io::Error>(waiting)
+        }
+        .await;
+        match result {
+            Err(error) => node.log.line(format_args!(
+                "recovering deliveries for {}; records retained for the next start: {error}",
+                resident.id
+            )),
+            Ok(waiting) => {
+                let node = node.clone();
+                tokio::spawn(async move {
+                    if resident.about.host.agent.as_str() == "codex"
+                        && let Some(input) = waiting
+                        && let Err(error) = hand_over(&node, &resident.id, &resident.about, &directory, input).await
+                    {
+                        node.log.line(format_args!("handing over recovered words for {}: {error}", resident.id));
                     }
-                }
-                // Sending entries from versions without batch records are
-                // retained and settled as one legacy attempt per resident.
-                let kept = crate::inbox::pending(&directory)?;
-                let legacy: Vec<Pending> = kept.iter().filter(|input| input.state == PendingState::Sending && !covered.contains(&input.delivery.id)).cloned().collect();
-                if !legacy.is_empty() {
-                    let mut handover = crate::delivery::begin(&directory, legacy)?;
-                    crate::turns::unresolved(&node, &resident.id, &directory, &mut handover, TurnHow::Interrupted,
-                        "the prior node stopped during a submission; acceptance was not recorded".to_string()).await?;
-                }
-                let waiting = crate::inbox::pending(&directory)?.into_iter().find(|input| input.state == PendingState::Waiting);
-                drop(guard);
-                if resident.about.host.agent.as_str() == "codex" && let Some(input) = waiting {
-                    hand_over(&node, &resident.id, &resident.about, &directory, input).await
-                        .map_err(|error| std::io::Error::other(error.message))?;
-                }
-                crate::turns::pay(&node, &resident.id, &directory).await;
-                Ok::<(), std::io::Error>(())
-            }.await;
-            if let Err(error) = result {
-                node.log.line(format_args!("recovering deliveries for {}: {error}", resident.id));
+                    crate::turns::pay(&node, &resident.id, &directory).await;
+                });
             }
-        });
+        }
     }
 }
 

@@ -64,16 +64,27 @@ pub enum Frame {
     Welcome {
         name: MachineName,
         proof: Signature,
+        /// It reads `Cancel` on a link. Earlier releases do not say so, and
+        /// end the link at a frame they cannot read.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancels: bool,
     },
     /// The connection is refused or ended, and why.
     Refused {
         reason: String,
     },
+    /// A heartbeat; `took`, how many bytes of this connection the sender
+    /// took from the receiver (`crate::pulse`), which an earlier release
+    /// does not say.
     Ping {
         n: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        took: Option<u64>,
     },
     Pong {
         n: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        took: Option<u64>,
     },
     /// A call for the machine on the other end, numbered `id` by its caller.
     Call {
@@ -91,6 +102,12 @@ pub enum Frame {
         id: u64,
         reason: String,
     },
+    /// The caller of the call it numbered `id` gave it up: one that only
+    /// reads stops (`fastctx_types::contract`). Sent only to a machine that
+    /// says it reads this.
+    Cancel {
+        id: u64,
+    },
 }
 
 /// What a connection to a listening machine is for.
@@ -98,8 +115,13 @@ pub enum Frame {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Intent {
     /// A direct link of the machine whose key `key` is; `proof` is its
-    /// signature of the TLS exporter.
-    Link { key: PublicKey, proof: Signature },
+    /// signature of the TLS exporter; `cancels`, whether it reads `Cancel`.
+    Link {
+        key: PublicKey,
+        proof: Signature,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancels: bool,
+    },
     /// The connecting machine's end of the data connection `stream`.
     Data { key: PublicKey, proof: Signature, stream: u64, end: End },
     /// The hub checking it reaches this machine here.
@@ -194,7 +216,7 @@ pub async fn probe(address: SocketAddr, hub: &HubId, name: &MachineName, key: &P
         let tls = tokio_rustls::TlsConnector::from(crate::tls::client_config(None))
             .connect(
                 rustls::pki_types::ServerName::IpAddress(address.ip().into()),
-                crate::transport::Transport::Tcp(tcp),
+                crate::transport::Transport::tcp(tcp),
             )
             .await
             .map_err(|error| format!("TLS: {error}"))?;
@@ -220,7 +242,7 @@ pub async fn probe(address: SocketAddr, hub: &HubId, name: &MachineName, key: &P
         let answer = next(&mut socket).await;
         let _ = socket.close(None).await;
         match answer? {
-            Frame::Welcome { name: said, proof } => {
+            Frame::Welcome { name: said, proof, .. } => {
                 if said != *name {
                     return Err(format!("{said} answered, not {name}"));
                 }

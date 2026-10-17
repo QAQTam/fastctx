@@ -125,6 +125,7 @@ impl Device {
                 (machine, RemoteCall::Stats { after }, None)
             }
             Call::UpdateMachine { machine } => (machine, RemoteCall::UpdateWorld, None),
+            Call::MachineUpdates { machine, update } => (machine, RemoteCall::Updates { update }, None),
             Call::Thumbnail { machine, request } => {
                 let machine = machine.ok_or_else(|| failed("choose the machine holding the image"))?;
                 (machine, RemoteCall::Thumbnail { request }, None)
@@ -255,7 +256,7 @@ impl Device {
             (RemoteCall::FindFiles { .. }, RemoteReply::FilesFound(reply)) => Reply::FilesFound(reply),
             (RemoteCall::Folders { .. }, RemoteReply::Folders(folders)) => Reply::Folders(folders),
             (RemoteCall::Stats { .. }, RemoteReply::Stats(stats)) => Reply::Stats(stats),
-            (RemoteCall::UpdateWorld, RemoteReply::Update(state)) => Reply::Update(state),
+            (RemoteCall::UpdateWorld | RemoteCall::Updates { .. }, RemoteReply::Update(state)) => Reply::Update(state),
             (RemoteCall::Thumbnail { .. }, RemoteReply::Thumbnail(reply)) => Reply::Thumbnail(reply),
             (RemoteCall::AttachmentThumbnail { .. }, RemoteReply::Thumbnail(reply)) => Reply::Thumbnail(reply),
             (RemoteCall::Lines { .. }, RemoteReply::Lines(reply)) => Reply::Lines(reply),
@@ -279,7 +280,7 @@ impl Device {
                 Reply::ClaudeConsent { machine: machine.clone(), accepted, changed }
             }
             (RemoteCall::Talk { .. }, RemoteReply::Said { landed }) => {
-                Reply::Spoken { to: address.expect("talk resident"), landed }
+                Reply::Spoken { to: address.expect("talk resident"), landed, delivery: None }
             }
             (RemoteCall::Open { .. }, RemoteReply::Opened { resident, landed }) => {
                 Reply::Opened { resident: Address { machine: machine.clone(), resident }, landed }
@@ -393,7 +394,7 @@ impl Device {
                     Ok(Ok(_)) => return Err(failed(format!("{machine} answered something other than a relayed call"))),
                     Ok(Err(error)) => return Err(failed(format!("on {machine}: {error}"))),
                     Err(error @ CallFailure::NotConnected { .. }) => return Err(failed(error)),
-                    Err(error @ CallFailure::Unknown { .. }) if !repeatable => {
+                    Err(error @ (CallFailure::Unknown { .. } | CallFailure::Unreadable { .. })) if !repeatable => {
                         return Err(failed(format!("{error}; this write was not sent again")));
                     }
                     Err(error) => unanswered.push(error.to_string()),

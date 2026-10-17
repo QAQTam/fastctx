@@ -62,7 +62,9 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
     // is free to be handed over again then.
     let mut arrived =
         Arrived { node, residents: Vec::new(), collected: Vec::new(), notes: Vec::new(), completed: None };
+    let caller = calling(&hello.peer);
     while let Some(frame) = reader.recv().await? {
+        let _doing = fastctx_platform::doing::doing(format!("{} from {caller}", crate::labels::call_in(&frame)));
         let ClientFrame::Call { id, call } = match parse(&frame) {
             Ok(call) => call,
             Err(error) => {
@@ -85,7 +87,7 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
                 .await?;
             return writer.drain().await;
         }
-        if let Call::Watch { resident, machine, composer, held } = call {
+        if let Call::Watch { resident, machine, composer, held, now } = call {
             // Watching a conversation anywhere is the user's, with this
             // computer's logins.
             if let Err(failure) = users_voice(node, &hello.peer) {
@@ -94,7 +96,7 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
             }
             // A watch keeps the connection until one end leaves.
             let opening = tokio::select! {
-                result = crate::talk::watch(node, resident, machine, composer, held) => result,
+                result = crate::talk::watch(node, resident, machine, composer, held, now) => result,
                 _ = reader.recv() => return Ok(()),
             };
             let ended = match opening {
@@ -165,14 +167,21 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
             }
             // An interface follows the World for as long as it is open: as
             // it is first, then after each change (`world-network.md`, 近况).
+            let _open = crate::updates::Open::new();
             let mut residents = node.residents.changes();
             let mut shown = node.shown.subscribe();
             let mut jobs = node.jobs.subscribe();
             let mut told = None;
+            // What could not be read is read again in a moment, the watch
+            // kept: the interface goes on showing what it was told, and the
+            // log says why, once for each reason.
+            let mut failing: Option<String> = None;
             loop {
+                let mut again = false;
                 if crate::shown::ready(node) {
                     match crate::shown::now(node).await {
                         Ok(world) => {
+                            failing = None;
                             let frame = json(&NodeFrame::World { id, world: Box::new(world) });
                             if told.as_ref() != Some(&frame) {
                                 writer.send(&frame).await?;
@@ -180,12 +189,19 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
                             }
                         }
                         Err(failure) => {
-                            writer.send(&json(&NodeFrame::Reply { id, reply: Err(failure) })).await?;
-                            return writer.drain().await;
+                            if failing.as_deref() != Some(failure.message.as_str()) {
+                                node.log.line(format_args!(
+                                    "reading the World for an interface: {}; reading it again in a moment",
+                                    failure.message
+                                ));
+                                failing = Some(failure.message);
+                            }
+                            again = true;
                         }
                     }
                 }
                 tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_secs(1)), if again => {}
                     changed = residents.changed() => if changed.is_err() { return Ok(()) },
                     changed = shown.changed() => if changed.is_err() { return Ok(()) },
                     job = jobs.recv() => {
@@ -275,9 +291,14 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
                     return writer.drain().await;
                 }
             };
+            let opening = crate::file_search::open(node, &acting, node.machine(), machine, scope);
+            tokio::pin!(opening);
             let opened = tokio::select! {
-                result = crate::file_search::open(node, &acting, node.machine(), machine, scope) => result,
-                _ = reader.recv() => return Ok(()),
+                result = &mut opening => result,
+                _ = reader.recv() => {
+                    drop(opening.await);
+                    return Ok(());
+                },
             };
             match opened {
                 Ok((reply, mut lease)) => {
@@ -406,9 +427,14 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
                 writer.send(&json(&NodeFrame::Reply { id, reply: Err(error) })).await?;
                 return writer.drain().await;
             }
+            let opening = crate::lines::open(node, node.machine(), machine, path, decoding);
+            tokio::pin!(opening);
             let opened = tokio::select! {
-                result = crate::lines::open(node, node.machine(), machine, path, decoding) => result,
-                _ = reader.recv() => return Ok(()),
+                result = &mut opening => result,
+                _ = reader.recv() => {
+                    drop(opening.await);
+                    return Ok(());
+                },
             };
             match opened {
                 Ok((reply, mut lease)) => {
@@ -441,15 +467,10 @@ async fn converse(node: &Arc<Node>, connection: Connection) -> std::io::Result<(
             continue;
         }
         let arriving = matches!(&call, Call::Arrive { host, hints } if host.agent.as_str() != "claude" && hints.tool_use_id.is_none());
-        // A copy goes on through every break while its caller waits for it.
-        let cancellable = matches!(
-            &call,
-            Call::Offers { .. }
-                | Call::Lines { .. }
-                | Call::Thumbnail { .. }
-                | Call::AttachmentThumbnail { .. }
-                | Call::Copy { .. }
-        );
+        // What only reads or waits stops once its client is gone; a change
+        // is done whole (`Call::on_leaving`). A copy goes on through every
+        // break while its caller waits for it, and stops once it is gone.
+        let cancellable = call.on_leaving() == fastctx_types::contract::Leaving::Stop;
         let run_resident = match &call {
             Call::Run { resident, .. } => Some(resident.clone()),
             _ => None,
@@ -861,9 +882,12 @@ pub(crate) async fn handle(node: &Arc<Node>, peer: &Peer, call: Call) -> Result<
         }
         Call::Talk { to, machine, text, attachments, files_on, id } => {
             users_voice(node, peer)?;
+            // Named as the machine they go to names them: by the machine
+            // they were typed on and the device's own id for them.
+            let delivery = id.as_deref().map(|id| crate::speech::fixed_id("talk", &[node.machine().as_str(), id]));
             crate::talk::talk(node, to, machine, text, attachments, files_on, id)
                 .await
-                .map(|(to, landed)| Reply::Spoken { to, landed })
+                .map(|(to, landed)| Reply::Spoken { to, landed, delivery })
         }
         Call::Agents { machine } => {
             let acting = crate::around::acting_of(node, &caller::of(node, peer)?);
@@ -987,7 +1011,13 @@ pub(crate) async fn handle(node: &Arc<Node>, peer: &Peer, call: Call) -> Result<
         Call::UpdateMachine { machine } => {
             users_voice(node, peer)?;
             let acting = crate::around::acting_of(node, &caller::of(node, peer)?);
-            crate::updates::machine(node, &acting, machine).await.map(|state| Reply::Update(Box::new(state)))
+            let update = fastctx_types::update::UpdateCall::Kernel { version: None };
+            crate::updates::machine(node, &acting, machine, update).await.map(|state| Reply::Update(Box::new(state)))
+        }
+        Call::MachineUpdates { machine, update } => {
+            users_voice(node, peer)?;
+            let acting = crate::around::acting_of(node, &caller::of(node, peer)?);
+            crate::updates::machine(node, &acting, machine, update).await.map(|state| Reply::Update(Box::new(state)))
         }
         Call::Manage { resident, machine, action } => {
             users_voice(node, peer)?;
@@ -1068,7 +1098,7 @@ pub(crate) async fn handle(node: &Arc<Node>, peer: &Peer, call: Call) -> Result<
             present(node, &resident)?;
             crate::colleagues::message(node, resident, to, machine, text, login.as_ref())
                 .await
-                .map(|(to, landed)| Reply::Spoken { to, landed })
+                .map(|(to, landed)| Reply::Spoken { to, landed, delivery: None })
         }
         Call::Project(call) => {
             let caller = caller::of(node, peer)?;
@@ -1124,9 +1154,9 @@ pub(crate) async fn handle(node: &Arc<Node>, peer: &Peer, call: Call) -> Result<
                 .map(Reply::MachineLog)
                 .map_err(Failure::new)
         }
-        Call::ServerCommand { hub, account, name, expires, managed, uses, label } => {
+        Call::ServerCommand { hub, account, name, expires, managed, uses, label, windows } => {
             users_voice(node, peer)?;
-            let code = crate::server_invitation::Code { name, expires, managed, uses, label };
+            let code = crate::server_invitation::Code { name, expires, managed, uses, label, windows };
             crate::server_invitation::command(node, hub.as_ref(), &account, code)
                 .await
                 .map(|command| Reply::ServerInvitation { command })
@@ -1527,68 +1557,64 @@ fn machines(
 /// this computer for an agent assisting an account that may not work on it
 /// (`world-network.md`, 一个居民替谁干活).
 async fn nodes(node: &Arc<Node>, acting: &fastctx_types::access::Acting) -> Result<NodesReply, Failure> {
+    use fastctx_net::around::{self, Heard, Reachable};
+
     let here = node.machine();
-    let links = node.links();
-    let mut hubs = Vec::new();
-    for link in links {
-        let logins = node.accounts_on(&link, acting);
-        if logins.is_empty() && !matches!(acting, fastctx_types::access::Acting::Here) {
-            continue;
-        }
-        let refreshed = link.refresh().await;
+    let links = node
+        .links()
+        .into_iter()
+        .filter(|link| {
+            !node.accounts_on(link, acting).is_empty() || matches!(acting, fastctx_types::access::Acting::Here)
+        })
+        .collect();
+    let hubs = around::on_hubs(links, |link, fresh| async move {
         let view = link.view();
-        let mut asks = Vec::new();
-        for machine in view.machines().filter(|machine| !view.is_me(&machine.name)) {
-            let rights: Vec<_> =
-                logins.iter().map(|account| (account.clone(), view.rights(account, &machine.name))).collect();
-            let Some(account) =
+        let logins = node.accounts_on(&link, acting);
+        let reachable = view
+            .machines()
+            .filter(|machine| !view.is_me(&machine.name))
+            .filter_map(|machine| {
                 view.account_for(&logins, &view.me, &machine.name, fastctx_types::access::Purpose::Hands)
-            else {
-                continue;
-            };
-            let online = refreshed.is_ok().then_some(machine.online);
-            let written = node.written(&link, &machine.name).to_string();
-            let unknown = refreshed.as_ref().err().cloned();
-            let allows_direct = !machine.direct.is_empty();
-            let path = Some(link.path_to(&machine.name));
-            let (link, name, since, through, owner, group) = (
-                link.clone(),
-                machine.name.clone(),
-                machine.since,
-                machine.through.clone(),
-                machine.home.clone(),
-                machine.group.clone(),
-            );
-            asks.push(tokio::spawn(async move {
-                let facts = match online {
-                    Some(true) => {
-                        match link.call(&name, &account, fastctx_types::access::Purpose::Look, RemoteCall::Facts).await
-                        {
-                            Ok(Ok(RemoteReply::Facts(facts))) => Ok(facts),
-                            Ok(Ok(_)) => Err("it answered something else".to_string()),
-                            Ok(Err(failure)) => Err(failure.message),
-                            Err(failure) => Err(failure.to_string()),
-                        }
-                    }
-                    Some(false) => Err("it is offline".to_string()),
-                    None => Err(format!("the hub could not be asked: {}", unknown.unwrap_or_default())),
+                    .map(|account| Reachable { link: link.clone(), name: machine.name.clone(), account })
+            })
+            .collect();
+        let online_known = fresh.is_ok();
+        let heard = around::ask_refreshed(reachable, |_| RemoteCall::Facts, fresh).await;
+        let machines = heard
+            .into_iter()
+            .map(|(name, heard)| {
+                let seen = view.member(&name).expect("a machine selected from this view");
+                let facts = match heard {
+                    Heard::Answered(RemoteReply::Facts(facts)) => Ok(facts),
+                    Heard::Answered(_) => Err("it answered something else".to_string()),
+                    Heard::Offline(_) => Err("it is offline".to_string()),
+                    Heard::NoAnswer(reason) => Err(reason),
                 };
-                NodeView { name, written, online, since, through, allows_direct, path, facts, owner, group, rights }
-            }));
-        }
-        let mut machines = Vec::new();
-        for ask in asks {
-            machines.push(ask.await.map_err(|error| Failure::new(format!("asking around: {error}")))?);
-        }
-        hubs.push(fastctx_types::world::HubNodes {
+                NodeView {
+                    written: node.written(&link, &name).to_string(),
+                    online: online_known.then_some(seen.online),
+                    since: seen.since,
+                    through: seen.through.clone(),
+                    allows_direct: !seen.direct.is_empty(),
+                    path: Some(link.path_to(&name)),
+                    facts,
+                    owner: seen.home.clone(),
+                    group: seen.group.clone(),
+                    rights: logins.iter().map(|account| (account.clone(), view.rights(account, &name))).collect(),
+                    name,
+                }
+            })
+            .collect();
+        fastctx_types::world::HubNodes {
             hub: link.membership().id.clone(),
             name: view.hub_name.clone(),
             link: link.state(),
             logins,
             home: view.me().and_then(|me| me.home.clone()),
             machines,
-        });
-    }
+        }
+    })
+    .await;
     let facts = node.works_here(acting).is_ok().then(|| crate::world::facts(node));
     Ok(NodesReply { machine: here, facts, hubs })
 }
@@ -1601,6 +1627,17 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|error| Failure::new(format!("{what}: {error}")))?
         .map_err(|error| Failure::new(format!("{what}: {error}")))
+}
+
+/// Who is on the other end of a connection, as a task answering it says.
+fn calling(peer: &Peer) -> String {
+    match peer {
+        Peer::Page { .. } => "a page's job".to_string(),
+        Peer::Command { resident: Some(address), .. } => format!("a command {} ran", address.resident),
+        Peer::Command { .. } => "a command on this machine".to_string(),
+        Peer::Supervisor { job } => format!("the supervisor of {job}"),
+        Peer::Session { .. } => "an agent session's tools".to_string(),
+    }
 }
 
 fn parse<T: serde::de::DeserializeOwned>(frame: &[u8]) -> std::io::Result<T> {

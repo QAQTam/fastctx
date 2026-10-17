@@ -20,6 +20,7 @@ fastctx-client = { path = "../fastctx-client" }
 fastctx-hosts = { path = "../fastctx-hosts" }
 fastctx-platform = { path = "../fastctx-platform" }
 fastctx-types = { path = "../fastctx-types" }
+fastctx-update = { path = "../fastctx-update" }
 getrandom = { version = "0.3", features = ["std"] }
 jiff.workspace = true
 jsonc-parser = { version = "0.33.1", features = ["serde"] }
@@ -46,6 +47,7 @@ windows-registry = "0.6"
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_NetManagement",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Security_Authentication_Identity",

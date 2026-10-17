@@ -8,6 +8,7 @@
 
 pub mod atomic;
 pub mod awake;
+pub mod bounded;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod child;
 #[cfg(target_os = "macos")]
@@ -16,6 +17,7 @@ pub mod detach;
 pub mod directory_alias;
 pub mod disk_usage;
 pub mod disks;
+pub mod doing;
 pub mod elevation;
 pub mod environment;
 pub mod file_read;
@@ -38,6 +40,7 @@ pub mod owned_directory;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod owned_images;
 pub mod parent;
+pub mod privacy;
 pub mod private;
 #[cfg(target_os = "linux")]
 pub mod procfs;
@@ -65,12 +68,12 @@ mod windows_process;
 #[cfg(windows)]
 mod windows_user;
 
-pub use atomic::{Permissions, Staged, publish, publish_new};
+pub use atomic::{Permissions, PublishFailure, Staged, publish, publish_checked, publish_new};
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub use child::Child;
 pub use detach::{DetachedProcess, spawn_detached};
 pub use environment::{in_job, user_environment, world_process_environment};
-pub use home::{RELEASED, fastctx_root, follows_releases, user_home, user_id};
+pub use home::{RELEASED, fastctx_root, fastctx_root_in, follows_releases, user_home, user_id};
 pub use hostname::hostname;
 pub use identity::{current_identity, has_ended, identity_of, is_alive};
 pub use legacy_text::decode_legacy;

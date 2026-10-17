@@ -71,12 +71,13 @@ pub(super) async fn run(inner: Arc<Inner>, mut changes: Option<super::changes::C
             Ended::Stop(reason) => {
                 inner.node.log(format!("the link to the hub stopped: {reason}"));
                 let dissolved = inner.dissolved.load(std::sync::atomic::Ordering::Relaxed);
-                let ended = super::state::Ended { at: Timestamp::now(), reason: reason.clone(), dissolved };
+                let then = *inner.then.lock().expect("never poisoned");
+                let ended = super::state::Ended { at: Timestamp::now(), reason: reason.clone(), dissolved, then };
                 if let Err(error) = super::state::write(&inner.dir.ended(), &ended) {
                     inner.node.log(format!("keeping that the hub ended this machine's place: {error}"));
                 }
                 inner.status.send_replace(Status::Stopped { reason });
-                inner.node.place_ended(dissolved);
+                inner.node.place_ended(dissolved, then);
                 return;
             }
             Ended::Reroute(reason) => {
@@ -161,6 +162,7 @@ struct Opened {
     route: fastctx_types::world::Route,
     taken: u64,
     hub_letters: u64,
+    afoot_pending: bool,
 }
 
 /// Opens a session by the first way to the hub that takes it.
@@ -212,6 +214,11 @@ async fn open(inner: &Inner, upstream: &Upstream) -> Result<Opened, Ended> {
             forgets: true,
             roles: true,
             versions: true,
+            due: true,
+            left: None,
+            cancels: true,
+            presence: true,
+            parts: true,
         },
     };
     match tokio::time::timeout(SILENCE, dial::send(&mut socket, &hello)).await {
@@ -228,7 +235,7 @@ async fn open(inner: &Inner, upstream: &Upstream) -> Result<Opened, Ended> {
         }
     };
     match welcome {
-        Down::Welcome { hub, hub_name, name, taken, letters, .. } => {
+        Down::Welcome { hub, hub_name, name, taken, letters, afoot_pending, .. } => {
             if hub != membership.id {
                 return Err(Ended::Retry(format!("the hub is {hub}, not {}", membership.id)));
             }
@@ -243,7 +250,14 @@ async fn open(inner: &Inner, upstream: &Upstream) -> Result<Opened, Ended> {
                     Err(error) => inner.node.log(format!("recording that the hub is called {hub_name}: {error}")),
                 }
             }
-            Ok(Opened { socket, address, route, taken, hub_letters: letters })
+            Ok(Opened {
+                socket,
+                address,
+                route,
+                taken,
+                hub_letters: letters,
+                afoot_pending: afoot_pending.unwrap_or(false),
+            })
         }
         Down::Refused { reason } => Err(refused(inner, reason)),
         _ => Err(Ended::Retry("the first frame was not a welcome".to_string())),
@@ -257,7 +271,7 @@ async fn connected(
     tried: &[Upstream],
     opened: Opened,
 ) -> Ended {
-    let Opened { socket, address, route, taken, hub_letters } = opened;
+    let Opened { socket, address, route, taken, hub_letters, afoot_pending } = opened;
     let upstream = tried.last().expect("a session is opened by a way").clone();
 
     // The hub holds this machine's letters through `taken`.
@@ -282,9 +296,17 @@ async fn connected(
     rerouted.as_mut().enable();
 
     let generation = super::ways::connection_number();
+    inner.afoot_started(generation, afoot_pending);
     let (up, mut outgoing) = Outgoing::channel();
-    *inner.connection.lock().expect("never poisoned") =
-        Some(Connection { generation, up: up.clone(), upstream: upstream.clone(), address, tried: tried.to_vec() });
+    let (closed, closing) = tokio::sync::watch::channel(None);
+    *inner.connection.lock().expect("never poisoned") = Some(Connection {
+        generation,
+        closed: closing,
+        up: up.clone(),
+        upstream: upstream.clone(),
+        address,
+        tried: tried.to_vec(),
+    });
     let through = upstream.through().map(ToString::to_string);
     inner.status.send_replace(Status::Online { since: Timestamp::now(), address, through, route: route.clone() });
     inner.ways_changed();
@@ -298,29 +320,35 @@ async fn connected(
     // This guard also runs when a network event cancels connect(). Pending
     // callers must learn that their old connection ended before another
     // connection can be published.
-    let mut guard = Connected { inner, generation, reason: "the connection was interrupted".to_string() };
+    let mut guard = Connected { inner, generation, closed, reason: "the connection was interrupted".to_string() };
 
+    let pulse = crate::transport::pulse_of(&socket);
     let (mut sink, mut stream) = socket.split();
     let (writer_done, mut writer_stopped) = oneshot::channel::<()>();
+    // No frame goes on being written once nothing of it went, and the hub
+    // said it took nothing more, for the silence: a hub that takes nothing
+    // is as gone as one that says nothing (`crate::pulse`).
+    let writing = pulse.clone();
     let writer = tokio::spawn(async move {
         let _done = writer_done;
         while let Some(frame) = outgoing.recv().await {
-            if sink.send(WsMessage::Binary(wire::encode(&frame.value).into())).await.is_err() {
+            let message = WsMessage::Binary(frame.bytes.into());
+            if !writing.writing(sink.send(message)).await.is_ok_and(|sent| sent.is_ok()) {
                 return;
             }
             if let Some(written) = frame.written {
                 let _ = written.send(());
             }
         }
-        let _ = sink.close().await;
+        let _ = tokio::time::timeout(SILENCE, sink.close()).await;
     });
     let (letter_failed, mut letters_failed) = oneshot::channel::<String>();
     let (outbox_failed, mut outbox_failure) = oneshot::channel::<String>();
-    let (deliveries, delivered) = mpsc::unbounded_channel();
+    let (deliveries, delivered) = mpsc::channel(DELIVERIES);
     let pinged: Arc<std::sync::Mutex<std::collections::HashMap<u64, Instant>>> = Arc::default();
     let mut tasks = Tasks(vec![
         writer,
-        tokio::spawn(heartbeat(inner.clone(), up.clone(), pinged.clone())),
+        tokio::spawn(heartbeat(inner.clone(), up.clone(), pinged.clone(), pulse.clone())),
         tokio::spawn(flush(inner.clone(), up.clone(), taken, outbox_failed)),
         tokio::spawn(take_letters(inner.clone(), up.clone(), hub_letters, delivered, letter_failed)),
     ]);
@@ -338,13 +366,26 @@ async fn connected(
         let (hub, cert) = (inner.hub.clone(), inner.cert);
         tasks.0.push(tokio::spawn(ask_preferred(preferred, hub, cert, returned)));
     }
+    // What an earlier session was told of who is online is counted by that
+    // run of the hub: this session's view and tellings count afresh.
+    inner.presences.lock().expect("never poisoned").clear();
     {
         let inner = inner.clone();
         tasks.0.push(tokio::spawn(async move {
-            if let Err(error) = inner.refresh().await {
-                inner.node.log(format!("asking the hub for the view: {error}"));
+            let mut failing = None;
+            loop {
+                match inner.refresh().await {
+                    Ok(()) => break,
+                    Err(error) => {
+                        if failing.as_ref() != Some(&error) {
+                            inner.node.log(format!("asking the hub for the initial view: {error}; trying again"));
+                            failing = Some(error);
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
             }
-            // The hub tells what is afoot elsewhere before it answers.
+            // The directory and the initial status snapshot complete independently.
             inner.afoot_synced(generation);
             inner.versions_synced(generation);
             tell_worked(&inner).await;
@@ -360,30 +401,46 @@ async fn connected(
     // wait behind letters and answers the hub queued before it.
     let mut heard = Instant::now();
     let mut last_ping = 0;
-    // A check asked since the hub was last heard, and how long it waits.
+    // A check asked since the hub was last heard, and how long it waits;
+    // and when it was asked.
     let mut checking: Option<Instant> = None;
+    let mut asked = Instant::now();
+
     let ended = loop {
         let next = tokio::select! {
             // Checked first, so that once nothing has come for the whole
             // silence the connection ends even if something is just arriving.
+            // A frame still coming in shows the hub is there, as one come
+            // whole does.
             biased;
             _ = tokio::time::sleep_until(heard + SILENCE) => {
+                if let Some(at) = pulse.since(heard) {
+                    heard = at;
+                    continue;
+                }
                 break Ended::Retry(format!("nothing came from the hub for {} s", SILENCE.as_secs()));
             },
             _ = tokio::time::sleep_until(checking.unwrap_or(heard + SILENCE)), if checking.is_some() => {
+                if pulse.since(asked).is_some() {
+                    checking = None;
+                    continue;
+                }
                 break Ended::Reroute("the hub did not answer a check after the network changed".to_string());
             },
             () = inner.check.notified() => {
                 if checking.is_none() {
-                    checking = Some(Instant::now() + inner.check_within());
+                    asked = Instant::now();
+                    checking = Some(asked + inner.check_within());
                     // Numbered apart from the heartbeats, so its pong measures
                     // nothing.
                     let paths = inner.view().direct_links.then(|| inner.paths());
-                    let _ = up.send(Up::Ping { n: 0, paths });
+                    let held = Some(inner.letters.lock().expect("never poisoned").file.held);
+                    let _ = up.send(Up::Ping { n: 0, paths, took: Some(pulse.taken()), held });
                 }
                 continue;
             },
             _ = &mut writer_stopped => break Ended::Retry("writing to the hub failed".to_string()),
+            () = up.overflowed() => break Ended::Retry("the hub took nothing while frames for it piled up".to_string()),
             () = &mut rerouted => break Ended::Reroute("the ways this machine connects to the hub by changed".to_string()),
             Ok(upstream) = &mut preferred_back => break Ended::Reroute(format!("{upstream} takes sessions again")),
             failed = &mut letters_failed => break Ended::Retry(failed.unwrap_or_else(|_| "taking letters stopped".to_string())),
@@ -397,11 +454,28 @@ async fn connected(
             Some(Err(error)) => break Ended::Retry(dial::describe(&error)),
             Some(Ok(WsMessage::Binary(bytes))) => match serde_json::from_slice(&bytes) {
                 Ok(frame) => frame,
+                // A newer hub's frame this machine does not know is passed
+                // over: connecting again would hear it again.
                 Err(error) => {
-                    break Ended::Retry(format!("an unreadable frame from the hub: {error}"));
+                    let kind = serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .ok()
+                        .and_then(|frame| frame["f"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| "?".into());
+                    inner
+                        .node
+                        .log(format!("passing over a frame from the hub this version cannot read ({kind}): {error}"));
+                    heard = Instant::now();
+                    continue;
                 }
             },
-            Some(Ok(_)) => {
+            Some(Ok(message)) => {
+                // The hub's own ping, sent when it had nothing else to say,
+                // says how much it took of what this machine sent.
+                if let WsMessage::Ping(said) = &message
+                    && let Some(took) = crate::pulse::said(said)
+                {
+                    pulse.told(took);
+                }
                 heard = Instant::now();
                 answered(inner, &mut checking);
                 continue;
@@ -410,41 +484,66 @@ async fn connected(
         heard = Instant::now();
         answered(inner, &mut checking);
         match frame {
-            Down::Pong { n } => {
+            Down::Pong { n, at, took, afoot_ready } => {
+                if afoot_ready {
+                    inner.afoot_complete(generation);
+                }
+                if let Some(took) = took {
+                    pulse.told(took);
+                }
                 if n > last_ping {
                     last_ping = n;
                     let mut pinged = pinged.lock().expect("never poisoned");
                     if let Some(sent) = pinged.remove(&n) {
-                        let ms = u32::try_from(sent.elapsed().as_millis()).unwrap_or(u32::MAX);
+                        let ms = super::line::millis(sent.elapsed());
                         *inner.hub_ms.lock().expect("never poisoned") = Some(ms);
                         inner.trip(ms);
+                        if let Some(at) = at {
+                            inner.heard_time(at, sent.elapsed());
+                        }
                     }
                     pinged.retain(|sent, _| *sent > n);
                 }
             }
             Down::Ack { seq, refused } => {
-                if let Some(reason) = refused {
-                    refused_letter(inner, seq, &reason);
+                if let Some(reason) = refused
+                    && let Err(error) = refused_letter(inner, seq, &reason)
+                {
+                    break Ended::Retry(format!("recording refused letter {seq}: {error}"));
                 }
                 if let Err(error) = held(inner, seq) {
                     break Ended::Retry(format!("recording what the hub holds: {error}"));
                 }
             }
+            // Letters the hub sends faster than this machine takes them wait
+            // for it, the connection read no further meanwhile, for as long
+            // as a silence lasts at most: an older hub sends all it holds at
+            // once.
             Down::Deliver { seq, message } => {
-                let _ = deliveries.send((seq, message));
+                match tokio::time::timeout(SILENCE, deliveries.send((seq, message))).await {
+                    Ok(_) => {}
+                    Err(_) => {
+                        break Ended::Retry(format!(
+                            "the hub's letters came faster than this machine takes them, for {} s",
+                            SILENCE.as_secs()
+                        ));
+                    }
+                }
             }
             Down::Incoming { call, message } => {
-                tokio::spawn(super::answering::answer(inner.clone(), Replier::Hub(up.clone(), call), message));
+                let stop = inner.answers.open(inner, CallOn::Hub(generation), call);
+                tokio::spawn(super::answering::answer(inner.clone(), Replier::Hub(up.clone(), call), message, stop));
+            }
+            Down::Cancelled { call } => {
+                inner.answers.stop(&CallOn::Hub(generation), call, "its caller gave it up");
             }
             Down::Status { id, status } => inner.call_event(&CallOn::Hub(generation), id, CallEvent::Status(status)),
             Down::Answered { id, message } => {
                 inner.call_event(&CallOn::Hub(generation), id, CallEvent::Answered(message));
             }
-            Down::Told { id, answer } => {
-                if let Some(asker) = inner.asks.lock().expect("never poisoned").remove(&id) {
-                    let _ = asker.send(answer);
-                }
-            }
+            Down::Told { id, answer } => inner.asks.told(generation, id, answer),
+            Down::Part { id, index, total, text } => inner.asks.part(generation, id, index, total, text),
+            Down::Presence { machine, presence, rev } => inner.heard_presence(machine, presence, rev),
             Down::DirectoryChanged => {
                 let inner = inner.clone();
                 tokio::spawn(async move {
@@ -498,6 +597,7 @@ async fn connected(
 struct Connected<'a> {
     inner: &'a Inner,
     generation: u64,
+    closed: tokio::sync::watch::Sender<Option<String>>,
     reason: String,
 }
 
@@ -517,7 +617,10 @@ impl Drop for Connected<'_> {
             self.inner.ways_changed();
         }
         self.inner.fail_calls_on(&CallOn::Hub(self.generation), &self.reason);
-        self.inner.asks.lock().expect("never poisoned").clear();
+        // Nobody hears the answers to the calls that came on it.
+        self.inner.answers.stop_all(&CallOn::Hub(self.generation), "the connection to the hub it came on ended");
+        self.inner.asks.end(self.generation);
+        self.closed.send_replace(Some(self.reason.clone()));
     }
 }
 
@@ -535,8 +638,9 @@ impl Drop for Tasks {
 
 fn refused(inner: &Inner, reason: Refusal) -> Ended {
     match reason {
-        Refusal::Removed { dissolved, .. } => {
+        Refusal::Removed { dissolved, then, .. } => {
             inner.dissolved.store(dissolved, std::sync::atomic::Ordering::Relaxed);
+            *inner.then.lock().expect("never poisoned") = then;
             Ended::Stop(reason.to_string())
         }
         // Connected again at once, under the name the hub gives.
@@ -565,11 +669,14 @@ async fn ask_preferred(
 }
 
 /// Sends a heartbeat every `HEARTBEAT`, noting when, and with it how this
-/// machine's lines go, to a hub that keeps that.
+/// machine's lines go, to a hub that keeps that, how much this machine took
+/// of what the hub sent (`crate::pulse`), and how far the hub's receipts of
+/// its letters are taken in, so the hub tells no refusal again.
 async fn heartbeat(
     inner: Arc<Inner>,
     up: Outgoing,
     pinged: Arc<std::sync::Mutex<std::collections::HashMap<u64, Instant>>>,
+    pulse: Arc<crate::pulse::Pulse>,
 ) {
     let mut n = 0;
     loop {
@@ -577,7 +684,8 @@ async fn heartbeat(
         n += 1;
         let paths = inner.view().direct_links.then(|| inner.paths());
         pinged.lock().expect("never poisoned").insert(n, Instant::now());
-        if up.send(Up::Ping { n, paths }).is_err() {
+        let held = Some(inner.letters.lock().expect("never poisoned").file.held);
+        if up.send(Up::Ping { n, paths, took: Some(pulse.taken()), held }).is_err() {
             return;
         }
     }
@@ -630,93 +738,159 @@ fn interface_addresses() -> Vec<std::net::IpAddr> {
     }
 }
 
-/// Records that the hub holds this machine's letters through `seq`.
+/// Records that the hub holds this machine's letters through `seq`, and
+/// wakes the sending of the next ones.
 fn held(inner: &Inner, seq: u64) -> std::io::Result<()> {
-    Outbox::new(&inner.dir).held_through(seq)?;
-    let mut letters = inner.letters.lock().expect("never poisoned");
-    if seq > letters.file.held {
+    // Kept before the letters are deleted: a stop in between leaves letters
+    // the next start deletes, never a number given out again to a letter
+    // the hub would take for one it holds.
+    let before = {
+        let mut letters = inner.letters.lock().expect("never poisoned");
+        let before = letters.file.held;
+        if seq <= before {
+            return Ok(());
+        }
         letters.file.held = seq;
         letters.next = letters.next.max(seq + 1);
-        super::state::write(&inner.dir.letters(), &letters.file)?;
+        if let Err(error) = super::state::write(&inner.dir.letters(), &letters.file) {
+            letters.file.held = before;
+            return Err(error);
+        }
+        before
+    };
+    Outbox::new(&inner.dir).held_between(before, seq)?;
+    inner.outbox_changed.notify_one();
+    Ok(())
+}
+
+fn refused_letter(inner: &Inner, seq: u64, reason: &str) -> std::io::Result<()> {
+    let outbox = Outbox::new(&inner.dir);
+    match outbox.get(seq)? {
+        Some(message) => {
+            let path = letters::record_failure(&inner.dir, "out", reason, &message, |line| inner.node.log(line))?;
+            inner.node.log(format!("the hub refused letter {seq}: {reason}; kept in {}", path.display()));
+        }
+        None => inner.node.log(format!("the hub refused letter {seq}: {reason}")),
     }
     Ok(())
 }
 
-fn refused_letter(inner: &Inner, seq: u64, reason: &str) {
-    let outbox = Outbox::new(&inner.dir);
-    match outbox.get(seq) {
-        Ok(Some(message)) => match letters::record_failure(&inner.dir, "out", reason, &message) {
-            Ok(path) => inner.node.log(format!("the hub refused letter {seq}: {reason}; kept in {}", path.display())),
-            Err(error) => {
-                inner.node.log(format!("the hub refused letter {seq}: {reason}; recording that failed: {error}"))
-            }
-        },
-        Ok(None) => inner.node.log(format!("the hub refused letter {seq}: {reason}")),
-        Err(error) => inner.node.log(format!("the hub refused letter {seq}: {reason}; reading it failed: {error}")),
-    }
-}
+/// The most letters this machine has sent the hub that the hub has not yet
+/// said it holds, and the most bytes of them: the rest wait their turn on
+/// disk, so a long backlog never fills the connection.
+const WINDOW: usize = 256;
+const WINDOW_BYTES: usize = 8 * 1024 * 1024;
 
-/// Sends every letter in the outbox past `sent`, in order, and each new one
-/// as it is put there.
+/// How many of the hub's letters are taken before the hub is told, at once,
+/// that they are.
+const TAKEN_AT_ONCE: usize = 64;
+
+/// How many of the hub's letters may wait to be taken: more than a hub of
+/// this release sends at once, which it never fills.
+const DELIVERIES: usize = 1024;
+
+/// Sends the letters in the outbox past `sent`, in order, a window at a
+/// time, and each new one as there is room for it. Letters are numbered one
+/// after another, so the next is known without listing the outbox; one not
+/// there was held by the hub, or set aside, meanwhile.
 async fn flush(inner: Arc<Inner>, up: Outgoing, mut sent: u64, failed: oneshot::Sender<String>) {
     let outbox = Outbox::new(&inner.dir);
+    let mut on_way: std::collections::VecDeque<(u64, usize)> = std::collections::VecDeque::new();
     loop {
-        let numbers = match outbox.numbers() {
-            Ok(numbers) => numbers,
-            Err(error) => {
-                let _ = failed.send(format!("reading the outbox: {error}"));
-                return;
-            }
+        // Asked for before looking: a letter put, or the hub holding some,
+        // between the two wakes it all the same.
+        let changed = inner.outbox_changed.notified();
+        let (held, next) = {
+            let letters = inner.letters.lock().expect("never poisoned");
+            (letters.file.held, letters.next)
         };
-        let start = sent;
-        for seq in numbers.into_iter().filter(|seq| *seq > start) {
-            match outbox.get(seq) {
-                Ok(Some(message)) => {
+        while on_way.front().is_some_and(|(seq, _)| *seq <= held) {
+            on_way.pop_front();
+        }
+        sent = sent.max(held);
+        while sent + 1 < next
+            && on_way.len() < WINDOW
+            && on_way.iter().map(|(_, size)| size).sum::<usize>() < WINDOW_BYTES
+        {
+            let seq = sent + 1;
+            match outbox.get_sized(seq) {
+                Ok(Some((message, size))) => {
                     if up.send(Up::Send { seq, message }).is_err() {
                         return;
                     }
-                    sent = seq;
+                    on_way.push_back((seq, size));
                 }
-                // Held by the hub meanwhile.
                 Ok(None) => {}
                 Err(error) => {
                     let _ = failed.send(format!("reading letter {seq} from the outbox: {error}"));
                     return;
                 }
             }
+            sent = seq;
         }
-        inner.outbox_changed.notified().await;
+        changed.await;
     }
 }
 
 /// Takes the hub's letters in the order the hub numbered them, and tells
-/// the hub each is taken.
+/// the hub they are taken, once for each run of them that came together.
 async fn take_letters(
     inner: Arc<Inner>,
     up: Outgoing,
     hub_letters: u64,
-    mut delivered: mpsc::UnboundedReceiver<(u64, Envelope)>,
+    mut delivered: mpsc::Receiver<(u64, Envelope)>,
     failed: oneshot::Sender<String>,
 ) {
-    while let Some((seq, message)) = delivered.recv().await {
-        let already = inner
-            .letters
-            .lock()
-            .expect("never poisoned")
-            .file
-            .taken
-            .is_some_and(|(epoch, taken)| epoch == hub_letters && seq <= taken);
-        if !already {
-            if let Err(error) = take_letter(&inner, &message).await {
-                let _ = failed.send(format!("taking a letter: {error}"));
-                return;
+    while let Some(first) = delivered.recv().await {
+        let mut run = vec![first];
+        while run.len() < TAKEN_AT_ONCE {
+            match delivered.try_recv() {
+                Ok(next) => run.push(next),
+                Err(_) => break,
             }
+        }
+        let mut last = None;
+        for (seq, message) in run {
+            let already = inner
+                .letters
+                .lock()
+                .expect("never poisoned")
+                .file
+                .taken
+                .is_some_and(|(epoch, taken)| epoch == hub_letters && seq <= taken);
+            if !already {
+                // Taken whole, its handling and its receipt, whatever becomes
+                // of this session, and one at a time with the next session's:
+                // a letter sent again meanwhile waits for it, and finds its
+                // receipt.
+                let taking = inner.taking.clone().lock_owned().await;
+                let taker = inner.clone();
+                let taken = tokio::spawn(async move {
+                    let _taking = taking;
+                    take_letter(&taker, &message).await
+                })
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))
+                .and_then(|taken| taken);
+                if let Err(error) = taken {
+                    let _ = failed.send(format!("taking a letter: {error}"));
+                    return;
+                }
+            }
+            last = Some(seq);
+        }
+        let Some(seq) = last else { continue };
+        // A stop before this is written has the hub send the run again; each
+        // letter's receipt keeps it from being taken twice.
+        {
             let mut letters = inner.letters.lock().expect("never poisoned");
-            letters.file.taken = Some((hub_letters, seq));
-            if let Err(error) = super::state::write(&inner.dir.letters(), &letters.file) {
-                drop(letters);
-                let _ = failed.send(format!("recording a letter taken: {error}"));
-                return;
+            if !letters.file.taken.is_some_and(|(epoch, taken)| epoch == hub_letters && seq <= taken) {
+                letters.file.taken = Some((hub_letters, seq));
+                if let Err(error) = super::state::write(&inner.dir.letters(), &letters.file) {
+                    drop(letters);
+                    let _ = failed.send(format!("recording a letter taken: {error}"));
+                    return;
+                }
             }
         }
         if up.send(Up::Ack { seq }).is_err() {
@@ -730,7 +904,7 @@ async fn take_letters(
 /// machine's own disk is an error, and the hub sends the letter again.
 async fn take_letter(inner: &Inner, message: &Envelope) -> std::io::Result<()> {
     let set_aside = |reason: String| -> std::io::Result<()> {
-        let path = letters::record_failure(&inner.dir, "in", &reason, message)?;
+        let path = letters::record_failure(&inner.dir, "in", &reason, message, |line| inner.node.log(line))?;
         inner.node.log(format!("a letter was set aside: {reason}; kept in {}", path.display()));
         Ok(())
     };
@@ -747,10 +921,9 @@ async fn take_letter(inner: &Inner, message: &Envelope) -> std::io::Result<()> {
         Err(error) => return set_aside(format!("from {}: {error}", message.from)),
     };
     let digest = crate::sign::Digest(sha256(&serde_json::to_vec(&letter).expect("letters serialize")));
-    // Receipts go by the name the letter was sent under, which it is sent
-    // under again: a sender renamed since still sends it so.
-    let sender = &message.from;
-    match letters::receipt(&inner.dir, sender, &id)? {
+    // Receipts and business delivery now share the admitted computer's identity.
+    let sender = caller.key;
+    match letters::receipt(&inner.dir, &sender, &caller.names, &id)? {
         Some(receipt) if receipt.digest == digest => return Ok(()),
         Some(_) => {
             return set_aside(format!(
@@ -765,5 +938,5 @@ async fn take_letter(inner: &Inner, message: &Envelope) -> std::io::Result<()> {
     if let Err(reason) = inner.node.letter(caller, purpose, id.clone(), letter).await? {
         set_aside(format!("from {from}: {reason}"))?;
     }
-    letters::keep_receipt(&inner.dir, sender, &id, &Receipt { digest, at: Timestamp::now() })
+    letters::keep_receipt(&inner.dir, &sender, &id, &Receipt { digest, at: Timestamp::now() })
 }

@@ -33,6 +33,13 @@ impl MemberKind {
     }
 }
 
+/// A kind of device a later hub adds is read as a phone's: a device that
+/// signs in, with nothing run on it.
+impl crate::tolerant::Tolerant for MemberKind {
+    const ALL: &'static [Self] = &[MemberKind::Computer, MemberKind::Phone, MemberKind::Web];
+    const UNKNOWN: Self = MemberKind::Phone;
+}
+
 /// What an account is on its hub (`world-network.md`, 一个中枢，几个账号).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +59,13 @@ pub enum Level {
     /// share with it, and the agents assisting it, it uses. Sent only to a
     /// device that says it reads it (`Intent::Session.roles`).
     Visitor,
+}
+
+/// A level a later hub adds is read as a visitor's: it is given no more here
+/// than a visitor is.
+impl crate::tolerant::Tolerant for Level {
+    const ALL: &'static [Self] = &[Level::Super, Level::Member, Level::Visitor];
+    const UNKNOWN: Self = Level::Visitor;
 }
 
 /// A relay a machine connected through before direct connections replaced
@@ -162,6 +176,9 @@ pub enum AccountChange {
     Remove {
         name: MachineName,
         reason: String,
+        /// What the machine does once it hears it was taken off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        then: Option<crate::uninstall::Then>,
     },
     /// Renames `machine`, one of the account's own or, for the hub's super
     /// administrator, any; the names it had keep naming it
@@ -247,10 +264,17 @@ pub enum AccountChange {
     Settings {
         self_registration: bool,
     },
-    /// The channel the network's devices follow and the version it asks
-    /// each machine to run at least (`world-upgrade.md`).
+    /// The version the network asks each machine to run at least, and
+    /// whether its managed machines update by themselves (`world-upgrade.md`).
     Updates {
         policy: crate::update::Policy,
+    },
+    /// `machine`, away from the network, updates to `version` once it is
+    /// back; none takes back what was kept (`world-upgrade.md`, 别的机器的更新).
+    UpdateDue {
+        machine: MachineName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     /// The super administrator dissolves the network named `name`, typed as
     /// it is (`world-network.md`, 解散网络).
@@ -330,6 +354,14 @@ pub struct HubAccounts {
     /// (`world-upgrade.md`).
     #[serde(default)]
     pub versions: bool,
+    /// Whether the hub keeps updates for machines away until they are back,
+    /// and tells its version (`world-upgrade.md`, 别的机器的更新).
+    #[serde(default)]
+    pub due: bool,
+    /// Whether the hub tells a machine it takes off to uninstall Fastctx
+    /// (`world-network.md`, 移出网络与卸载).
+    #[serde(default)]
+    pub uninstalls: bool,
     /// The accounts this computer is logged in to there.
     pub logins: Vec<AccountName>,
     /// The account this computer is registered under there, as a machine.
@@ -458,6 +490,7 @@ pub struct TokenSeen {
     pub account: AccountName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(deserialize_with = "crate::tolerant::read")]
     pub kind: MemberKind,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub managed: bool,
@@ -483,6 +516,7 @@ pub struct TokenSeen {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountSeen {
     pub name: AccountName,
+    #[serde(deserialize_with = "crate::tolerant::read")]
     pub level: Level,
     pub locked: bool,
     pub opened: Timestamp,
@@ -498,6 +532,7 @@ pub struct MemberSeen {
     /// The names it had before it was renamed, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub was: Vec<MachineName>,
+    #[serde(deserialize_with = "crate::tolerant::read")]
     pub kind: MemberKind,
     pub logins: Vec<AccountName>,
     /// The account it is registered under, when it is a machine.

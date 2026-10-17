@@ -71,9 +71,9 @@ pub struct TokenArgs {
     #[arg(long)]
     hub: Option<HubName>,
     /// What logs in with it: a phone or another computer only logs in; for
-    /// a server, the line that installs it and registers it as a machine
-    /// is printed instead.
-    #[arg(long = "for", default_value = "computer", value_parser = ["phone", "computer", "server"])]
+    /// a Linux server, or a Windows computer, the line that installs it and
+    /// registers it as a machine is printed instead.
+    #[arg(long = "for", default_value = "computer", value_parser = ["phone", "computer", "server", "windows"])]
     used_by: String,
     /// How long it stays valid: hours or days, as 1h or 7d, up to a year,
     /// or `never`, until it is revoked. An hour for a phone or a computer,
@@ -201,6 +201,13 @@ pub struct RemoveArgs {
     hub: Option<HubName>,
     #[arg(long, default_value = "removed by the user")]
     reason: String,
+    /// Then uninstall Fastctx on that machine, keeping its data: one of
+    /// the account's own without the application, or a managed machine.
+    #[arg(long)]
+    uninstall: bool,
+    /// Then uninstall Fastctx on that machine with everything it wrote.
+    #[arg(long, conflicts_with = "uninstall")]
+    everything: bool,
 }
 
 #[derive(Args)]
@@ -382,7 +389,8 @@ pub fn token(command: TokenCommand) -> anyhow::Result<()> {
 }
 
 fn new_token(args: TokenArgs) -> anyhow::Result<()> {
-    let server = args.used_by == "server";
+    let windows = args.used_by == "windows";
+    let server = args.used_by == "server" || windows;
     let kind = if args.used_by == "phone" { MemberKind::Phone } else { MemberKind::Computer };
     if args.managed && kind == MemberKind::Phone {
         anyhow::bail!("a phone is never a managed machine");
@@ -412,12 +420,19 @@ fn new_token(args: TokenArgs) -> anyhow::Result<()> {
             managed: args.managed,
             uses: args.uses,
             label: args.label,
+            windows,
         })?;
         let Reply::ServerInvitation { command } = reply else {
             anyhow::bail!("the node answered something else: {reply:?}")
         };
         println!("{command}");
-        eprintln!("Paste this line into each server's terminal, as the user it is for. {works}");
+        if windows {
+            eprintln!(
+                "Paste this line into each computer's Command Prompt or PowerShell, run as administrator. {works}"
+            );
+        } else {
+            eprintln!("Paste this line into each server's terminal, as the user it is for. {works}");
+        }
         return Ok(());
     }
     let token = change(
@@ -591,8 +606,17 @@ pub fn disallow(args: DisallowArgs) -> anyhow::Result<()> {
 
 pub fn remove(args: RemoveArgs) -> anyhow::Result<()> {
     let account = account_or_owner(args.hub.as_ref(), args.account, Some(&args.name))?;
-    self::change(args.hub, account.clone(), AccountChange::Remove { name: args.name.clone(), reason: args.reason })?;
-    println!("{} is out of {account}", args.name);
+    let then = match (args.uninstall, args.everything) {
+        (_, true) => Some(fastctx_types::uninstall::Then::Everything),
+        (true, false) => Some(fastctx_types::uninstall::Then::Uninstall),
+        (false, false) => None,
+    };
+    let change = AccountChange::Remove { name: args.name.clone(), reason: args.reason, then };
+    self::change(args.hub, account.clone(), change)?;
+    match then {
+        Some(_) => println!("{} is out of {account}, and uninstalls Fastctx once it hears so", args.name),
+        None => println!("{} is out of {account}", args.name),
+    }
     Ok(())
 }
 

@@ -10,6 +10,9 @@
 //! for gone when the other falls silent (`line`).
 
 mod line;
+mod receipt;
+mod writing;
+pub use receipt::{ReceiptWork, Settlement, settling_ping};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -28,10 +31,69 @@ use line::{Line, Received as Message};
 /// close of both directions.
 const DONE: &str = "\"done\"";
 
+/// How long an end waits for the hub to pair it: the hub waits a minute
+/// for the other end, and says so within a silence.
+const PAIRED_WITHIN: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long bytes the other end said it sends may stop coming before it is
+/// given up: a quiet stream may wait for ever, bytes due may not.
+pub const DUE_WITHIN: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The most bytes one message carries. The other end counts only whole
 /// messages as hearing from this one, so each must arrive well within
-/// `SILENCE` even on a slow link: 64 KiB in 30 s is about 2 KiB/s.
+/// `SILENCE`: a transfer's messages grow to this only on a line that takes
+/// them at once (`Pace`).
 pub const CHUNK: usize = 64 * 1024;
+
+/// The fewest bytes a message carries, however slow the line: 4 KiB within
+/// the silence is about 140 bytes a second.
+pub const SMALLEST_CHUNK: usize = 4 * 1024;
+
+/// How large each message of a transfer is: as large as the line takes
+/// well within the silence, which the other end counts only whole messages
+/// against. It starts at the smallest; one that took long to write halves
+/// it, and it doubles, up to `CHUNK`, once more than any send buffer holds
+/// went at once, as a buffer taking the first messages at once says
+/// nothing of the line behind it.
+pub struct Pace {
+    chunk: usize,
+    /// The bytes written at once since the size last changed.
+    quick: usize,
+}
+
+/// A message that took this long to write halves the next.
+const SLOW_MESSAGE: std::time::Duration = std::time::Duration::from_secs(4);
+/// One written within this went at once.
+const QUICK_MESSAGE: std::time::Duration = std::time::Duration::from_millis(500);
+/// How much has to go at once before the messages grow.
+const BUFFERED: usize = 512 * 1024;
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self { chunk: SMALLEST_CHUNK, quick: 0 }
+    }
+}
+
+impl Pace {
+    /// How many bytes the next message carries.
+    pub fn chunk(&self) -> usize {
+        self.chunk
+    }
+
+    /// A message of `bytes` took `took` to write.
+    pub fn wrote(&mut self, bytes: usize, took: std::time::Duration) {
+        if took >= SLOW_MESSAGE {
+            self.chunk = (self.chunk / 2).max(SMALLEST_CHUNK);
+            self.quick = 0;
+        } else if took <= QUICK_MESSAGE {
+            self.quick += bytes;
+            if self.quick >= BUFFERED {
+                self.chunk = (self.chunk * 2).min(CHUNK);
+                self.quick = 0;
+            }
+        }
+    }
+}
 
 /// Where a data connection goes.
 pub enum Endpoint {
@@ -48,13 +110,15 @@ pub struct Stream {
     line: Line,
     /// Bytes received and not yet taken.
     pending: Vec<u8>,
+    /// How large the messages it sends are now.
+    pace: Pace,
     /// Says why, when this machine cut the call the transfer goes with.
     cut: Option<watch::Receiver<Option<String>>>,
 }
 
 impl Stream {
     fn over(socket: HubSocket, cut: Option<watch::Receiver<Option<String>>>) -> Self {
-        Self { line: Line::new(socket, cut.clone()), pending: Vec::new(), cut }
+        Self { line: Line::new(socket, cut.clone()), pending: Vec::new(), pace: Pace::default(), cut }
     }
 
     /// Opens this machine's end of the transfer `stream` and waits for the
@@ -100,8 +164,14 @@ impl Stream {
             version: env!("CARGO_PKG_VERSION").to_string(),
             intent: intent(key.public(), proof),
         };
-        dial::send(&mut socket, &hello).await?;
-        match dial::recv(&mut socket).await? {
+        let paired = async {
+            dial::send(&mut socket, &hello).await?;
+            dial::recv(&mut socket).await
+        };
+        let paired = tokio::time::timeout(PAIRED_WITHIN, paired)
+            .await
+            .map_err(|_| format!("the hub paired nothing within {} s", PAIRED_WITHIN.as_secs()))??;
+        match paired {
             Some(Down::Paired) => Ok(Self::over(socket, None)),
             Some(Down::Refused { reason }) => Err(reason.to_string()),
             Some(_) => Err("the hub answered something other than a pairing".to_string()),
@@ -114,12 +184,23 @@ impl Stream {
         self.cut.as_ref().and_then(|cut| cut.borrow().clone())
     }
 
-    /// Sends bytes.
+    /// Sends bytes, as many to a message as the line takes (`Pace`).
     pub async fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
-        for chunk in bytes.chunks(CHUNK) {
-            self.put(WsMessage::Binary(chunk.to_vec().into())).await?;
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let (piece, after) = rest.split_at(rest.len().min(self.pace.chunk()));
+            let began = std::time::Instant::now();
+            self.put(WsMessage::Binary(piece.to_vec().into())).await?;
+            self.pace.wrote(piece.len(), began.elapsed());
+            rest = after;
         }
         Ok(())
+    }
+
+    /// The most a message it sends carries now: what is said in one word
+    /// is said whole only when it fits (`crate::watch_stream`).
+    pub fn message_size(&self) -> usize {
+        self.pace.chunk()
     }
 
     /// Takes exactly `count` bytes, handing each piece to `take` as it comes.
@@ -130,13 +211,7 @@ impl Stream {
     ) -> Result<(), String> {
         while count > 0 {
             if self.pending.is_empty() {
-                match self.next().await? {
-                    Some(Message::Bytes(bytes)) => self.pending = bytes,
-                    Some(Message::Word(_)) => {
-                        return Err("the other end said something where bytes were due".to_string());
-                    }
-                    None => return Err(format!("the other end stopped with {count} bytes still due")),
-                }
+                self.pending = self.due(count).await?;
             }
             let here = (self.pending.len() as u64).min(count) as usize;
             take(&self.pending[..here])?;
@@ -151,13 +226,7 @@ impl Stream {
     pub async fn forward(&mut self, to: &mut Stream, mut count: u64) -> Result<(), String> {
         while count > 0 {
             if self.pending.is_empty() {
-                match self.next().await? {
-                    Some(Message::Bytes(bytes)) => self.pending = bytes,
-                    Some(Message::Word(_)) => {
-                        return Err("the other end said something where bytes were due".to_string());
-                    }
-                    None => return Err(format!("the other end stopped with {count} bytes still due")),
-                }
+                self.pending = self.due(count).await?;
             }
             let here = (self.pending.len() as u64).min(count) as usize;
             to.send(&self.pending[..here]).await?;
@@ -165,6 +234,22 @@ impl Stream {
             count -= here as u64;
         }
         Ok(())
+    }
+
+    /// The next of `count` bytes still due, within `DUE_WITHIN`.
+    async fn due(&mut self, count: u64) -> Result<Vec<u8>, String> {
+        let deadline = tokio::time::Instant::now() + DUE_WITHIN;
+        loop {
+            let next = tokio::time::timeout_at(deadline, self.next())
+                .await
+                .map_err(|_| format!("{count} bytes were still due, and none came for {} s", DUE_WITHIN.as_secs()))?;
+            match next? {
+                Some(Message::Bytes(bytes)) if bytes.is_empty() => continue,
+                Some(Message::Bytes(bytes)) => return Ok(bytes),
+                Some(Message::Word(_)) => return Err("the other end said something where bytes were due".to_string()),
+                None => return Err(format!("the other end stopped with {count} bytes still due")),
+            }
+        }
     }
 
     /// Says something to the other end.
@@ -220,7 +305,21 @@ impl Stream {
     /// As the source: waits for the sink's word that it has everything, and
     /// closes.
     pub async fn finish(mut self) -> Result<(), String> {
-        match self.next().await? {
+        let mut progress = self.line.receipt.subscribe();
+        let began = tokio::time::Instant::now();
+        let receipt = loop {
+            let worked = (*progress.borrow_and_update()).unwrap_or(began).max(began);
+            tokio::select! {
+                next = self.next() => break next?,
+                changed = progress.changed() => {
+                    changed.map_err(|_| "the receiver's work notifications ended".to_string())?;
+                },
+                () = tokio::time::sleep_until(worked + DUE_WITHIN) => {
+                    return Err(format!("the final receipt did not arrive and no receiver work was reported for {} s", DUE_WITHIN.as_secs()));
+                },
+            }
+        };
+        match receipt {
             Some(Message::Word(text)) if text == DONE => {
                 self.line.close().await;
                 Ok(())
@@ -235,6 +334,17 @@ impl Stream {
     /// other end reads its end, not a cut.
     pub async fn close(self) {
         self.line.close().await;
+    }
+
+    /// Keeps the receipt wait alive only while this receiver owns actual local
+    /// writes or finalization. Transport heartbeats alone do not renew it.
+    pub fn settling(&self) -> Settlement {
+        self.line.receipt.hold()
+    }
+
+    /// A work handle that can enter a blocking writer without borrowing the stream.
+    pub fn receipt_work(&self) -> ReceiptWork {
+        ReceiptWork(self.line.receipt.clone())
     }
 
     /// As the sink: says everything arrived, and closes.
@@ -256,17 +366,38 @@ pub async fn source(endpoint: &Endpoint, key: &SecretKey, stream: u64, bytes: &[
     stream.finish().await
 }
 
-/// Takes the bytes `carried` promised, as the sink of its transfer, and
-/// checks them.
-pub async fn sink(endpoint: &Endpoint, key: &SecretKey, carried: &Carried) -> Result<Vec<u8>, String> {
-    let mut stream = Stream::open(endpoint, key, carried.stream, End::Sink).await?;
-    let mut bytes = Vec::new();
-    stream
-        .take(carried.bytes, |piece| {
-            bytes.extend_from_slice(piece);
-            Ok(())
-        })
-        .await?;
+/// The largest call or answer assembled from a data connection. File transfers
+/// use `Stream::take` or `Stream::forward` and are not subject to this limit.
+pub const MAX_BODY: usize = 64 * 1024 * 1024;
+
+/// Takes and checks `carried`, reserving its bytes before opening a connection.
+/// The returned buffer keeps the process reservation until decoding finishes.
+pub async fn sink(
+    endpoint: &Endpoint,
+    key: &SecretKey,
+    carried: &Carried,
+) -> Result<crate::reassembly::Buffer, String> {
+    sink_until(endpoint, key, carried, tokio::time::Instant::now() + PAIRED_WITHIN).await
+}
+
+/// Bounds opening separately; the body is governed by actual byte progress.
+pub(crate) async fn sink_until(
+    endpoint: &Endpoint,
+    key: &SecretKey,
+    carried: &Carried,
+    opening_deadline: tokio::time::Instant,
+) -> Result<crate::reassembly::Buffer, String> {
+    if carried.bytes > MAX_BODY as u64 {
+        return Err(format!("the remote body is {} bytes; at most {MAX_BODY} can be assembled", carried.bytes));
+    }
+    // Cover the message waiting on the line and the one being read as well as
+    // the body; even an empty advertised body takes space before its stream opens.
+    let overhead = 2 * wire::MAX_DATA_MESSAGE;
+    let mut bytes = crate::reassembly::Buffer::new(carried.bytes as usize, overhead)?;
+    let mut stream = tokio::time::timeout_at(opening_deadline, Stream::open(endpoint, key, carried.stream, End::Sink))
+        .await
+        .map_err(|_| "opening the body transfer exceeded its deadline".to_string())??;
+    stream.take(carried.bytes, |piece| bytes.extend(piece)).await?;
     if Digest(sha256(&bytes)) != carried.sha256 {
         return Err("the bytes are not the ones the source said it sent".to_string());
     }

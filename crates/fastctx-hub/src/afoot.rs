@@ -12,22 +12,28 @@
 //!
 //! Each session of a member is first told of every machine it sees that has
 //! told anything, even of nothing there for it, so what it kept from an
-//! earlier session is replaced; then of each change.
+//! earlier session is replaced; then of each change. What members logged in
+//! to the same accounts see of a machine is the same, so it is worked out
+//! once for them all and kept once.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use fastctx_net::directory::Directory;
-use fastctx_net::wire::Down;
+
 use fastctx_types::town::{Afoot, AfootChange, AfootJob, AfootResident, AfootSeen};
 use fastctx_types::{AccountName, MachineName, ResidentId};
 
-use crate::{Hub, Out};
+use crate::Hub;
+use fastctx_net::afoot::isolation::{self, Previous, Problems};
 
 /// The latest each machine told, and what each member's session was told.
 #[derive(Default)]
 pub(crate) struct Afoots {
     told: HashMap<MachineName, Afoot>,
+    prior: HashMap<MachineName, Previous>,
     shown: HashMap<MachineName, Shown>,
+    rejected: HashMap<MachineName, Problems>,
 }
 
 /// What one session of a member was told, machine by machine.
@@ -35,26 +41,55 @@ struct Shown {
     generation: u64,
     /// It has not been told of every machine yet.
     fresh: bool,
-    machines: HashMap<MachineName, Seen>,
+    machines: HashMap<MachineName, Arc<Seen>>,
+    rejected: HashMap<MachineName, Problems>,
 }
 
 /// What a member was told of one machine.
 #[derive(Default, PartialEq)]
 struct Seen {
-    afoot: AfootSeen,
+    afoot: Arc<AfootSeen>,
     busy: Option<u32>,
 }
 
+/// Whose telling is brought up to date, of which machines.
+#[derive(Clone, Copy)]
+enum Scope<'a> {
+    /// Every session's, of every machine: who sees what may have changed.
+    All,
+    /// Every session's, of the machine that told something new.
+    Machine(&'a MachineName),
+    /// The sessions just come, of every machine.
+    Come,
+}
+
 /// `machine` told how what is afoot on it changed.
-pub(crate) fn heard(hub: &Hub, machine: &MachineName, change: AfootChange<AfootResident, AfootJob>) {
-    hub.afoots().told.entry(machine.clone()).or_default().apply(change);
-    tell(hub, Some(machine));
+pub(crate) fn heard(hub: &Hub, machine: &MachineName, mut change: AfootChange<AfootResident, AfootJob>) {
+    fastctx_net::afoot::bounded::change(&mut change);
+    {
+        let mut afoots = hub.afoots();
+        let Afoots { told, prior, rejected, .. } = &mut *afoots;
+        isolation::apply(
+            told.entry(machine.clone()).or_default(),
+            prior.entry(machine.clone()).or_default(),
+            change,
+            rejected.entry(machine.clone()).or_default(),
+            |reason| hub.log.line(format_args!("from {machine}: {reason}")),
+        );
+    }
+    tell(hub, Scope::Machine(machine));
 }
 
 /// Tells every member what changed in what it may see, after the directory
-/// changed who sees what, or a machine or member came or went.
+/// changed who sees what.
 pub(crate) fn settle(hub: &Hub) {
-    tell(hub, None);
+    tell(hub, Scope::All);
+}
+
+/// Tells a session just come what is afoot on every machine it sees; the
+/// others were told already.
+pub(crate) fn came(hub: &Hub) {
+    tell(hub, Scope::Come);
 }
 
 /// The accounts the conversation at `conversation` works for, as its
@@ -65,61 +100,88 @@ pub(crate) fn accounts_of(hub: &Hub, conversation: &fastctx_types::Address) -> O
     Some(resident.accounts.clone())
 }
 
-/// Tells each member reading what is afoot what changed of `only`, or of
-/// every machine.
-fn tell(hub: &Hub, only: Option<&MachineName>) {
+/// Tells each member reading what is afoot what changed in `scope`.
+fn tell(hub: &Hub, scope: Scope<'_>) {
     // The sessions and the directory are read first, without the afoot
     // record's lock, which is taken last.
-    let readers: Vec<(MachineName, u64, tokio::sync::mpsc::UnboundedSender<Out>)> = hub
+    let readers: Vec<(MachineName, u64, crate::outq::Outq)> = hub
         .sessions()
         .iter()
         .filter(|(_, session)| session.afoot)
         .map(|(name, session)| (name.clone(), session.generation, session.out.clone()))
         .collect();
-    let (directory, hidden) = {
-        let store = hub.store();
-        (store.book.directory.clone(), crate::forget::hidden(&store))
-    };
+    // Hold the directory until the state it will prune is locked. A newly
+    // admitted machine cannot publish into a snapshot from before it joined.
+    // Afoot writers never acquire the store while holding this leaf lock.
+    let store = hub.store();
+    let directory = store.book.directory.clone();
+    let hidden = crate::forget::hidden(&store);
     let mut afoots = hub.afoots();
-    let Afoots { told, shown } = &mut *afoots;
+    drop(store);
+    let Afoots { told, prior, shown, rejected } = &mut *afoots;
     // A machine's last stays while it is on the hub under that name.
     told.retain(|machine, _| directory.member(machine).is_some_and(|member| member.name == *machine));
     shown.retain(|reader, shown| {
         readers.iter().any(|(name, generation, _)| name == reader && *generation == shown.generation)
     });
+    rejected.retain(|machine, _| told.contains_key(machine));
+    prior.retain(|machine, _| told.contains_key(machine));
+    let told = &*told;
+    // What each set of logins sees of each machine, worked out once.
+    let mut groups: HashMap<BTreeSet<AccountName>, usize> = HashMap::new();
+    let mut seen_by: HashMap<(usize, &MachineName), Option<Arc<Seen>>> = HashMap::new();
     for (reader, generation, out) in readers {
-        let shown =
-            shown.entry(reader.clone()).or_insert_with(|| Shown { generation, fresh: true, machines: HashMap::new() });
+        let shown = shown.entry(reader.clone()).or_insert_with(|| Shown {
+            generation,
+            fresh: true,
+            machines: HashMap::new(),
+            rejected: HashMap::new(),
+        });
+        if matches!(scope, Scope::Come) && !shown.fresh {
+            continue;
+        }
         let logins: BTreeSet<AccountName> =
             directory.member(&reader).map(|member| member.logins.clone()).unwrap_or_default();
-        let machines: Vec<&MachineName> = match only {
-            Some(machine) if !shown.fresh => told.get_key_value(machine).map(|(name, _)| name).into_iter().collect(),
+        let next = groups.len();
+        let group = *groups.entry(logins.clone()).or_insert(next);
+        let machines: Vec<&MachineName> = match scope {
+            Scope::Machine(machine) if !shown.fresh => {
+                told.get_key_value(machine).map(|(name, _)| name).into_iter().collect()
+            }
             _ => told.keys().collect(),
         };
         for machine in machines {
             if *machine == reader {
                 continue;
             }
-            let now = sees(&directory, &logins, machine)
-                .then(|| seen(&directory, &logins, machine, &told[machine], hidden.get(machine)));
-            let (change, busy) = match (shown.machines.get(machine), &now) {
-                (None, None) => continue,
-                (None, Some(now)) => (now.afoot.whole(), now.busy),
-                (Some(_), None) => (AfootChange { anew: true, ..AfootChange::default() }, None),
-                (Some(was), Some(now)) if was == now => continue,
-                (Some(was), Some(now)) => (was.afoot.change_to(&now.afoot), now.busy),
-            };
-            let (frames, too_large) = fastctx_net::afoot::frames(change, fastctx_net::afoot::FRAME_ROOM);
-            if !too_large.is_empty() {
-                hub.log.line(format_args!(
-                    "what is afoot on {machine} leaves out {} for {reader}: each is larger than a frame",
-                    too_large.join(", ")
-                ));
+            let mut now = seen_by
+                .entry((group, machine))
+                .or_insert_with(|| {
+                    sees(&directory, &logins, machine)
+                        .then(|| Arc::new(seen(&directory, &logins, machine, &told[machine], hidden.get(machine))))
+                })
+                .clone();
+            let before = shown.machines.get(machine);
+            if let Some(candidate) = &now {
+                let mut after = candidate.afoot.clone();
+                let rejected = isolation::snapshot(&mut after, before.map(|before| &*before.afoot));
+                isolation::report(shown.rejected.entry(machine.clone()).or_default(), rejected, |reason| {
+                    hub.log.line(format_args!("from {machine} to {reader}: {reason}"))
+                });
+                if !Arc::ptr_eq(&after, &candidate.afoot) {
+                    now = Some(Arc::new(Seen { afoot: after, busy: candidate.busy }));
+                }
             }
-            // A change of the count alone goes as a change of nothing.
-            let frames = if frames.is_empty() { vec![AfootChange::default()] } else { frames };
-            for change in frames {
-                let _ = out.send(Out::Frame(Down::Afoot { machine: machine.clone(), busy, change: Box::new(change) }));
+            match (before, &now) {
+                (None, None) => continue,
+                (Some(was), Some(now)) if Arc::ptr_eq(was, now) || was == now => continue,
+                _ => {}
+            }
+            let previous = before.map(|seen| seen.afoot.clone());
+            let after = now.as_ref().map(|seen| seen.afoot.clone()).unwrap_or_default();
+            let busy = now.as_ref().and_then(|seen| seen.busy);
+            if out.afoot(machine.clone(), previous, after, busy).is_err() {
+                continue;
             }
             match now {
                 Some(now) => {
@@ -133,6 +195,7 @@ fn tell(hub: &Hub, only: Option<&MachineName>) {
         // Of machines that left, nothing more is told: they leave the
         // member's view, and it forgets them.
         shown.machines.retain(|machine, _| told.contains_key(machine));
+        shown.rejected.retain(|machine, _| told.contains_key(machine));
         shown.fresh = false;
     }
 }
@@ -160,16 +223,17 @@ fn seen(
     let owner =
         directory.member(machine).and_then(|member| member.home.as_ref()).is_some_and(|home| logins.contains(home));
     let mut seen = Seen::default();
+    let projected = Arc::make_mut(&mut seen.afoot);
     for (id, resident) in &afoot.residents {
         if theirs(&resident.accounts) && shown(id) {
-            seen.afoot.residents.insert(id.clone(), resident.resident.clone());
+            projected.residents.insert(id.clone(), resident.resident.clone());
         }
     }
     for (id, job) in &afoot.jobs {
         let of_hidden =
             job.job.owner.resident().is_some_and(|owner| owner.machine == *machine && !shown(&owner.resident));
         if theirs(&job.accounts) && !of_hidden {
-            seen.afoot.jobs.insert(id.clone(), job.job.clone());
+            projected.jobs.insert(id.clone(), job.job.clone());
         }
     }
     // What works there for accounts that may work on the machine counts;

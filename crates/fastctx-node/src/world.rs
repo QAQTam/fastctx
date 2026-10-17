@@ -36,6 +36,10 @@ fn hubs(world: &WorldDir) -> std::path::PathBuf {
     world.net()
 }
 
+/// The file in a hub's directory that says this computer is leaving it,
+/// naming the account it logged out of.
+const LEAVING: &str = "leaving";
+
 fn net_dir(world: &WorldDir, hub: &HubId) -> NetDir {
     NetDir::new(hub_dir(world, hub))
 }
@@ -63,6 +67,14 @@ pub fn load(world: &WorldDir) -> io::Result<Vec<Membership>> {
         else {
             continue;
         };
+        // A computer that began to leave this network and stopped before
+        // it was done leaves it now: what it told the hub was the last word
+        // (`specs/world-concurrency.md`, 多步的事).
+        if path.join(LEAVING).exists() {
+            let aside = world.path().join(format!("net-left-{}-{}", id, Timestamp::now().strftime("%Y%m%dT%H%M%SZ")));
+            std::fs::rename(&path, &aside)?;
+            continue;
+        }
         match fastctx_net::link::state::read::<Membership>(&path.join("membership.json")) {
             Ok(membership) if membership.id == id => memberships.push(membership),
             Ok(membership) => {
@@ -443,6 +455,16 @@ async fn log_out(node: &Arc<Node>, link: &Arc<Link>, account: &AccountName) -> R
         crate::managed::stays(node)?;
     }
     let last = link.view().me().is_none_or(|me| me.logins.iter().all(|login| login == account));
+    // Leaving for good is written down before the hub is told: a computer
+    // stopped in between finishes leaving when it starts (`load`).
+    if last {
+        fastctx_platform::publish(
+            &hub_dir(&node.world, &link.membership().id).join(LEAVING),
+            account.as_str().as_bytes(),
+            fastctx_platform::Permissions::Private,
+        )
+        .map_err(|error| Failure::new(format!("recording that this computer leaves: {error}")))?;
+    }
     let answer = link.manage(account, Change::Logout).await;
     if !last {
         return answer.map(|_| ()).map_err(Failure::new);
@@ -452,6 +474,7 @@ async fn log_out(node: &Arc<Node>, link: &Arc<Link>, account: &AccountName) -> R
     // that cannot be reached is not told, and the computer leaves it all
     // the same: there it stays a machine away until it is removed.
     if answer.is_err() && matches!(link.status(), Status::Online { .. }) {
+        let _ = std::fs::remove_file(hub_dir(&node.world, &link.membership().id).join(LEAVING));
         answer.map_err(Failure::new)?;
     }
     let aside = put_aside(node, link).await?;
@@ -577,10 +600,9 @@ fn shell() -> &'static String {
             Ok(bash) => bash,
             Err(error) => return format!("no bash: {error}"),
         };
-        let version = std::process::Command::new(&bash)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .output()
+        let mut asking = std::process::Command::new(&bash);
+        asking.arg("--version").stdin(std::process::Stdio::null());
+        let version = fastctx_platform::bounded::output(asking, "bash --version", std::time::Duration::from_secs(10))
             .ok()
             .and_then(|output| {
                 // "GNU bash, version 5.2.37(1)-release (x86_64-pc-msys)"
@@ -620,22 +642,23 @@ struct Handler {
 }
 
 impl fastctx_net::link::Node for Handler {
+    fn place(
+        &self,
+        machine: &MachineName,
+        account: &fastctx_types::AccountName,
+        pool: fastctx_types::contract::Pool,
+    ) -> Result<Box<dyn Send>, Failure> {
+        let node = self.node.upgrade().ok_or_else(|| Failure::new("the node is stopping"))?;
+        crate::intake::take(&node.machine(), &self.hub, machine, account, pool)
+            .map(|place| Box::new(place) as Box<dyn Send>)
+    }
+
     fn answering(&self, call: &RemoteCall) -> Result<Option<Box<dyn Send>>, Failure> {
-        // A watch and an `on` go on for as long as they go on: a node
-        // handing the World on does not wait for them. A copy asked of this
-        // machine holds it back only while it moves bytes (`copy`).
-        if matches!(
-            call,
-            RemoteCall::Watch { .. }
-                | RemoteCall::CopySend { .. }
-                | RemoteCall::On { .. }
-                | RemoteCall::Follow { .. }
-                | RemoteCall::PipeOut { .. }
-                | RemoteCall::FindFiles { request: fastctx_types::file_search::FileSearchRequest::Open { .. } }
-                | RemoteCall::Lines {
-                    request: fastctx_types::lines::Request::Open { .. } | fastctx_types::lines::Request::Changed { .. }
-                }
-        ) {
+        // A stream, such as a watch or an `on`, goes on for as long as it
+        // goes on: a node handing the World on does not wait for it. A copy
+        // asked of this machine holds it back only while it moves bytes
+        // (`copy`).
+        if !call.contract().held {
             return Ok(None);
         }
         let node = self.node.upgrade().ok_or_else(|| Failure::new("the node is stopping"))?;
@@ -655,7 +678,9 @@ impl fastctx_net::link::Node for Handler {
     ) -> BoxFuture<RemoteResult> {
         let node = self.node.upgrade();
         let hub = self.hub.clone();
+        let doing = format!("{} from {}", crate::labels::call_of(&call), caller.machine);
         Box::pin(async move {
+            let _doing = fastctx_platform::doing::doing(doing);
             let Some(node) = node else {
                 return Err(Failure::new("the node is stopping"));
             };
@@ -797,10 +822,10 @@ impl fastctx_net::link::Node for Handler {
                         .await
                         .map(|landed| RemoteReply::Said { landed })
                 }
-                RemoteCall::Watch { resident, watch, composer, held } => {
+                RemoteCall::Watch { resident, watch, composer, held, now } => {
                     let stream = stream
                         .ok_or_else(|| Failure::new("a watch comes with a data connection, and this one had none"))?;
-                    crate::talk::serve_watch(&node, &link, &from, resident, watch, composer, held, stream).await
+                    crate::talk::serve_watch(&node, &link, &from, resident, watch, composer, held, now, stream).await
                 }
                 RemoteCall::Agents => crate::agents::here(&node)
                     .await
@@ -923,10 +948,17 @@ impl fastctx_net::link::Node for Handler {
                         .map_err(|error| Failure::new(format!("reading the canon on {machine}: {error}")))
                 }
                 RemoteCall::Facts => Ok(RemoteReply::Facts(facts(&node))),
-                RemoteCall::UpdateWorld => crate::updates::call(&node, fastctx_types::update::UpdateCall::Kernel)
-                    .await
-                    .map(|state| RemoteReply::Update(Box::new(state)))
-                    .map_err(Failure::new),
+                RemoteCall::UpdateWorld | RemoteCall::Updates { .. } => {
+                    let update = match call {
+                        RemoteCall::Updates { update } => Some(update),
+                        _ => None,
+                    };
+                    let asker = crate::updates::Asker { by: caller.account.clone(), hub: hub.clone() };
+                    crate::updates::remote(&node, asker, update)
+                        .await
+                        .map(|state| RemoteReply::Update(Box::new(state)))
+                        .map_err(Failure::new)
+                }
                 RemoteCall::Stats { after } => {
                     crate::stats::here(&node, after).await.map(|stats| RemoteReply::Stats(Box::new(stats)))
                 }
@@ -934,8 +966,11 @@ impl fastctx_net::link::Node for Handler {
                     crate::hub_arrival::interfaces().map(|addresses| RemoteReply::Interfaces { addresses })
                 }
                 RemoteCall::CopySend { from: path, to } => {
+                    let accepted = crate::copy::accept(stream).await?;
                     let from = fastctx_types::copy::Place { machine: None, hub: None, path };
-                    Box::pin(crate::copy::copy(&node, &acting, from, to)).await.map(RemoteReply::Copied)
+                    let result = Box::pin(crate::copy::copy(&node, &acting, from, to)).await.map(RemoteReply::Copied);
+                    drop(accepted);
+                    result
                 }
                 RemoteCall::CopyFetch { from: path } => {
                     let stream = stream
@@ -974,10 +1009,6 @@ impl fastctx_net::link::Node for Handler {
         letter: Letter,
     ) -> BoxFuture<io::Result<Result<(), String>>> {
         let from = caller.machine.clone();
-        // What the letter carries is named here from who sent it and what
-        // they named it, never by a name from the letter itself: a letter
-        // that comes again is the same thing, and is not told twice.
-        let delivery_id = crate::speech::fixed_id("letter", &[from.key(), id.as_str()]);
         let node = self.node.upgrade();
         let hub = self.hub.clone();
         Box::pin(async move {
@@ -985,53 +1016,93 @@ impl fastctx_net::link::Node for Handler {
                 return Err(io::Error::other("the node is stopping"));
             };
             let _answering = node.handoff.call().ok_or_else(|| io::Error::other("the node is handing over"))?;
-            let (letter, delivery_id) = match letter {
-                Letter::Fragment { id, index, total, text } => {
-                    match crate::letters::receive(&node, &from, &id, index, total, &text)? {
-                        Some(letter) => (letter, crate::speech::fixed_id("letter", &[from.key(), id.as_str()])),
-                        None => return Ok(Ok(())),
+            let original = match &letter {
+                Letter::Fragment { id, .. } => id.as_str(),
+                _ => id.as_str(),
+            };
+            let identity = crate::letters::Identity::new(&node, caller.key, original, &caller.names);
+            let handoff = crate::letters::Handoff::begin(&node, &identity).await;
+            let finished = handoff.finished()?;
+            let (letter, completion) = match letter {
+                Letter::Fragment { index, total, text, .. } => {
+                    match crate::letters::receive(&node, &identity, index, total, &text)? {
+                        Ok(Some((letter, completion))) => (letter, Some(completion)),
+                        Ok(None) => return Ok(Ok(())),
+                        Err(reason) => return Ok(Err(reason)),
                     }
                 }
-                letter => (letter, delivery_id),
+                letter => (letter, None),
             };
+            if finished {
+                if let Some(completion) = completion {
+                    completion.finish()?;
+                }
+                return Ok(Ok(()));
+            }
             if let Err(refused) = crate::admission::letters::admit(&node, &hub, &caller, purpose, &letter) {
                 return Ok(Err(refused));
             }
-            match letter {
-                Letter::Fragment { .. } => unreachable!("nested fragments are rejected"),
-                Letter::JobFacts { to, update } => {
-                    crate::run_facts::receive(&node, &to, &update)?;
-                    Ok(Ok(()))
+            let _completion_handoff = if matches!(&letter, Letter::Notice { notice, .. } if matches!(**notice, Notice::JobEnded { .. }))
+            {
+                Some(node.on_deliveries.draining.lock().await)
+            } else {
+                None
+            };
+            let delivery_id = match &letter {
+                Letter::Speak { to, .. } | Letter::Notice { to, .. } => {
+                    identity.delivery(&node.world.conversation(to))?
                 }
-                Letter::Notice { to, notice } => {
-                    let notice = *notice;
-                    if let Notice::JobEnded { job, machine, .. } = &notice {
-                        crate::here::ended_elsewhere(&node, &to, machine, job);
+                _ => identity.id.clone(),
+            };
+            let result = async {
+                match letter {
+                    Letter::Fragment { .. } => unreachable!("nested fragments are rejected"),
+                    Letter::JobFacts { to, update } => {
+                        crate::run_facts::receive(&node, &to, &update)?;
+                        Ok(Ok(()))
                     }
-                    let delivery = Delivery { id: delivery_id, at: Timestamp::now(), notice };
-                    if crate::on_delivery::park(&node, &to, &delivery)? {
-                        return Ok(Ok(()));
+                    Letter::Notice { to, notice } => {
+                        let notice = *notice;
+                        if let Notice::JobEnded { job, machine, .. } = &notice {
+                            crate::here::ended_elsewhere(&node, &to, machine, job);
+                        }
+                        let delivery = Delivery { id: delivery_id, at: Timestamp::now(), notice };
+                        if crate::on_delivery::park_from(&node, &to, &delivery, Some(&identity))? {
+                            return Ok(Ok(()));
+                        }
+                        match crate::speech::tell_here(&node, &to, delivery, Owed::Working).await {
+                            Ok(_) => Ok(Ok(())),
+                            Err(failure) => Err(io::Error::other(failure.message)),
+                        }
                     }
-                    match crate::speech::tell_here(&node, &to, delivery, Owed::Working).await {
-                        Ok(_) => Ok(Ok(())),
-                        Err(failure) => Err(io::Error::other(failure.message)),
+                    Letter::Speak { to, from: speaker, text, .. } => {
+                        let address = Address { machine: from, resident: speaker };
+                        node.residents.set_departed(&node.world, &address, false, Some((hub.as_str(), &identity)))?;
+                        let notice = Notice::Words { from: Speaker::Resident { address: address.clone() }, text };
+                        let delivery = Delivery { id: delivery_id, at: Timestamp::now(), notice };
+                        match crate::speech::tell_here(&node, &to, delivery, Owed::Speaker(address)).await {
+                            Ok(_) => Ok(Ok(())),
+                            Err(failure) => Err(io::Error::other(failure.message)),
+                        }
                     }
-                }
-                Letter::Speak { to, from: speaker, text, .. } => {
-                    let address = Address { machine: from, resident: speaker };
-                    node.residents.set_departed(address.clone(), false);
-                    let notice = Notice::Words { from: Speaker::Resident { address: address.clone() }, text };
-                    let delivery = Delivery { id: delivery_id, at: Timestamp::now(), notice };
-                    match crate::speech::tell_here(&node, &to, delivery, Owed::Speaker(address)).await {
-                        Ok(_) => Ok(Ok(())),
-                        Err(failure) => Err(io::Error::other(failure.message)),
+                    Letter::Left { resident } => {
+                        crate::colleagues::departed(
+                            &node,
+                            Address { machine: from, resident },
+                            (hub.as_str(), &identity),
+                        )?;
+                        Ok(Ok(()))
                     }
-                }
-                Letter::Left { resident } => {
-                    crate::colleagues::departed(&node, Address { machine: from, resident });
-                    Ok(Ok(()))
                 }
             }
+            .await;
+            if matches!(result, Ok(Ok(()))) {
+                handoff.finish()?;
+                if let Some(completion) = completion {
+                    completion.finish()?;
+                }
+            }
+            result
         })
     }
 
@@ -1085,14 +1156,20 @@ impl fastctx_net::link::Node for Handler {
 
     /// A network dissolved is left here as well: the computer is on it no
     /// more, whoever made it (`world-network.md`, 解散网络).
-    fn place_ended(&self, dissolved: bool) {
-        let Some(node) = self.node.upgrade().filter(|_| dissolved) else { return };
+    fn place_ended(&self, dissolved: bool, then: Option<fastctx_types::uninstall::Then>) {
+        let Some(node) = self.node.upgrade() else { return };
         let hub = self.hub.clone();
-        tokio::spawn(async move {
-            if let Err(failure) = left_dissolved(&node, &hub).await {
-                node.log.line(format_args!("leaving the dissolved network: {failure}"));
-            }
-        });
+        if dissolved {
+            tokio::spawn(async move {
+                if let Err(failure) = left_dissolved(&node, &hub).await {
+                    node.log.line(format_args!("leaving the dissolved network: {failure}"));
+                }
+            });
+            return;
+        }
+        let Some(then) = then else { return };
+        let Some(membership) = node.link_of(&hub).map(|link| link.dir().to_path_buf()) else { return };
+        tokio::spawn(async move { crate::removed::uninstall(&node, &membership, then).await });
     }
 
     /// Connected again: a hub that calls this computer otherwise than the

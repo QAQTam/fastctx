@@ -115,4 +115,15 @@ export interface NodeSeen {
   started: Timestamp;
   /** Whether a system service keeps it running. */
   service: boolean;
+  /** What of its work has gone on too long, as it last looked at itself. */
+  stuck?: StuckWork[];
+  /** The last place macOS kept private from it while it runs, and when. */
+  refused?: { path: string; at: Timestamp };
+}
+
+/** One piece of a node's work that has gone on too long. */
+export interface StuckWork {
+  doing: string;
+  what: string;
+  seconds: number;
 }

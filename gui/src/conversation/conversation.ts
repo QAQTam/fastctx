@@ -16,7 +16,7 @@ import type { AskState } from "./ask-state";
 import { inOrder, type ModelRequest } from "./requests";
 import type { SessionEvent, TurnEnd } from "../world/events";
 import type { MachineName } from "../world/events";
-import { Fold, type Block, type Entry, type Gap, type SendState, type ShownAttachment } from "./model";
+import { Fold, type Block, type Entry, type Gap, type KeptWords, type SendState, type ShownAttachment } from "./model";
 import type { AgentRun } from "./agents";
 
 /** The part a page opens on, in place of all it held. */
@@ -546,6 +546,17 @@ export class Conversation {
   noTurnRuns(): void {
     this.live.noTurnRuns();
   }
+  /** The user asked what runs to stop: it shows stopped at once. */
+  halt(): void {
+    this.live.halt();
+  }
+  /** The stop did not reach the agent: it shows going on again. */
+  unhalt(): void {
+    this.live.unhalt();
+  }
+  halting(): boolean {
+    return this.live.halting();
+  }
   turning(): boolean {
     return this.live.turning();
   }
@@ -580,6 +591,13 @@ export class Conversation {
   }
   sent(key: string, state: SendState): void {
     this.live.sent(key, state);
+  }
+  named(key: string, delivery: string | null): void {
+    this.live.named(key, delivery);
+  }
+  /** What its machine holds of it now (`Fold.now`). */
+  now(busy: boolean, turn: string | null, kept: KeptWords[]): void {
+    this.live.now(busy, turn, kept);
   }
   unsend(key: string): void {
     this.live.unsend(key);

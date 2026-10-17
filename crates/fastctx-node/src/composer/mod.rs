@@ -10,7 +10,7 @@ mod watching;
 pub use storage::recover;
 use storage::{event, load, publish};
 pub use submissions::resume;
-pub use submissions::{bound, turn_ended, uncertain};
+pub use submissions::{awaits_turn, bound, turn_ended, uncertain};
 use submissions::{dispatch, schedule};
 pub use watching::{Lease, snapshot, watch};
 
@@ -28,11 +28,11 @@ use fastctx_types::{MachineName, ResidentId};
 use crate::Node;
 use state::{Entry, Flight, Receipt, Stored};
 
-type Cell = crate::leases::Lease<ResidentId, tokio::sync::Mutex<Option<Stored>>>;
+type Cell = crate::leases::Lease<ResidentId, fastctx_platform::doing::Mutex<Option<Stored>>>;
 
 #[derive(Default)]
 pub struct Composers {
-    cells: crate::leases::Registry<ResidentId, tokio::sync::Mutex<Option<Stored>>>,
+    cells: crate::leases::Registry<ResidentId, fastctx_platform::doing::Mutex<Option<Stored>>>,
     watches: Mutex<HashMap<String, ResidentId>>,
     failed: Mutex<HashMap<ResidentId, Cell>>,
 }
@@ -53,7 +53,7 @@ pub fn deleted(node: &Node, id: &ResidentId) {
 
 impl Composers {
     fn cell(&self, id: &ResidentId) -> Cell {
-        self.cells.get_or_insert_with(id, Default::default)
+        self.cells.get_or_insert_with(id, || crate::ranked::composer(id))
     }
 }
 
@@ -90,7 +90,7 @@ pub async fn request(
 pub async fn here(node: &Arc<Node>, from: &MachineName, id: &ResidentId, request: Request) -> Result<Updated, Failure> {
     node.ready().await;
     let gate = node.residents.management(id)?;
-    let _reading = gate.read().await;
+    let _reading = crate::gate_waits::shared(node, id, &gate).await?;
     node.residents.active(id)?;
     let cell = node.composers.cell(id);
     let mut cell = cell.lock().await;

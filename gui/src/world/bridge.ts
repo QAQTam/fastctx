@@ -62,6 +62,11 @@ export type Piece =
   | { kind: "ended"; error: string | null }
   /** The conversation was deleted: nothing more of it comes. */
   | { kind: "deleted"; error: string }
+  /** Its machine refused this account: nothing more comes until it may. */
+  | { kind: "refused"; error: string }
+  /** Whether it works now, on which turn, and which words its machine
+   *  keeps on their way in. */
+  | { kind: "now"; busy: boolean; turn: string | null; kept?: import("../conversation/model").KeptWords[] }
   /** The part the page holds is now this, in place of all it held. */
   | { kind: "window"; window: Window }
   /** What came before arrived: what the page holds stays, moved along. */
@@ -189,7 +194,7 @@ export interface NotSaid {
 
 /** The user's words to a conversation. Said again under the same `id`, as
  *  after an answer that never came, they go in once. */
-export function talk(who: Address, text: string, attachments: Attachment[] = [], filesOn: string | null = null, id: string | null = null): Promise<{ to: Address; landed: Landed }> {
+export function talk(who: Address, text: string, attachments: Attachment[] = [], filesOn: string | null = null, id: string | null = null): Promise<{ to: Address; landed: Landed; delivery?: string | null }> {
   return invoke("talk", { residentId: who.resident, machineName: who.machine, text, attachments, filesOn, id });
 }
 
@@ -526,8 +531,8 @@ export function accountChange(hub: string | null, account: string, change: Accou
 /** The line that installs fastctx on Linux servers and registers each as a
  *  machine of `account`, valid until `expires`: for `uses` of them, one when
  *  null, any number at zero; its code called `label`. */
-export function serverCommand(hub: string | null, account: string, name: string | null, expires: string, managed = false, uses: number | null = null, label: string | null = null): Promise<string> {
-  return invoke("server_command", { hubName: hub, accountName: account, name, expires, managed, uses, label });
+export function serverCommand(hub: string | null, account: string, name: string | null, expires: string, managed = false, uses: number | null = null, label: string | null = null, windows = false): Promise<string> {
+  return invoke("server_command", { hubName: hub, accountName: account, name, expires, managed, uses, label, windows });
 }
 
 /** Turns asking for colleagues on for a conversation, with the machine

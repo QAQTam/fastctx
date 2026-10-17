@@ -92,13 +92,13 @@ pub async fn adopt(node: &Arc<Node>) {
 #[derive(Default)]
 pub struct Unclaimed {
     state: std::sync::Mutex<Reports>,
-    workers: crate::leases::Registry<String, tokio::sync::Mutex<()>>,
+    workers: crate::leases::Registry<String, fastctx_platform::doing::Mutex<()>>,
     starting: std::sync::Mutex<usize>,
 }
 
 /// Held while what a thread reported is applied (`drain`).
-pub(crate) fn working(node: &Node, thread: &str) -> crate::leases::Lease<String, tokio::sync::Mutex<()>> {
-    node.unclaimed.workers.get_or_insert_with(&thread.to_string(), Default::default)
+pub(crate) fn working(node: &Node, thread: &str) -> crate::leases::Lease<String, fastctx_platform::doing::Mutex<()>> {
+    node.unclaimed.workers.get_or_insert_with(&thread.to_string(), || crate::ranked::working(thread))
 }
 
 /// Its conversation was deleted: what its thread reported and is still
@@ -153,17 +153,33 @@ fn discard_unclaimed(node: &Node) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
+    let mut unreadable = None;
     for entry in entries {
         let path = entry?.path();
-        let claimed = path.extension().is_some_and(|extension| extension == "json")
-            && serde_json::from_slice::<KeptReports>(&std::fs::read(&path)?)
-                .ok()
-                .is_some_and(|kept| node.residents.resident_of_thread(&kept.thread).is_some());
+        let claimed = if path.extension().is_some_and(|extension| extension == "json") {
+            match serde_json::from_slice::<KeptReports>(&std::fs::read(&path)?) {
+                Ok(kept) => node.residents.resident_of_thread(&kept.thread).is_some(),
+                Err(error) => {
+                    unreadable.get_or_insert_with(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("preserved {}: its reports cannot be read: {error}", path.display()),
+                        )
+                    });
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
         if !claimed {
             std::fs::remove_file(path)?;
         }
     }
-    Ok(())
+    match unreadable {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 #[derive(Default)]
@@ -197,6 +213,33 @@ fn restore(node: &Node, thread: &str, state: &mut Reports) -> std::io::Result<()
                 if !kept.events.is_empty() {
                     state.queues.insert(thread.to_string(), kept.events);
                 }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let legacy =
+        node.world.path().join("codex-reports").join(format!("{}.json", crate::speech::fixed_id("thread", &[thread])));
+    if legacy != pending_path(node, thread).with_extension("json") {
+        match std::fs::read(&legacy) {
+            Ok(bytes) => {
+                let kept: KeptReports = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+                if kept.thread != thread {
+                    return Err(std::io::Error::other(format!("{} belongs to another thread", legacy.display())));
+                }
+                let mut events = kept.events;
+                let mut seen: std::collections::HashSet<_> =
+                    events.iter().map(|event| serde_json::to_vec(event).expect("report serializes")).collect();
+                for event in state.queues.get(thread).into_iter().flatten() {
+                    if seen.insert(serde_json::to_vec(event).expect("report serializes")) {
+                        events.push(event.clone());
+                    }
+                }
+                save(node, thread, &events)?;
+                if !events.is_empty() {
+                    state.queues.insert(thread.to_string(), events);
+                }
+                std::fs::remove_file(&legacy)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
@@ -312,8 +355,12 @@ async fn drain(node: &Arc<Node>, thread: &str) {
     if node.residents.resident_of_thread(thread).is_none() {
         return;
     }
+    let _doing = fastctx_platform::doing::doing(format!("reading the reports of Codex thread {thread}"));
     let worker = working(node, thread);
     let _worker = worker.lock().await;
+    if node.residents.resident_of_thread(thread).is_none() {
+        return;
+    }
     if let Err(error) = restore(node, thread, &mut node.unclaimed.state.lock().expect("never poisoned")) {
         node.log.line(format_args!("restoring reports for {thread}: {error}"));
         return;
@@ -431,29 +478,7 @@ async fn drain(node: &Arc<Node>, thread: &str) {
 pub fn listen(node: Arc<Node>, mut events: mpsc::UnboundedReceiver<HostEvent>) {
     {
         let mut state = node.unclaimed.state.lock().expect("never poisoned");
-        match std::fs::read_dir(node.world.path().join("codex-reports")) {
-            Ok(entries) => {
-                for entry in entries {
-                    let restored = (|| -> std::io::Result<KeptReports> {
-                        let path = entry?.path();
-                        if path.extension().is_some_and(|extension| extension != "json") {
-                            return Ok(KeptReports { thread: String::new(), events: Vec::new() });
-                        }
-                        serde_json::from_slice(&std::fs::read(path)?).map_err(std::io::Error::other)
-                    })();
-                    match restored {
-                        Ok(kept) => {
-                            if !kept.events.is_empty() && node.residents.resident_of_thread(&kept.thread).is_some() {
-                                state.queues.insert(kept.thread, kept.events);
-                            }
-                        }
-                        Err(error) => node.log.line(format_args!("restoring Codex reports: {error}")),
-                    }
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => node.log.line(format_args!("restoring Codex reports: {error}")),
-        }
+
         for resident in node.residents.everyone() {
             if let Some(thread) = resident.about.session
                 && let Err(error) = restore(&node, &thread, &mut state)
@@ -537,15 +562,8 @@ pub async fn moved(node: &Arc<Node>, id: &ResidentId) {
         return;
     }
     let Some(thread) = &about.session else { return };
-    match crate::colleagues::thread_spec(
-        node,
-        id,
-        &about.origin,
-        town.as_ref(),
-        &about.acting,
-        about.home.as_deref(),
-    )
-    .await
+    match crate::colleagues::thread_spec(node, id, &about.origin, town.as_ref(), &about.acting, about.home.as_deref())
+        .await
     {
         Ok((spec, _)) => match node.codex.of(&about) {
             Ok(codex) => codex.adopt(thread, spec),
@@ -562,7 +580,13 @@ pub async fn claim(node: &Arc<Node>, thread: &str, _id: &ResidentId) {
 }
 
 pub async fn replay(node: &Arc<Node>) {
-    let threads: Vec<String> = node.unclaimed.state.lock().expect("never poisoned").queues.keys().cloned().collect();
+    let mut threads: std::collections::BTreeSet<String> =
+        node.unclaimed.state.lock().expect("never poisoned").queues.keys().cloned().collect();
+    // A failed restore has no in-memory queue yet. Its durable reports must
+    // still be revisited even if the host never sends another event.
+    threads.extend(node.residents.everyone().filter_map(|resident| {
+        (resident.about.host.agent.as_str() == "codex").then_some(resident.about.session).flatten()
+    }));
     for thread in threads {
         drain(node, &thread).await;
     }

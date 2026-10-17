@@ -131,7 +131,21 @@ pub async fn uncertain(
     publish(node, id, &mut cell, next)
 }
 
-pub async fn turn_ended(node: &Arc<Node>, id: &ResidentId, turn: &str, how: &TurnHow) -> Result<(), Failure> {
+pub async fn awaits_turn(node: &Node, id: &ResidentId, turn: &str) -> Result<bool, Failure> {
+    let Some(cell) = storage::existing(node, id)? else { return Ok(false) };
+    let mut cell = cell.lock().await;
+    load(node, id, &mut cell)?;
+    Ok(cell.as_ref().expect("loaded").awaiting_turn.as_deref() == Some(turn))
+}
+
+pub async fn turn_ended(
+    node: &Arc<Node>,
+    id: &ResidentId,
+    turn: &str,
+    how: &TurnHow,
+    settles_queue: bool,
+    order: u64,
+) -> Result<(), Failure> {
     let Some(cell) = storage::existing(node, id)? else { return Ok(()) };
     let mut cell = cell.lock().await;
     load(node, id, &mut cell)?;
@@ -140,15 +154,25 @@ pub async fn turn_ended(node: &Arc<Node>, id: &ResidentId, turn: &str, how: &Tur
         return Ok(());
     }
     next.ended.insert(turn.into());
-    if next.awaiting_turn.as_deref() == Some(turn) {
+    let awaited = next.awaiting_turn.as_deref() == Some(turn);
+    if awaited {
         next.awaiting_turn = None;
     }
-    if *how == TurnHow::Completed {
-        next.opportunity = Some(turn.into());
-    } else {
-        next.opportunity = None;
-        if !next.queue.is_empty() {
-            next.held = Some(format!("turn {how}; queued messages wait for the user"));
+    // Retrying an older terminal outcome must not hold the current queue or
+    // replace a later turn's opportunity to release it.
+    let later_turn = node.residents.now(id).and_then(|now| now.turn).is_some_and(|active| active != turn);
+    let newer = order > next.settled_through || (order == 0 && next.settled_through == 0);
+    if settles_queue && newer {
+        next.settled_through = order;
+    }
+    if settles_queue && newer && !later_turn {
+        if *how == TurnHow::Completed {
+            next.opportunity = Some(turn.into());
+        } else {
+            next.opportunity = None;
+            if !next.queue.is_empty() {
+                next.held = Some(format!("turn {how}; queued messages wait for the user"));
+            }
         }
     }
     publish(node, id, &mut cell, next)?;

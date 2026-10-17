@@ -36,6 +36,9 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub was: Vec<MachineName>,
     pub key: PublicKey,
+    /// A kind a later hub adds is read as the most careful this release
+    /// knows (`fastctx_types::tolerant`).
+    #[serde(deserialize_with = "fastctx_types::tolerant::read")]
     pub kind: Kind,
     /// The accounts logged in on it.
     pub logins: BTreeSet<AccountName>,
@@ -81,6 +84,44 @@ pub struct Member {
     /// How its lines go, as it last told the hub, while online.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Paths>,
+}
+
+/// How a member is connected, as the hub sees it now, as one member's view
+/// has it (`Member::online` and what goes with it): told as it changes to a
+/// member whose session reads it (`crate::wire::Down::Presence`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Presence {
+    pub online: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reach: Option<Reach>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Paths>,
+}
+
+impl Presence {
+    /// `member`'s, as its view has it.
+    pub fn of(member: &Member) -> Self {
+        Self {
+            online: member.online,
+            since: member.since,
+            through: member.through.clone(),
+            reach: member.reach.clone(),
+            paths: member.paths.clone(),
+        }
+    }
+
+    /// Puts it in `member`.
+    pub fn apply(&self, member: &mut Member) {
+        member.online = self.online;
+        member.since = self.since;
+        member.through = self.through.clone();
+        member.reach = self.reach.clone();
+        member.paths = self.paths.clone();
+    }
 }
 
 impl Member {
@@ -179,6 +220,9 @@ pub struct Project {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub name: AccountName,
+    /// A level a later hub adds is read as the most careful this release
+    /// knows (`fastctx_types::tolerant`).
+    #[serde(deserialize_with = "fastctx_types::tolerant::read")]
     pub level: Level,
     pub locked: bool,
     pub opened: Timestamp,
@@ -619,6 +663,17 @@ pub struct View {
     /// end the session of a member that sent any of them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub versions: bool,
+    /// Whether this hub keeps updates for machines away until they are back
+    /// (`Change::UpdateDue`) and tells its version with the network's.
+    /// Earlier hubs omit it, and would end the session of a member that
+    /// sent one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub due: bool,
+    /// Whether this hub tells a machine it takes off to uninstall Fastctx
+    /// (`Change::Remove::then`). Earlier hubs omit it, and would take the
+    /// machine off and leave Fastctx on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uninstalls: bool,
     /// The tokens the accounts logged in on this member made that still
     /// let devices in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -633,8 +688,17 @@ pub struct View {
     /// its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hub_moves: Vec<fastctx_types::hub_move::HubMove>,
+    /// How many times who is online changed on the hub before it made this
+    /// view: a change told after it (`crate::wire::Down::Presence`) counts
+    /// past this. An older hub gives none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub presence: u64,
     #[serde(flatten)]
     pub directory: Directory,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 impl View {
@@ -658,9 +722,12 @@ impl View {
             groups: false,
             dissolves: false,
             versions: false,
+            due: false,
+            uninstalls: false,
             tokens: Vec::new(),
             hub_addresses: Vec::new(),
             hub_moves: Vec::new(),
+            presence: 0,
             directory: Directory::default(),
         }
     }

@@ -71,6 +71,15 @@ pub enum Up {
         /// said; older hubs ignore it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         paths: Option<Paths>,
+        /// How many bytes of this connection this machine took from the hub
+        /// (`crate::pulse`); an earlier release says none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        took: Option<u64>,
+        /// The last of its own letters this machine knows the hub holds, why
+        /// the hub refused any of them already recorded (`Down::Ack`); an
+        /// earlier release says none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held: Option<u64>,
     },
     /// The second half of a password login (`Intent::Login`): the last
     /// OPAQUE message, and the computer or phone that logs in.
@@ -164,6 +173,28 @@ pub enum Intent {
         /// they cannot read.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         versions: bool,
+        /// The member reads the records of updates kept for machines away
+        /// and of updates made as another asked. Earlier releases do not say
+        /// so, and could read nothing of a machine log page with one.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        due: bool,
+        /// A machine taken off the hub that was to uninstall Fastctx then,
+        /// and could not do all of it: what was left, and why. The hub
+        /// keeps it for its machine log, and refuses the session as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left: Option<String>,
+        /// The member reads `Down::Cancelled`. Earlier releases do not say
+        /// so, and end their session at a frame they cannot read.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancels: bool,
+        /// The member reads `Down::Presence`: who is online, as it changes,
+        /// in place of looking at the whole directory again.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        presence: bool,
+        /// The member reads `Down::Part`: an answer too large for one frame,
+        /// in parts. One that does not is told such an answer is too large.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        parts: bool,
     },
     /// A password login to `account`: the first OPAQUE message. The hub
     /// answers `Down::LoginResponse`; the device finishes with
@@ -278,6 +309,9 @@ pub enum Down {
         version: String,
         taken: u64,
         letters: u64,
+        /// This hub separately acknowledges completion of its initial status snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        afoot_pending: Option<bool>,
     },
     /// The hub's half of a password login.
     LoginResponse {
@@ -316,6 +350,17 @@ pub enum Down {
     },
     Pong {
         n: u64,
+        /// The hub's time as it answered, by its clock (`crate::link`'s
+        /// clock); an older hub says none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<jiff::Timestamp>,
+        /// How many bytes of this connection the hub took from the machine
+        /// (`crate::pulse`); an older hub says none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        took: Option<u64>,
+        /// All initial status frames preceded this acknowledgement on the wire.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        afoot_ready: bool,
     },
     /// The hub holds this machine's letter `seq` and all before it; when
     /// the hub cannot deliver it, `refused` says why and the letter is gone.
@@ -384,7 +429,38 @@ pub enum Down {
     Fetch {
         fetch: Box<fastctx_types::update::Fetch>,
     },
+    /// The call `call` the hub passed on (`Incoming`) is over for its
+    /// caller, who gave it up, left the hub, or lost the right it was made
+    /// under: one that only reads stops (`fastctx_types::contract`). Sent
+    /// only to a member whose session says it reads this.
+    Cancelled {
+        call: u64,
+    },
+    /// How `machine` is connected now, as the member may see it, the
+    /// hub's `rev`th change in who is online (`crate::directory::View::presence`).
+    /// Sent only to a member whose session says it reads this.
+    Presence {
+        machine: MachineName,
+        presence: crate::directory::Presence,
+        rev: u64,
+    },
+    /// The part `index` of `total` of the answer to the question `id`, as
+    /// JSON text, when the whole is too large for one frame: put together,
+    /// they are what `Told` would carry. Sent only to a member whose session
+    /// says it reads this.
+    Part {
+        id: u64,
+        index: u32,
+        total: u32,
+        text: String,
+    },
 }
+
+/// The most bytes of text one `Down::Part` carries.
+pub const PART: usize = 192 * 1024;
+
+/// The most bytes an answer in parts may take in all.
+pub const PARTS_AT_MOST: usize = 16 * 1024 * 1024;
 
 /// A conversation the hub has its members delete what they keep of
 /// (`world-colleagues.md`, 用户在任何地方和居民说话).
@@ -429,6 +505,10 @@ pub enum Refusal {
         /// an earlier release reads past it, and takes it as removed.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         dissolved: bool,
+        /// What it is to do now: uninstall Fastctx, as its remover asked.
+        /// An earlier release reads past it, and only leaves.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        then: Option<fastctx_types::uninstall::Then>,
     },
     #[error("{reason}")]
     Login { reason: String },
@@ -612,6 +692,11 @@ pub enum Change {
     Remove {
         name: MachineName,
         reason: String,
+        /// What the machine does once it hears it was taken off: only for
+        /// a machine its asker may uninstall. Sent only to a hub whose view
+        /// says it uninstalls.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        then: Option<fastctx_types::uninstall::Then>,
     },
     /// Renames `machine`, one of the account's own or, for the super
     /// administrator, any, to `to`; its names before keep naming it. Sent
@@ -711,11 +796,19 @@ pub enum Change {
     Settings {
         self_registration: bool,
     },
-    /// The channel the network's devices follow and the version it asks
-    /// each machine to run at least. Sent only to a hub whose view says it
-    /// keeps versions.
+    /// The version the network asks each machine to run at least, and
+    /// whether its managed machines update by themselves. Sent only to a hub
+    /// whose view says it keeps versions.
     Updates {
         policy: fastctx_types::update::Policy,
+    },
+    /// `machine`, one the account may update and away now, updates to
+    /// `version` once it is back; none takes back what was kept. Sent only
+    /// to a hub whose view says it keeps updates due.
+    UpdateDue {
+        machine: MachineName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     /// The super administrator dissolves the network named `name`, typed
     /// as it is: every machine and device is taken off it, and the hub lets

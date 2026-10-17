@@ -45,6 +45,7 @@ mod file_search;
 mod firewall;
 mod focus;
 mod forget;
+mod gate_waits;
 mod gates;
 mod gather;
 pub mod handoff;
@@ -54,10 +55,13 @@ mod homes;
 mod hub_arrival;
 mod hub_moving;
 mod inbox;
+mod intake;
+mod initializing;
 mod job_reader;
 mod job_receipts;
 mod job_watch;
 mod jobs;
+mod labels;
 mod learned;
 mod leases;
 mod ledger;
@@ -77,7 +81,10 @@ mod on_stop;
 mod own_collab;
 mod pages;
 mod program_collection;
+mod ranked;
 mod reach;
+mod recovery;
+mod removed;
 mod renewal;
 mod renewal_legacy;
 pub mod replacement;
@@ -96,6 +103,8 @@ mod since;
 mod speech;
 mod stats;
 mod stop;
+mod stops;
+mod stuck;
 mod talk;
 pub mod thumbnail;
 mod town;
@@ -143,7 +152,8 @@ pub(crate) struct Node {
     jobs: jobs::Jobs,
     job_watches: job_watch::Watches,
     disk: std::sync::Mutex<()>,
-    data_operations: tokio::sync::RwLock<()>,
+    /// Each conversation's place here, deleted alone (`data::places`).
+    places: data::places::Places,
     disk_changed: tokio::sync::Notify,
     disk_due: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     job_readers: std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
@@ -181,16 +191,21 @@ pub(crate) struct Node {
     facts: facts::Facts,
     /// Deletions of conversations still to be asked of hubs (`forget`).
     forget_asks: forget::Asks,
+    /// What of the node's work is stuck, as it last looked at itself.
+    stuck: stuck::Stuck,
     /// What the agents' logins here were used for (`usage`).
     usage: usage::Usage,
     /// Held while the projects' ledgers are taken or written, one at a time.
-    syncing: tokio::sync::Mutex<()>,
+    syncing: ranked::Syncing,
     /// Held while a town's record or journals are written from here, from
     /// reading what is there to writing what comes next.
-    writing: tokio::sync::Mutex<()>,
+    writing: ranked::Writing,
     /// What went out with an answer of a World tool and is not yet known to
     /// have been taken: no other answer hands it over meanwhile.
     taking: std::sync::Mutex<std::collections::HashSet<(fastctx_types::ResidentId, fastctx_types::NoticeId)>>,
+    /// Stops asked for while words were on their way, kept until the turn
+    /// those words start is known (`stops`).
+    stops: stops::Stops,
     /// The `on` jobs here whose sender is following them now: their end
     /// goes to it, not in a letter, unless it leaves first (`on`).
     following: std::sync::Mutex<std::collections::HashMap<PathBuf, usize>>,
@@ -372,6 +387,19 @@ pub async fn run_replacing(
     run_prepared(fastctx_root, supervision, successor, None, None).await
 }
 
+/// Another node serves the World already: this one ends, having taken
+/// nothing of it.
+#[derive(Debug)]
+pub struct AlreadyServed(pub PathBuf);
+
+impl std::fmt::Display for AlreadyServed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "a node is already running for the World in {}", self.0.display())
+    }
+}
+
+impl std::error::Error for AlreadyServed {}
+
 pub async fn run_prepared(
     fastctx_root: &Path,
     supervision: Option<handoff::Supervision>,
@@ -416,8 +444,7 @@ pub async fn run_prepared(
             let lock = world.node_lock();
             tokio::task::spawn_blocking(move || FileLock::acquire(&lock)).await??
         }
-        false => FileLock::try_acquire(&world.node_lock())?
-            .ok_or_else(|| anyhow!("a node is already running for the World in {}", world.path().display()))?,
+        false => FileLock::try_acquire(&world.node_lock())?.ok_or_else(|| AlreadyServed(world.path().to_path_buf()))?,
     };
     if renewal.successor
         && fastctx_install::renewal::read(fastctx_root)?.is_some_and(|plan| plan.candidate.build != renewal.build)
@@ -443,24 +470,8 @@ pub async fn run_prepared(
 
     // An older World's records go into one directory per conversation before
     // anything reads them.
-    unpublished::collect(world.path()).context("collecting unpublished World records")?;
-    fastctx_platform::owned_directory::delete(&world.image_reading())
-        .context("collecting image reads left by the previous node")?;
-    let gathered = gather::gather(&world).context("gathering conversations into their directories")?;
-    for name in &gathered.moved {
-        log.line(format_args!("gathered {name} into its directory"));
-    }
-    for (path, error) in &gathered.problems {
-        log.line(format_args!("could not gather {}: {error}", path.display()));
-    }
-    unstarted::collect(&world).context("collecting preparations that never became jobs")?;
-    let reconciled = jobs::reconcile(&world)?;
-    for path in &reconciled.interrupted {
-        log.line(format_args!("marked interrupted: {}", path.display()));
-    }
-    for (path, error) in &reconciled.problems {
-        log.line(format_args!("could not check {}: {error}", path.display()));
-    }
+    recovery::prepare(&world, &log);
+    let jobs_reconciled = recovery::reconcile(&world, &log);
 
     let (residents, problems) = residents::Residents::load(&world)?;
     residents.set_here(machine.name.clone());
@@ -505,7 +516,7 @@ pub async fn run_prepared(
         jobs: jobs::Jobs::new(),
         job_watches: Default::default(),
         disk: Default::default(),
-        data_operations: Default::default(),
+        places: Default::default(),
         disk_changed: Default::default(),
         disk_due: Default::default(),
         job_readers: Default::default(),
@@ -527,13 +538,15 @@ pub async fn run_prepared(
         shown: tokio::sync::watch::channel(0).0,
         facts: facts::Facts::default(),
         forget_asks: forget::Asks::default(),
+        stuck: Default::default(),
         usage: usage::Usage::default(),
-        syncing: tokio::sync::Mutex::new(()),
-        writing: tokio::sync::Mutex::new(()),
+        syncing: Default::default(),
+        writing: Default::default(),
         taking: Default::default(),
+        stops: Default::default(),
         following: Default::default(),
-        job_ends: Default::default(),
-        copying: Default::default(),
+        job_ends: gates::Gates::new(fastctx_platform::doing::Rank::JOB_END, "job end"),
+        copying: gates::Gates::new(fastctx_platform::doing::Rank::COPYING, "copying"),
         learned: Default::default(),
         words: Default::default(),
         interrupts: Default::default(),
@@ -582,9 +595,8 @@ pub async fn run_prepared(
     codex::replay(&node).await;
     let mut unfinished: std::collections::BTreeSet<_> = unfinished.into_iter().collect();
     unfinished.extend(node.residents.unfinished());
-    // Before Claude's sessions are looked at: a deletion a stopped node left
-    // halfway leaves directories of sessions that are no one's now.
-    data::delete::finish_interrupted(&node).await;
+    // The sessions of a conversation a stopped node left deleted halfway
+    // are passed over: what they report is no one's now.
     claude::replay(&node).await;
     claude::recover_startups(&node);
     claude::start(&node).context("writing the World's Claude Code plugin")?;
@@ -595,11 +607,12 @@ pub async fn run_prepared(
     speech::restore(&node).await;
     unfinished.extend(node.residents.unfinished());
     turns::recover(&node, unfinished.into_iter().collect()).await;
-    composer::recover(&node).await.map_err(anyhow::Error::from)?;
+    composer::recover(&node).await;
+    speech::recover(&node).await;
     node.effects_ready.store(true, std::sync::atomic::Ordering::Release);
     node.effects_changed.notify_waiters();
     composer::resume(&node);
-    speech::recover(&node).await;
+    recovery::start(&node, jobs_reconciled);
     on_delivery::resume(&node);
     retention::start(&node).context("starting command artifact retention")?;
     updates::start(&node);
@@ -665,6 +678,7 @@ pub async fn run_prepared(
         _ => {}
     }
 
+    stuck::start(&node);
     let watchdog = watchdog::Watchdog::start(node.log.clone()).context("starting the control-loop watchdog")?;
     loop {
         let accepted = tokio::select! {

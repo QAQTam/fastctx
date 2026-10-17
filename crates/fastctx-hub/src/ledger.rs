@@ -14,20 +14,32 @@
 //! which machines it spans, each one its account may work on, and any later
 //! one may change that; the hub tells a project's machines of every new
 //! entry, in the order it took them.
+//!
+//! The entries of one project are written one at a time, each checked and
+//! numbered under the store's lock and written to disk once that lock is
+//! let go (`write`); other projects, and everything else the hub does, do
+//! not wait on that disk. A read takes only the committed end under the
+//! ledger lock, then reads the numbered files off all locks and off the
+//! member's frame reader (`reading`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fastctx_net::directory::Directory;
 use fastctx_net::ledger::Entry;
 use fastctx_net::sign::Signed;
 use fastctx_net::wire::{self, Down, Told};
-use fastctx_platform::{Permissions, ensure_private_dir, publish_new};
+use fastctx_platform::{Permissions, PublishFailure, ensure_private_dir, publish_checked};
 use fastctx_types::MachineName;
 use fastctx_types::access::TownId;
 
+use crate::Hub;
 use crate::store::Store;
+
+mod reading;
+pub(crate) use reading::ask;
 
 /// What the hub knows of one project's ledger.
 #[derive(Default)]
@@ -44,6 +56,17 @@ pub struct TownLedger {
 pub struct Ledgers {
     dir: PathBuf,
     pub towns: BTreeMap<TownId, TownLedger>,
+    /// What lets one entry of a project be written at a time.
+    writing: BTreeMap<TownId, Arc<tokio::sync::Mutex<()>>>,
+}
+
+/// An entry checked to be kept: its number, and its file and bytes, written
+/// off any lock before it is kept (`Ledgers::commit`).
+pub struct Checked {
+    seq: u64,
+    entry: Entry,
+    path: PathBuf,
+    bytes: Vec<u8>,
 }
 
 impl Ledgers {
@@ -53,7 +76,9 @@ impl Ledgers {
         let mut towns = BTreeMap::new();
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self { dir, towns }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Self { dir, towns, writing: BTreeMap::new() });
+            }
             Err(error) => return Err(error),
         };
         for town in entries {
@@ -76,25 +101,20 @@ impl Ledgers {
             }
             towns.insert(id, ledger);
         }
-        Ok(Self { dir, towns })
+        Ok(Self { dir, towns, writing: BTreeMap::new() })
     }
 
-    /// Takes an entry of `town` from `from`; returns its number and the
-    /// members to tell.
-    pub fn write(
-        &mut self,
-        store: &Store,
-        from: &MachineName,
-        town: &TownId,
-        signed: Signed,
-    ) -> Result<(u64, Vec<MachineName>), String> {
+    /// Checks an entry of `town` from `from`, and numbers it: nothing is
+    /// kept yet (`commit`), and only one entry of a project is checked and
+    /// kept at a time (`write`).
+    pub fn check(&self, store: &Store, from: &MachineName, town: &TownId, signed: &Signed) -> Result<Checked, String> {
         let directory = &store.book.directory;
         let member = directory.member(from).ok_or_else(|| format!("{from} is not a member"))?;
         let project = directory.project(town).ok_or_else(|| format!("there is no project {town} on this hub"))?;
         if !directory.member_in_project(from, town) {
             return Err(format!("{from} acts for no account that may write in the project {}", project.name));
         }
-        let entry = fastctx_net::ledger::open(&signed, &store.hub.id, town)?;
+        let entry = fastctx_net::ledger::open(signed, &store.hub.id, town)?;
         // An entry made before its author was renamed is its all the same.
         if !directory.same(&entry.author, from) || entry.key != member.key {
             return Err(format!("the entry is by {}, sent by {from}", entry.author));
@@ -130,27 +150,37 @@ impl Ledgers {
             }
         }
         // It must fit in the answer that hands it to a machine later.
-        let size = fastctx_net::ledger::handed_size(&signed);
+        let size = fastctx_net::ledger::handed_size(signed);
         if size > wire::MAX_CONTROL_FRAME {
             return Err(format!(
                 "the entry is {size} bytes, more than one message holds ({})",
                 wire::MAX_CONTROL_FRAME
             ));
         }
+        let seq = self.towns.get(town).map_or(1, |ledger| ledger.next);
+        let path = self.dir.join(town.as_str()).join(format!("{seq:020}.json"));
+        let bytes = json(signed).map_err(|error| format!("the hub could not keep the entry: {error}"))?;
+        Ok(Checked { seq, entry, path, bytes })
+    }
+
+    /// Keeps an entry checked and written; returns its number and the
+    /// members to tell.
+    pub fn commit(
+        &mut self,
+        directory: &Directory,
+        from: &MachineName,
+        town: &TownId,
+        checked: Checked,
+    ) -> (u64, Vec<MachineName>) {
         let ledger = self.towns.entry(town.clone()).or_insert_with(|| TownLedger { next: 1, ..TownLedger::default() });
-        let seq = ledger.next;
-        let folder = self.dir.join(town.as_str());
-        ensure_private_dir(&folder)
-            .and_then(|()| publish_new(&folder.join(format!("{seq:020}.json")), &json(&signed)?, Permissions::Private))
-            .map_err(|error| format!("the hub could not keep the entry: {error}"))?;
-        ledger.add(&entry);
-        ledger.next = seq + 1;
+        ledger.add(&checked.entry);
+        ledger.next = checked.seq + 1;
         let mut tell: Vec<MachineName> =
             ledger.machines.iter().map(|machine| directory.canonical(machine).clone()).collect();
         tell.push(directory.canonical(from).clone());
         tell.sort();
         tell.dedup();
-        Ok((seq, tell))
+        (checked.seq, tell)
     }
 
     /// The projects `name` spans, with each one's latest entry: a project
@@ -169,29 +199,10 @@ impl Ledgers {
         self.towns.iter().map(|(town, ledger)| (town.clone(), ledger.next - 1)).collect()
     }
 
-    /// The entries of `town` after `after` that fit in one answer.
-    pub fn read(&self, town: &TownId, after: u64) -> Result<(Vec<(u64, Signed)>, bool), String> {
-        if !self.towns.contains_key(town) {
-            return Ok((Vec::new(), false));
-        }
-        let files =
-            numbered(&self.dir.join(town.as_str())).map_err(|error| format!("reading {town}'s ledger: {error}"))?;
-        // An answer is its frame around the entries, each separated by a
-        // comma; it holds entries while that stays within one frame.
-        let empty =
-            wire::encode(&Down::Told { id: u64::MAX, answer: Ok(Told::Entries { entries: Vec::new(), more: true }) });
-        let mut size = empty.len();
-        let mut entries = Vec::new();
-        for (seq, file) in files.into_iter().filter(|(seq, _)| *seq > after) {
-            let signed: Signed = read(&file).map_err(|error| format!("reading entry {seq} of {town}: {error}"))?;
-            let cost = wire::encode(&(seq, &signed)).len() + 1;
-            if !entries.is_empty() && size + cost > wire::MAX_CONTROL_FRAME {
-                return Ok((entries, true));
-            }
-            size += cost;
-            entries.push((seq, signed));
-        }
-        Ok((entries, false))
+    /// The committed range to read, without listing or copying the ledger.
+    fn page(&self, town: TownId, after: u64) -> reading::Page {
+        let last = self.towns.get(&town).map_or(0, |ledger| ledger.next - 1);
+        reading::Page { dir: self.dir.join(town.as_str()), town, after, last }
     }
 }
 
@@ -253,4 +264,57 @@ fn read<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
 
 fn json(value: &impl serde::Serialize) -> io::Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(io::Error::other)
+}
+
+/// Takes an entry of `town` from `from`: checked and numbered under the
+/// store's lock, written off it, kept, and every member that may read the
+/// project told of it, as one that keeps a copy it does not span keeps it
+/// current (`world-network.md`, 隔着网络也要顺手). One entry of a project at
+/// a time.
+pub(crate) async fn write(hub: &Arc<Hub>, from: &MachineName, town: TownId, signed: Signed) -> Result<Told, String> {
+    let writing = hub.ledgers.lock().expect("never poisoned").writing.entry(town.clone()).or_default().clone();
+    let _one = writing.lock().await;
+    let checked = {
+        let store = hub.store();
+        hub.ledgers.lock().expect("never poisoned").check(&store, from, &town, &signed)?
+    };
+    let (path, bytes) = (checked.path.clone(), checked.bytes.clone());
+    let published = tokio::task::spawn_blocking(move || {
+        let folder = path.parent().expect("an entry has a folder");
+        ensure_private_dir(folder)
+            .map_err(|error| PublishFailure { error, published: false })
+            .and_then(|()| publish_checked(&path, &bytes, Permissions::Private, false, || Ok(())))
+    })
+    .await
+    .map_err(|error| format!("the hub could not keep the entry: {error}"))?;
+    match published {
+        Ok(()) => {}
+        // In place for all to read, though not known to be on disk for good:
+        // kept as written, since the next entry of the project follows it.
+        Err(failure) if failure.published => hub.log.line(format_args!(
+            "an entry of {town} from {from} is in place, but making it last failed: {}",
+            failure.error
+        )),
+        Err(failure) => return Err(format!("the hub could not keep the entry: {}", failure.error)),
+    }
+    let (seq, tell) = {
+        let store = hub.store();
+        let directory = &store.book.directory;
+        let (seq, mut tell) = hub.ledgers.lock().expect("never poisoned").commit(directory, from, &town, checked);
+        tell.extend(
+            directory
+                .members
+                .iter()
+                .filter(|member| directory.member_in_project(&member.name, &town))
+                .map(|member| member.name.clone()),
+        );
+        tell.sort();
+        tell.dedup();
+        (seq, tell)
+    };
+    hub.log.line(format_args!("{from} wrote entry {seq} of {town}"));
+    for machine in tell {
+        hub.tell(&machine, Down::LedgerChanged { town: town.clone() });
+    }
+    Ok(Told::Written { seq })
 }

@@ -5,26 +5,46 @@
 //! and that the view lets its sender ask it, for the account it names
 //! (`Inner::admit`); over a direct link, also that it says it is from the
 //! machine at the other end. A call that does not check out is refused in a
-//! short word that names the reason; one that does goes to the node, which
-//! checks again what the call asks of this machine. A call over a direct
-//! link is registered while it is answered, so that taking back the right
-//! it was made under cuts it (`Inner::cut_lapsed`).
+//! short word that names the reason; one that does takes its place here
+//! (`Node::place`) before anything waits on it, and goes to the node, which
+//! checks again what the call asks. A call over a direct link is registered
+//! while it is answered, so that taking back the right it was made under
+//! cuts it (`Inner::cut_lapsed`).
+//!
+//! What each call is (`fastctx_types::contract`) says what stops it. Until
+//! the node takes it on, anything does: its caller giving it up, or the
+//! connection it came on ending. Once taken on, a call that only reads stops
+//! too, and also on its own a little past the time its caller waits; a
+//! change is done whole, whoever is left to hear of it.
+//!
+//! A call holds its place here, and what keeps its node from handing over
+//! (`Node::answering`), until its answer is written, a large answer's bytes
+//! all sent, or the answer given up: a node handing over waits for answers
+//! to go, not only for the work behind them.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use fastctx_types::contract::Pool;
 use fastctx_types::ipc::Failure;
 use fastctx_types::remote::{RemoteCall, RemoteResult};
 
+use super::answers::Answer;
 use super::direct::DataWay;
-use super::{Inner, Replier};
+use super::{Caller, Inner, Replier};
 use crate::data::{Endpoint, Stream};
 use crate::envelope::{Envelope, Kind};
 use crate::message::Body;
 use crate::sign::sha256;
 use crate::wire::{self, Carried, End, Ticket, Up};
 
+/// How long past the time its caller waits a call that only reads is
+/// answered, for a caller whose giving up never came: past that it is
+/// given up here too.
+const PAST_THE_CALLER: Duration = Duration::from_secs(5);
+
 /// Checks a call from another machine, and does what it asks.
-pub(super) async fn answer(inner: Arc<Inner>, replier: Replier, message: Envelope) {
+pub(super) async fn answer(inner: Arc<Inner>, replier: Replier, message: Envelope, mut stop: Answer) {
     if message.kind != Kind::Call {
         inner.node.log(format!("dropped what came from {} as a call: it is a {:?}", message.from, message.kind));
         return;
@@ -37,7 +57,32 @@ pub(super) async fn answer(inner: Arc<Inner>, replier: Replier, message: Envelop
         reply(&inner, &replier, &message, Kind::Refused, None, serde_json::Value::String(reason)).await;
         return;
     }
-    let caller = match inner.admit(&message).await {
+    // Its time here runs from now, not from when its work begins: what it
+    // takes to admit it and bring its bytes in is waited for in it.
+    let came = tokio::time::Instant::now();
+    let admitted = match inner.admits_now(&message) {
+        Ok(caller) => Ok(caller),
+        Err(_) => {
+            // The view may not hold a grant made just now. Asking the hub
+            // waits in one of the few places kept for what comes in before
+            // it is known, and stops with the call.
+            let account = message.standing().map(|(account, _)| account.clone());
+            let waiting = account.and_then(|account| {
+                inner.node.place(&message.from, &account, Pool::Receiving).map_err(|failure| failure.message)
+            });
+            match waiting {
+                Ok(_place) => tokio::select! {
+                    admitted = inner.admit(&message) => admitted,
+                    _ = stop.stopping() => return,
+                    () = tokio::time::sleep_until(came + fastctx_types::contract::OPENED_WITHIN) => {
+                        Err("admitting the call did not finish within 60 seconds".to_string())
+                    },
+                },
+                Err(reason) => Err(reason),
+            }
+        }
+    };
+    let caller = match admitted {
         Ok(caller) => caller,
         Err(reason) => {
             inner.node.log(format!("refused a call from {}: {reason}", message.from));
@@ -62,22 +107,15 @@ pub(super) async fn answer(inner: Arc<Inner>, replier: Replier, message: Envelop
             registered.as_ref().map(|registered| registered.cut.clone()),
         )),
     };
-    let mut _answering = None;
-    let result: RemoteResult = match open_call(&inner, &message, &endpoint).await {
-        Ok((remote, stream)) => match inner.node.answering(&remote) {
-            Ok(guard) => {
-                _answering = guard;
-                inner.node.call(caller.clone(), remote, stream).await
-            }
-            Err(failure) => Err(failure),
-        },
-        Err(reason) => {
-            inner.node.log(format!("refused a call from {}: {reason}", caller.machine));
-            Err(Failure::new(format!("{} refused the call: {reason}", inner.me())))
-        }
+    // Kept until the answer has gone, or is given up.
+    let mut held: Vec<Box<dyn Send>> = Vec::new();
+    let Some(result) = work(&inner, &caller, &message, &endpoint, &mut stop, &mut held, came).await else {
+        // Nobody is left to hear the answer.
+        return;
     };
-    if registered.as_ref().is_some_and(|registered| !registered.wanted()) {
-        // Cut while it ran: the caller was told, and the answer is dropped.
+    if stop.stopped().is_some() || registered.as_ref().is_some_and(|registered| !registered.wanted()) {
+        // Given up or cut while it ran: the caller was told, and the answer
+        // is dropped.
         return;
     }
     let small = Body::Answer { result: result.clone() };
@@ -118,8 +156,117 @@ pub(super) async fn answer(inner: Arc<Inner>, replier: Replier, message: Envelop
         inner.node.log(format!("announcing a large answer to {}: {error}", caller.machine));
         return;
     }
-    if let Err(error) = crate::data::source(&endpoint, &inner.key, stream, &bytes).await {
+    let sent = tokio::select! {
+        sent = crate::data::source(&endpoint, &inner.key, stream, &bytes) => sent,
+        _ = stop.stopping() => Err("its caller gave it up".to_string()),
+    };
+    if let Err(error) = sent {
         inner.node.log(format!("sending a large answer to {}: {error}", caller.machine));
+    }
+    drop(held);
+}
+
+/// Takes the call `message` holds on and does it; none when it was stopped
+/// first. Its place here and what keeps its node from handing over go into
+/// `held`, for its caller to keep until the answer has gone.
+async fn work(
+    inner: &Arc<Inner>,
+    caller: &Caller,
+    message: &Envelope,
+    endpoint: &Endpoint,
+    stop: &mut Answer,
+    held: &mut Vec<Box<dyn Send>>,
+    came: tokio::time::Instant,
+) -> Option<RemoteResult> {
+    let refused = |reason: String| {
+        inner.node.log(format!("refused a call from {}: {reason}", caller.machine));
+        Err(Failure::new(format!("{} refused the call: {reason}", inner.me())))
+    };
+    // A call this release does not know, as a newer one may make, is
+    // refused saying so.
+    let body: Body = match message.body() {
+        Ok(body) => body,
+        Err(error) => return Some(refused(format!("{error}; a newer Fastctx may make calls this one does not know"))),
+    };
+    // A large call's own kind is known only once it is in: it comes in in
+    // a place for calls coming in, and then takes its own.
+    let pool = match &body {
+        Body::Call { call } | Body::StreamCall { call } => call.contract().pool,
+        Body::LargeCall { .. } | Body::Answer { .. } | Body::LargeAnswer { .. } => Pool::Receiving,
+    };
+    let mut place = match inner.node.place(&caller.machine, &caller.account, pool) {
+        Ok(place) => place,
+        Err(failure) => return Some(Err(failure)),
+    };
+    let accepting = match &body {
+        Body::Call { call } | Body::StreamCall { call } => {
+            Some(call.contract().within.unwrap_or(fastctx_types::contract::OPENED_WITHIN))
+        }
+        _ => None,
+    };
+    let opening_deadline = came + fastctx_types::contract::OPENED_WITHIN + PAST_THE_CALLER;
+    let accepting_deadline = async {
+        match accepting {
+            Some(within) => tokio::time::sleep_until(came + within + PAST_THE_CALLER).await,
+            None => std::future::pending().await,
+        }
+    };
+    let opened = tokio::select! {
+        opened = open_call(inner, message, body, endpoint, opening_deadline) => opened,
+        _ = stop.stopping() => return None,
+        () = accepting_deadline => {
+            Err(format!("opening the call did not finish within {} seconds", (accepting.expect("finite opening") + PAST_THE_CALLER).as_secs()))
+        },
+    };
+    let (remote, stream, received) = match opened {
+        Ok(opened) => opened,
+        Err(reason) => return Some(refused(reason)),
+    };
+    let contract = remote.contract();
+    if contract.pool != pool {
+        place = match inner.node.place(&caller.machine, &caller.account, contract.pool) {
+            Ok(place) => place,
+            Err(failure) => return Some(Err(failure)),
+        };
+    }
+    held.push(place);
+    // A large call's bytes stay counted until its answer is written, past
+    // the receiving place it came in through.
+    if let Some(received) = received {
+        held.push(Box::new(received));
+    }
+    match inner.node.answering(&remote) {
+        Ok(Some(guard)) => held.push(guard),
+        Ok(None) => {}
+        Err(failure) => {
+            // Its data connection is closed, not dropped: the other end
+            // then waits for this answer, which says why.
+            if let Some(stream) = stream {
+                stream.close().await;
+            }
+            return Some(Err(failure));
+        }
+    }
+    let kind = remote.kind();
+    let doing = inner.node.call(caller.clone(), remote, stream);
+    if !contract.cancellable {
+        return Some(doing.await);
+    }
+    let past = async {
+        match contract.within {
+            Some(within) => tokio::time::sleep_until(came + within + PAST_THE_CALLER).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        result = doing => Some(result),
+        _ = stop.stopping() => None,
+        () = past => {
+            let waited = contract.within.unwrap_or_default() + PAST_THE_CALLER;
+            let reason = format!("gave up answering its {kind}: no answer within {} s", waited.as_secs());
+            inner.node.log(format!("{reason}, for {}", caller.machine));
+            Some(Err(Failure::new(format!("{} {reason}", inner.me()))))
+        }
     }
 }
 
@@ -127,9 +274,7 @@ pub(super) async fn answer(inner: Arc<Inner>, replier: Replier, message: Envelop
 async fn send(replier: &Replier, message: Envelope) -> Result<(), String> {
     match replier {
         Replier::Hub(up, call) => up.write(Up::Answer { call: *call, message }).await,
-        Replier::Peer(conn, id) => conn
-            .send(crate::peer::Frame::Answer { id: *id, message })
-            .map_err(|()| "the direct link ended before the answer was queued".to_string()),
+        Replier::Peer(conn, id) => conn.write(crate::peer::Frame::Answer { id: *id, message }).await,
     }
 }
 
@@ -169,14 +314,15 @@ async fn reply(
     }
 }
 
-/// The call an envelope holds, fetched or with its data connection opened
-/// when it comes with one.
+/// The call `body`, which came in `call`, fetched or with its data
+/// connection opened when it comes with one.
 async fn open_call(
     inner: &Inner,
     call: &Envelope,
+    body: Body,
     endpoint: &Endpoint,
-) -> Result<(RemoteCall, Option<Stream>), String> {
-    let body: Body = call.body()?;
+    opening_deadline: tokio::time::Instant,
+) -> Result<(RemoteCall, Option<Stream>, Option<crate::reassembly::Reservation>), String> {
     let from_the_caller = || -> Result<u64, String> {
         let ticket = call.stream.as_ref().ok_or("it names no data connection")?;
         if ticket.source != call.from || !inner.view().is_me(&ticket.sink) {
@@ -185,21 +331,27 @@ async fn open_call(
         Ok(ticket.stream)
     };
     match body {
-        Body::Call { call } => Ok((call, None)),
+        Body::Call { call } => Ok((call, None, None)),
         Body::StreamCall { call: remote } => {
             let stream = Stream::open(endpoint, &inner.key, from_the_caller()?, End::Sink)
                 .await
                 .map_err(|error| format!("opening its data connection: {error}"))?;
-            Ok((remote, Some(stream)))
+            Ok((remote, Some(stream), None))
         }
         Body::LargeCall { carried } => {
             if from_the_caller()? != carried.stream {
                 return Err("it names one data connection and carries another".to_string());
             }
-            let bytes = crate::data::sink(endpoint, &inner.key, &carried)
+            let bytes = crate::data::sink_until(endpoint, &inner.key, &carried, opening_deadline)
                 .await
                 .map_err(|error| format!("fetching it, too large for a message: {error}"))?;
-            Ok((serde_json::from_slice(&bytes).map_err(|error| format!("it cannot be read: {error}"))?, None))
+            Ok((
+                serde_json::from_slice(&bytes).map_err(|error| {
+                    format!("it cannot be read: {error}; a newer Fastctx may make calls this one does not know")
+                })?,
+                None,
+                Some(bytes.into_reservation()),
+            ))
         }
         Body::Answer { .. } | Body::LargeAnswer { .. } => Err("it is not a call".to_string()),
     }

@@ -1,6 +1,9 @@
 //! Letters on this machine: those waiting to reach the hub, the receipts
 //! of those taken, and the ones that could not be delivered or opened.
 
+mod failures;
+pub use failures::record_failure;
+
 use std::io;
 use std::path::PathBuf;
 
@@ -12,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::state::{NetDir, read};
 use crate::envelope::Envelope;
 use crate::message::LetterId;
-use crate::sign::Digest;
+use crate::sign::{Digest, PublicKey};
 
 /// Letters not yet held by the hub, one file each, named by number.
 pub struct Outbox {
@@ -37,6 +40,37 @@ impl Outbox {
         }
     }
 
+    /// The letter `seq` and how many bytes it takes; none when it is not
+    /// there.
+    pub fn get_sized(&self, seq: u64) -> io::Result<Option<(Envelope, usize)>> {
+        let bytes = match std::fs::read(self.dir.join(format!("{seq:020}"))) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let message =
+            serde_json::from_slice(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        Ok(Some((message, bytes.len())))
+    }
+
+    /// Forgets the letters after `from` through `through`, which the hub
+    /// holds now, by number: letters go one after another, so no listing is
+    /// needed.
+    pub fn held_between(&self, from: u64, through: u64) -> io::Result<()> {
+        for number in from.saturating_add(1)..=through {
+            self.remove(number)?;
+        }
+        Ok(())
+    }
+
+    /// Forgets the letter `seq`, which the hub holds.
+    pub fn remove(&self, seq: u64) -> io::Result<()> {
+        match std::fs::remove_file(self.dir.join(format!("{seq:020}"))) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     /// The numbers of the letters waiting, in order.
     pub fn numbers(&self) -> io::Result<Vec<u64>> {
         let mut numbers = Vec::new();
@@ -50,20 +84,6 @@ impl Outbox {
         numbers.sort_unstable();
         Ok(numbers)
     }
-
-    /// Forgets the letters through `seq`: the hub holds them.
-    pub fn held_through(&self, seq: u64) -> io::Result<()> {
-        for number in self.numbers()? {
-            if number > seq {
-                break;
-            }
-            match std::fs::remove_file(self.dir.join(format!("{number:020}"))) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-                _ => {}
-            }
-        }
-        Ok(())
-    }
 }
 
 /// What this machine knows of a letter it took: the digest of its contents,
@@ -75,16 +95,41 @@ pub struct Receipt {
     pub at: Timestamp,
 }
 
-pub fn receipt(net: &NetDir, from: &MachineName, id: &LetterId) -> io::Result<Option<Receipt>> {
-    match read(&net.received(from)?.join(id.as_str())) {
-        Ok(receipt) => Ok(Some(receipt)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
+fn received(net: &NetDir, from: &PublicKey) -> PathBuf {
+    let bytes = serde_json::to_vec(from).expect("public identities serialize");
+    let name: String = crate::sign::sha256(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+    net.path().join("received-by-key").join(name)
 }
 
-pub fn keep_receipt(net: &NetDir, from: &MachineName, id: &LetterId, receipt: &Receipt) -> io::Result<()> {
-    let directory = net.received(from)?;
+pub fn receipt(net: &NetDir, from: &PublicKey, names: &[MachineName], id: &LetterId) -> io::Result<Option<Receipt>> {
+    match read(&received(net, from).join(id.as_str())) {
+        Ok(receipt) => return Ok(Some(receipt)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let mut found: Option<Receipt> = None;
+    for name in names {
+        let old: Receipt = match read(&net.received(name)?.join(id.as_str())) {
+            Ok(receipt) => receipt,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if found.as_ref().is_some_and(|kept| kept.digest != old.digest) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "legacy letter receipts disagree across sender aliases",
+            ));
+        }
+        found = Some(old);
+    }
+    if let Some(receipt) = &found {
+        keep_receipt(net, from, id, receipt)?;
+    }
+    Ok(found)
+}
+
+pub fn keep_receipt(net: &NetDir, from: &PublicKey, id: &LetterId, receipt: &Receipt) -> io::Result<()> {
+    let directory = received(net, from);
     ensure_private_dir(&directory)?;
     let bytes = serde_json::to_vec(receipt).map_err(io::Error::other)?;
     publish(&directory.join(id.as_str()), &bytes, Permissions::Private)
@@ -98,17 +143,4 @@ pub struct Failure {
     pub direction: String,
     pub reason: String,
     pub message: Envelope,
-}
-
-pub fn record_failure(net: &NetDir, direction: &str, reason: &str, message: &Envelope) -> io::Result<PathBuf> {
-    let at = Timestamp::now();
-    let failure =
-        Failure { at, direction: direction.to_string(), reason: reason.to_string(), message: message.clone() };
-    let stamp = at.strftime("%Y%m%dT%H%M%S%.fZ").to_string().replace('.', "");
-    let suffix = u32::from_le_bytes(crate::sign::random::<4>()?);
-    let path = net.failures().join(format!("{stamp}-{direction}-{suffix:08x}.json"));
-    let mut bytes = serde_json::to_vec_pretty(&failure).map_err(io::Error::other)?;
-    bytes.push(b'\n');
-    publish_new(&path, &bytes, Permissions::Private)?;
-    Ok(path)
 }

@@ -62,6 +62,15 @@ struct Kept {
 }
 
 impl History {
+    /// Whether a record says the machine with `key` was updated from `from`
+    /// to `to`.
+    pub(crate) fn updated(&self, key: &PublicKey, from: &str, to: &str) -> bool {
+        self.records.iter().any(|kept| {
+            kept.members.contains(key)
+                && matches!(&kept.record.action, Action::Updated { from: was, to: now, .. } if was == from && now == to)
+        })
+    }
+
     pub(crate) fn expire(&mut self, now: Timestamp) -> bool {
         let before = self.records.len();
         self.records.retain(|kept| kept.record.at.checked_add(RETENTION).expect("timestamp in range") > now);
@@ -100,8 +109,18 @@ impl History {
             Action::Remove { name, .. } => {
                 names.insert(name.clone());
             }
-            Action::Rename { machine, .. } | Action::Group { machine, .. } => {
+            // The machine is off the hub by then: who took it off and whose
+            // it was read it.
+            Action::UninstallLeft { by, home, .. } => {
+                accounts.extend(by.iter().cloned());
+                accounts.extend(home.iter().cloned());
+            }
+            Action::Rename { machine, .. } | Action::Group { machine, .. } | Action::UpdateDue { machine, .. } => {
                 names.insert(machine.clone());
+            }
+            Action::Updated { machine, by, .. } => {
+                names.insert(machine.clone());
+                accounts.insert(by.clone());
             }
             Action::RenameGroup { owner, .. } => {
                 accounts.insert(owner.clone());
@@ -234,19 +253,17 @@ impl History {
         Ok(())
     }
 
-    /// The records `me` reads for `account`, newest first. Renames, and the
-    /// records of conversations deleted, are left out for a member whose
-    /// release does not read them (`reads`, renames and deletions): it
-    /// could read nothing of a page with one. The super administrator reads
-    /// every record but those of conversations, which only their account
-    /// reads.
+    /// The records `me` reads for `account`, newest first. A kind of record
+    /// its release does not read is left out (`Action::needs`): it could
+    /// read nothing of a page with one. The super administrator reads every
+    /// record but those of conversations, which only their account reads.
     pub(crate) fn read(
         &self,
         directory: &Directory,
         me: &MachineName,
         account: &AccountName,
         before: Option<u64>,
-        (renames, forgets, versions): (bool, bool, bool),
+        reads: fastctx_types::machine_log::Reads,
     ) -> Result<Page, String> {
         if !directory.may_act_for(account, me) {
             return Err(format!("{me} may not read the machine log of the account {account}"));
@@ -268,9 +285,7 @@ impl History {
             .filter(|kept| {
                 let private = kept.record.action.of_conversation();
                 before.is_none_or(|before| kept.record.id < before)
-                    && (renames || !matches!(kept.record.action, Action::Rename { .. }))
-                    && (versions || !matches!(kept.record.action, Action::Updates { .. }))
-                    && (forgets || !private)
+                    && reads.covers(kept.record.action.needs())
                     && kept.record.at.checked_add(RETENTION).expect("timestamp in range") > now
                     && ((whole && !private)
                         || kept.accounts.get(account).copied().is_some_and(|kept| Some(kept) == opened)
@@ -322,7 +337,9 @@ pub(crate) fn action(change: &Change, book: &Book) -> Action {
         }
         Change::StopActing { machine } => Action::StopActing { machine: machine.clone() },
         Change::Direct { machine, at } => Action::Direct { machine: machine.clone(), at: at.clone() },
-        Change::Remove { name, reason } => Action::Remove { name: name.clone(), reason: reason.clone() },
+        Change::Remove { name, reason, then } => {
+            Action::Remove { name: name.clone(), reason: reason.clone(), then: *then }
+        }
         Change::Rename { machine, to } => Action::Rename { machine: machine.clone(), to: to.clone() },
         Change::Group { machine, group } => Action::Group { machine: machine.clone(), group: group.clone() },
         Change::RenameGroup { owner, from, to } => {
@@ -356,7 +373,14 @@ pub(crate) fn action(change: &Change, book: &Book) -> Action {
         Change::Transfer { to } => Action::Transfer { to: to.clone() },
         Change::DeleteAccount { name } => Action::DeleteAccount { name: name.clone() },
         Change::Settings { self_registration } => Action::Settings { self_registration: *self_registration },
-        Change::Updates { policy } => Action::Updates { channel: policy.channel, minimum: policy.minimum.clone() },
+        Change::Updates { policy } => Action::Updates {
+            channel: policy.channel,
+            minimum: policy.minimum.clone(),
+            managed_auto: Some(policy.managed_auto),
+        },
+        Change::UpdateDue { machine, version } => {
+            Action::UpdateDue { machine: machine.clone(), version: version.clone() }
+        }
         Change::Dissolve { name } => Action::Dissolve { name: name.clone() },
         Change::OpenProject { town, name } => Action::OpenProject { town: town.clone(), name: name.clone() },
         Change::ShareProject { town, with, shared } => {

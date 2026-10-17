@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use fastctx_hosts::claude::{background, startup};
 use fastctx_types::ipc::Failure;
-use fastctx_types::residents::PendingState;
+use fastctx_types::residents::{Activity, PendingState};
 use fastctx_types::session::{Health, HealthKind};
 use fastctx_types::{NoticeId, ProcessIdentity, ResidentId};
 
@@ -17,7 +17,8 @@ use crate::Node;
 
 type Exit = Pin<Box<dyn Future<Output = std::io::Result<Option<u32>>> + Send>>;
 
-pub(super) type Listings = crate::leases::Registry<(PathBuf, Option<OsString>), tokio::sync::Mutex<Option<Listed>>>;
+pub(super) type Listings =
+    crate::leases::Registry<(PathBuf, Option<OsString>), fastctx_platform::doing::Mutex<Option<Listed>>>;
 
 pub(super) struct Listed {
     at: Instant,
@@ -34,7 +35,17 @@ pub(super) fn observe(node: &Arc<Node>, resident: &ResidentId, id: NoticeId, com
     let node = node.clone();
     let resident = resident.clone();
     tokio::spawn(async move {
-        watch(&node, &resident, &id, &command).await;
+        // Tried again after waits that double up to a minute, told once for
+        // each new reason.
+        let (mut again, mut told) = (crate::again::Again::default(), None);
+        while let Err(error) = watch(&node, &resident, &id, &command).await {
+            let error = error.to_string();
+            if told.as_ref() != Some(&error) {
+                node.log.line(format_args!("observing Claude startup {resident}; will retry: {error}"));
+                told = Some(error);
+            }
+            tokio::time::sleep(again.next().max(fastctx_hosts::claude::MOD_LOOK)).await;
+        }
         node.claude.state.lock().expect("never poisoned").starting.remove(&resident);
     });
 }
@@ -62,19 +73,51 @@ pub(super) fn recover(node: &Arc<Node>) {
                 continue;
             }
         };
-        let Some(first) = kept.into_iter().find(|pending| pending.state == PendingState::Waking) else { continue };
+        let Some(first) = kept.into_iter().find(|pending| pending.state == PendingState::Waking) else {
+            // Born and stopped before its first words were kept: no session
+            // was asked for, and nothing will end the work it was shown at.
+            if about.session.is_none()
+                && node.residents.now(&about.id).is_some_and(|now| now.activity == Activity::Busy && now.turn.is_none())
+                && let Err(error) = node.residents.change_now(&node.world, &about.id, |now| {
+                    now.activity = Activity::Idle;
+                    now.since = jiff::Timestamp::now();
+                    now.trouble = Some(fastctx_types::residents::Trouble {
+                        at: jiff::Timestamp::now(),
+                        text: "the node stopped while this conversation was being started; say something to start it"
+                            .into(),
+                    });
+                })
+            {
+                node.log.line(format_args!("ending a start the node stopped during: {error}"));
+            }
+            continue;
+        };
         if about.session.is_none() {
             let node = node.clone();
             tokio::spawn(async move {
-                let _births = node.claude.births.write().await;
-                if !pending(&node, &about.id, &first.delivery.id) {
-                    return;
-                }
-                let why = "the node restarted before recording Claude Code's background session ID; its startup outcome is unknown";
-                if let Err(error) =
-                    super::failed_wake(&node, &about.id, &directory, &first.delivery.id, Failure::new(why)).await
-                {
-                    node.log.line(format_args!("recording interrupted Claude startup: {error}"));
+                let (mut again, mut told) = (crate::again::Again::default(), None);
+                loop {
+                    let result = async {
+                        let _births = node.claude.births.write().await;
+                        if !pending(&node, &about.id, &first.delivery.id)? {
+                            return Ok(());
+                        }
+                        let why = "the node restarted before recording Claude Code's background session ID; its startup outcome is unknown";
+                        super::failed_wake(&node, &about.id, &directory, &first.delivery.id, Failure::new(why))
+                            .await.map(|_| ()).map_err(std::io::Error::other)
+                    }.await;
+                    match result {
+                        Ok(()) => break,
+                        Err(error) => {
+                            let error = error.to_string();
+                            if told.as_ref() != Some(&error) {
+                                node.log
+                                    .line(format_args!("recording interrupted Claude startup; will retry: {error}"));
+                                told = Some(error);
+                            }
+                        }
+                    }
+                    tokio::time::sleep(again.next().max(fastctx_hosts::claude::MOD_LOOK)).await;
                 }
             });
             continue;
@@ -82,7 +125,9 @@ pub(super) fn recover(node: &Arc<Node>) {
         match super::command(node, about.home.as_deref()) {
             Ok(command) => observe(node, &about.id, first.delivery.id, command),
             Err(error) => {
-                let _ = report(node, &about.id, error.message);
+                if let Err(error) = report(node, &about.id, error.message) {
+                    node.log.line(format_args!("recording Claude startup problem for {}: {error}", about.id));
+                }
             }
         }
     }
@@ -90,13 +135,15 @@ pub(super) fn recover(node: &Arc<Node>) {
 
 async fn run(command: &super::Command, args: Vec<OsString>) -> Result<String, String> {
     let command = command.clone();
-    tokio::task::spawn_blocking(move || background::claude(&command.program, &args, &command.cwd, &command.env))
-        .await
-        .map_err(|error| format!("observing Claude startup: {error}"))?
+    tokio::task::spawn_blocking(fastctx_platform::doing::carried(move || {
+        background::claude(&command.program, &args, &command.cwd, &command.env)
+    }))
+    .await
+    .map_err(|error| format!("observing Claude startup: {error}"))?
 }
 
 async fn agents(
-    listing: &tokio::sync::Mutex<Option<Listed>>,
+    listing: &fastctx_platform::doing::Mutex<Option<Listed>>,
     command: &super::Command,
     after: Option<Instant>,
 ) -> Result<String, String> {
@@ -153,31 +200,35 @@ fn daemon_said(command: &super::Command, short: &str) -> Option<String> {
 /// How much of the end of Claude Code's daemon log is read for a session.
 const DAEMON_TAIL: u64 = 256 * 1024;
 
-fn pending(node: &Node, resident: &ResidentId, id: &NoticeId) -> bool {
+fn pending(node: &Node, resident: &ResidentId, id: &NoticeId) -> std::io::Result<bool> {
     if super::paired(node, resident) || node.residents.removed(resident).is_some() {
-        return false;
+        return Ok(false);
     }
     if node.residents.about(resident).is_none() {
-        return false;
+        return Ok(false);
     }
     let directory = node.world.conversation(resident);
-    match crate::inbox::read(&directory, id) {
-        Ok(pending) => pending.is_some(),
-        Err(error) => {
-            node.log.line(format_args!("reading unpaired Claude startup {resident}: {error}"));
-            false
-        }
-    }
+    crate::inbox::read(&directory, id).map(|pending| pending.is_some())
 }
 
-async fn watch(node: &Arc<Node>, resident: &ResidentId, id: &NoticeId, command: &super::Command) {
-    let Some(short) = node.residents.about(resident).and_then(|(about, _)| about.session) else { return };
+async fn watch(
+    node: &Arc<Node>,
+    resident: &ResidentId,
+    id: &NoticeId,
+    command: &super::Command,
+) -> std::io::Result<()> {
+    let Some(short) = node.residents.about(resident).and_then(|(about, _)| about.session) else { return Ok(()) };
     let home = command
         .env
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"))
         .map(|(_, home)| home.clone());
-    let listing = node.claude.startup_listings.get_or_insert_with(&(command.program.clone(), home), Default::default);
+    let login =
+        home.as_ref().map_or_else(|| command.program.display().to_string(), |home| home.to_string_lossy().into_owned());
+    let listing = node
+        .claude
+        .startup_listings
+        .get_or_insert_with(&(command.program.clone(), home), || crate::ranked::listing(&login));
     let mut process: Option<ProcessIdentity> = None;
     let mut exited: Option<Exit> = None;
     let mut code = None;
@@ -192,13 +243,13 @@ async fn watch(node: &Arc<Node>, resident: &ResidentId, id: &NoticeId, command: 
         let changed = node.claude.changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
-        if !pending(node, resident, id) {
-            return;
+        if !pending(node, resident, id)? {
+            return Ok(());
         }
         let listed = agents(&listing, command, after).await;
         after = None;
-        if !pending(node, resident, id) {
-            return;
+        if !pending(node, resident, id)? {
+            return Ok(());
         }
         match listed.and_then(|listed| startup::background(&listed, &short)) {
             Ok(Some(job)) => {
@@ -258,26 +309,23 @@ async fn watch(node: &Arc<Node>, resident: &ResidentId, id: &NoticeId, command: 
                     // including one the filesystem watcher has not seen yet.
                     super::replay(node).await;
                     let _births = node.claude.births.write().await;
-                    if !pending(node, resident, id) {
-                        return;
+                    if !pending(node, resident, id)? {
+                        return Ok(());
                     }
                     if job.ended() {
                         if node.residents.about(resident).is_none() {
-                            return;
+                            return Ok(());
                         }
                         let directory = node.world.conversation(resident);
-                        if let Err(error) = super::failed_wake(node, resident, &directory, id, Failure::new(why)).await
-                        {
-                            node.log.line(format_args!("recording failed Claude startup: {error}"));
-                        }
-                        return;
+                        super::failed_wake(node, resident, &directory, id, Failure::new(why))
+                            .await
+                            .map_err(std::io::Error::other)?;
+                        return Ok(());
                     }
                     // The host's watchdog and a real setup dialog produce the
                     // same blocked state. Preserve the fact without declaring
                     // a slow but successful birth failed.
-                    if let Err(error) = report(node, resident, why) {
-                        node.log.line(format_args!("recording blocked Claude startup: {error}"));
-                    }
+                    report(node, resident, why)?;
                 } else if process_ended && reported_exit != process {
                     let identity = process.as_ref().expect("an observed process exited");
                     let mut why = format!(
@@ -290,12 +338,10 @@ async fn watch(node: &Arc<Node>, resident: &ResidentId, id: &NoticeId, command: 
                     let why = diagnosis(command, &short, why).await;
                     super::replay(node).await;
                     let _births = node.claude.births.write().await;
-                    if !pending(node, resident, id) {
-                        return;
+                    if !pending(node, resident, id)? {
+                        return Ok(());
                     }
-                    if let Err(error) = report(node, resident, why) {
-                        node.log.line(format_args!("recording exited Claude startup process: {error}"));
-                    }
+                    report(node, resident, why)?;
                     reported_exit = process.clone();
                 }
                 blocked = job.blocked();
@@ -303,23 +349,23 @@ async fn watch(node: &Arc<Node>, resident: &ResidentId, id: &NoticeId, command: 
             }
             Ok(None) => {
                 let _births = node.claude.births.write().await;
-                if !pending(node, resident, id) {
-                    return;
+                if !pending(node, resident, id)? {
+                    return Ok(());
                 }
                 let why =
                     format!("Claude Code does not list background session {short}; its startup outcome is unknown");
                 if last_problem.as_ref() != Some(&why) {
-                    let _ = report(node, resident, why.clone());
+                    report(node, resident, why.clone())?;
                     last_problem = Some(why);
                 }
             }
             Err(error) => {
                 let _births = node.claude.births.write().await;
-                if !pending(node, resident, id) {
-                    return;
+                if !pending(node, resident, id)? {
+                    return Ok(());
                 }
                 if last_problem.as_ref() != Some(&error) {
-                    let _ = report(node, resident, error.clone());
+                    report(node, resident, error.clone())?;
                     last_problem = Some(error);
                 }
             }

@@ -13,6 +13,7 @@ import { folderName, type Focus, type Folders } from "../world/focus";
 import { allowPrivacy } from "../world/files";
 import { FolderWalk } from "./folder-walk";
 import type { FocusWords } from "./words";
+import { redrawKeepingFocus } from "./focus";
 
 /** A machine the conversation's account may use. */
 export interface FocusPlace {
@@ -148,11 +149,21 @@ export class FocusPanel {
 
   private draw(): void {
     if (this.walk) {
+      this.drawn = "";
       this.element.replaceChildren(this.walk.element);
       return;
     }
-    this.element.innerHTML = this.machines();
+    // Drawn again only when it changed, the control pressed keeping focus.
+    const html = this.machines();
+    if (html === this.drawn) return;
+    this.drawn = html;
+    redrawKeepingFocus(this.element, () => {
+      this.element.innerHTML = html;
+    });
   }
+
+  /** What the list was last drawn as. */
+  private drawn = "";
 
   private machines(): string {
     const { words } = this.options;
@@ -186,7 +197,7 @@ export function focusSummary(focus: Focus, words: FocusWords): { html: string; s
   );
   const first = items[0];
   if (!first) return null;
-  const said = items.map((item) => (item.folder ? `${item.machine} · ${item.folder}` : item.machine)).join(", ");
+  const said = items.map((item) => (item.folder ? `${item.machine}: ${item.folder}` : item.machine)).join(", ");
   const more = items.length > 1 ? `<span class="focus-more">${escape(words.more(items.length - 1))}</span>` : "";
   const html = `<span class="talk-chip-name">${escape(first.folder ?? first.machine)}</span>${first.folder ? `<span class="talk-chip-sub">${escape(first.machine)}</span>` : ""}${more}`;
   return { html, said };

@@ -28,9 +28,23 @@ pub struct WorldLogins {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum MachineLoginsHeard {
-    Answered { logins: Box<MachineLogins> },
-    Offline { machine: MachineName, since: Option<Timestamp> },
-    NoAnswer { machine: MachineName, reason: String },
+    Answered {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<crate::observation::Observation>,
+        logins: Box<MachineLogins>,
+    },
+    Offline {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<crate::observation::Observation>,
+        machine: MachineName,
+        since: Option<Timestamp>,
+    },
+    NoAnswer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<crate::observation::Observation>,
+        machine: MachineName,
+        reason: String,
+    },
 }
 
 /// One machine's record of its agents' logins.
@@ -116,7 +130,8 @@ pub struct Login {
     /// the official client does; off by default (`world-agent-logins.md`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_title: bool,
-    /// The program the World starts for this login, when one was found.
+    /// The program the World starts for this login, as it would start it
+    /// now; none when there is none to start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher: Option<Launcher>,
     /// The models a conversation in it can start on, as last read.

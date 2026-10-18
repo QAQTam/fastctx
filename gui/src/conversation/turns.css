@@ -25,15 +25,12 @@
   padding-top: var(--space-1);
 }
 
-/* The stretch's heading: what it does, then how many steps and how long,
-   in figures that do not move as they count. */
-.group-head {
-  display: flex;
-  width: fit-content;
-}
-
+/* The stretch's heading: what it does, then, at the right, how many steps
+   and how long, in figures that do not move as they count. */
 .group-time {
   flex: none;
+  margin-left: auto;
+  padding-left: var(--space-4);
   font-variant-numeric: tabular-nums;
   color: var(--text-3);
 }
@@ -46,11 +43,6 @@
 .group-stats {
   flex: none;
   margin-left: 6px;
-}
-
-.group-time::before {
-  content: "·";
-  margin: 0 var(--space-1) 0 2px;
 }
 
 /* Long text under a row: its first lines, the button for the rest, the
@@ -78,13 +70,14 @@
   border-radius: var(--radius-s);
   background: var(--surface-header);
   color: var(--text-3);
-  opacity: 0;
-  transition: opacity var(--hover) ease, color var(--hover) ease;
+  --shown: 0;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease, color var(--hover) ease;
 }
 
 .long-text-box:hover .long-text-full,
 .long-text-full:focus-visible {
-  opacity: 1;
+  --shown: 1;
 }
 
 .long-text-full:hover {
@@ -97,7 +90,7 @@
 
 @media (hover: none) {
   .long-text-full {
-    opacity: 1;
+    --shown: 1;
     width: 44px;
     height: 44px;
   }
@@ -109,15 +102,16 @@
   display: flex;
   gap: 2px;
   margin-top: var(--space-1);
-  opacity: 0;
-  transition: opacity var(--hover) ease;
+  --shown: 0;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease;
 }
 
 .turn-acts.latest,
 .block:hover > .turn-acts,
 .block:hover > .message-acts > .turn-acts,
 .turn-acts:focus-within {
-  opacity: 1;
+  --shown: 1;
 }
 
 /* A message's actions follow its words as if they were the block's own. */
@@ -189,7 +183,8 @@
 .turn-info:focus-visible .turn-info-card,
 .turn-info:focus .turn-info-card {
   display: grid;
-  animation: paper-in 0.12s ease both;
+  opacity: var(--shown);
+  animation: paper-in var(--quick) ease both;
 }
 
 .turn-info-label {
@@ -206,7 +201,7 @@
    own words carry none, and held, theirs float up beside them. */
 @media (hover: none) {
   .turn-acts {
-    opacity: 1;
+    --shown: 1;
   }
 
   .user-acts {
@@ -246,13 +241,13 @@
 
 @keyframes sheet-rise {
   from {
-    transform: translateY(100%);
+    --lift: 100%;
   }
 }
 
 @keyframes sheet-scrim {
   from {
-    opacity: 0;
+    --shown: 0;
   }
 }
 
@@ -320,12 +315,13 @@
 
 .notice-open > .glyph:last-child {
   color: var(--text-3);
-  transform: rotate(-90deg);
-  transition: transform var(--fold) var(--fold-easing);
+  --turn: -90deg;
+  rotate: var(--turn);
+  transition: --turn var(--fold) var(--fold-easing);
 }
 
 .notice-open[aria-expanded="true"] > .glyph:last-child {
-  transform: none;
+  --turn: 0deg;
 }
 
 .notice-box {
@@ -348,11 +344,6 @@
   font-size: calc(var(--size-small) * 0.92);
   line-height: 1.5;
   color: var(--text-3);
-}
-
-.notice-path {
-  margin: var(--space-1) 0 0;
-  overflow-wrap: anywhere;
 }
 
 .notice-box .prose,
@@ -605,7 +596,17 @@
 .bubble-ghost {
   z-index: 60;
   pointer-events: none;
-  will-change: transform;
+  translate: var(--fly-x) var(--fly-y);
+}
+
+/* What came with the words comes up quietly once they have landed. */
+.bubble-landing {
+  opacity: var(--rise);
+  animation: rise var(--enter) ease-out both;
+}
+
+:root[data-reduced] .bubble-landing {
+  animation: none;
 }
 
 /* The input stays quiet while the words it sent are on their way: its
@@ -635,7 +636,7 @@
 /* A stretch's line under way: the step in hand fades in where the last was. */
 .group-title.fresh {
   opacity: var(--rise);
-  animation: rise 0.24s ease both;
+  animation: rise var(--enter) ease both;
 }
 
 :root[data-reduced] .group-title.fresh {

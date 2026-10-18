@@ -44,6 +44,7 @@ pub fn who(
             continue;
         }
         residents.push(ResidentNow {
+            source: None,
             about: resident.about,
             town: resident.town,
             here: resident.here,
@@ -87,6 +88,7 @@ pub fn who(
                 continue;
             }
             residents.push(ResidentNow {
+                source: None,
                 about,
                 town: former.town,
                 here: false,
@@ -111,33 +113,15 @@ pub fn who(
     Ok(WhoReply { machine: machine.clone(), residents, jobs, history: None, busy: None })
 }
 
-/// Keeps of this machine's answer only what works for an account `acting`
-/// works for: the residents, and the jobs they or those accounts started.
-pub(crate) fn only_for(node: &crate::Node, acting: &Acting, reply: &mut WhoReply) {
-    let here = node.machine();
-    let serves =
-        |accounts: &[HubAccount]| accounts.iter().any(|account| node.serves(acting, &account.hub, &account.account));
-    reply.residents.retain(|resident| match &resident.about.acting {
-        Acting::Accounts { accounts } => serves(accounts),
-        Acting::Here => false,
-    });
-    let kept: Vec<_> = reply.residents.iter().map(|resident| resident.about.id.clone()).collect();
-    reply.jobs.retain(|job| match job.owner.resident() {
-        Some(owner) if owner.machine == here => kept.contains(&owner.resident),
-        _ => job.account.as_ref().is_some_and(|account| serves(std::slice::from_ref(account))),
-    });
-    // What happened here is this machine's own, not theirs.
-    reply.history = None;
-}
-
 /// Marks what `reply` shows that works for no account `acting` works for,
 /// as this computer's views of its hubs say.
 pub(crate) fn mark_others(node: &crate::Node, acting: &Acting, reply: &mut fastctx_types::town::WorldWho) {
     reply.mark_others(
         |account| node.serves(acting, &account.hub, &account.account),
-        |machine| {
+        |machine, source| {
             node.links()
                 .iter()
+                .filter(|link| source.is_none_or(|source| link.membership().id == source.hub))
                 .flat_map(|link| {
                     let hub = link.membership().id.clone();
                     let logins = link.view().member(machine).map(|member| member.logins.clone());
@@ -158,6 +142,7 @@ pub(crate) fn running_jobs(jobs: &Path, running: &mut Vec<RunningJob>) -> io::Re
         if job.end.is_none() {
             let account = job.on.and_then(|on| on.account).or(job.account);
             running.push(RunningJob {
+                source: None,
                 job: job.id,
                 town: job.town,
                 machine: job.machine,

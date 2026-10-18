@@ -50,16 +50,22 @@
   white-space: nowrap;
 }
 
-.agents-pick-dot {
+/* A machine's kind, in ink while it is there and grey with its name while
+   it is away, as on the machine list. */
+.agents-pick-icon {
   flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--pen-trace);
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
 }
 
-.agents-pick-dot.online {
-  background: var(--alive);
+.agents-pick-icon.offline {
+  color: var(--text-3);
+  opacity: 0.6;
+}
+
+.agents-pick-icon.offline + .agents-pick-name {
+  color: var(--text-3);
 }
 
 .agents-pick-menu {
@@ -575,7 +581,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-code);
   font-size: var(--size-small);
   color: var(--text-3);
 }
@@ -583,9 +588,13 @@
 /* 「接入」 stands out on its row: the one thing to do with a candidate. */
 .logins-apply {
   margin-left: auto;
-  color: var(--accent);
-  font-family: var(--font-emphasis);
-  font-weight: 400;
+  height: 28px;
+  background: var(--fill);
+  color: var(--text-strong);
+}
+
+.logins-apply:hover:not(:disabled) {
+  background: var(--fill-strong);
 }
 
 /* 「添加文件夹…」, and the folders searched for logins: a row each, the
@@ -641,8 +650,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-code);
-  font-variation-settings: var(--code-axes);
   font-size: var(--size-small);
   color: var(--text-3);
 }
@@ -693,8 +700,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-code);
-  font-variation-settings: var(--code-axes);
   font-size: var(--size-small);
   color: var(--text);
   cursor: default;
@@ -714,7 +719,7 @@
 .logins-found-row.fresh,
 .logins-folder.fresh,
 .logins-row.fresh {
-  animation: logins-fresh 2400ms ease-out both;
+  animation: logins-fresh var(--fresh) ease-out both;
 }
 
 .logins-folder {
@@ -807,24 +812,6 @@
   color: var(--text-2);
 }
 
-.agent-change-drawing .ach-strike,
-.agent-change-drawing .ach-arrow {
-  fill: none;
-  stroke: var(--pen-clay);
-  stroke-width: 2.2;
-  stroke-linecap: round;
-}
-
-.agent-change-drawing .ach-arrow {
-  stroke: var(--pen-graphite);
-}
-
-.agent-change-drawing .ach-ring {
-  fill: none;
-  stroke: var(--pen-clay);
-  stroke-width: 2;
-}
-
 .agent-change-drawing .ach-run {
   color: var(--text-strong);
 }
@@ -898,12 +885,13 @@
 }
 
 .agent-change-toggle .glyph {
-  transform: rotate(-90deg);
-  transition: transform var(--hover) ease;
+  --turn: -90deg;
+  rotate: var(--turn);
+  transition: --turn var(--hover) ease;
 }
 
 .agent-change-toggle[aria-expanded="true"] .glyph {
-  transform: none;
+  --turn: 0deg;
 }
 
 /* The details, once opened: the files a line each, scrolling here alone. */
@@ -958,12 +946,13 @@
   flex: none;
   display: inline-flex;
   color: var(--text-3);
-  transform: rotate(-90deg);
-  transition: transform var(--hover) ease;
+  --turn: -90deg;
+  rotate: var(--turn);
+  transition: --turn var(--hover) ease;
 }
 
 .agent-change-file.open .agent-change-chevron {
-  transform: none;
+  --turn: 0deg;
 }
 
 .agent-change-diff:not(:empty) {
@@ -999,11 +988,6 @@
 .agent-change-stampmark {
   width: 26px;
   height: 26px;
-  fill: none;
-  stroke: var(--pen-clay);
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .agent-change-kept li {

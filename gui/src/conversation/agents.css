@@ -73,7 +73,7 @@
 
 .agent-now.fresh .agent-now-said {
   opacity: var(--rise);
-  animation: rise 0.24s ease both;
+  animation: rise var(--enter) ease both;
 }
 
 /* What an agent did, opened under its row: its own conversation, drawn as
@@ -197,7 +197,7 @@
 /* Pressed in the picture of them all: the row is found with a wash that
    fades. */
 .row.row-found > .row-line {
-  animation: row-found 1.8s ease both;
+  animation: row-found var(--found) ease both;
 }
 
 /* It stays washed a moment, then fades back. */
@@ -233,7 +233,7 @@
   color: var(--accent);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: ink-breathe 2.6s ease-in-out infinite;
+  animation: ink-breathe var(--breath-slow) ease-in-out infinite;
 }
 
 .agents-pop {
@@ -249,6 +249,8 @@
   border-radius: var(--radius-l);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
   animation: panel-rise var(--fold) var(--fold-easing) both;
 }
 
@@ -358,7 +360,7 @@
   transform-origin: center;
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: lane-breathe 1.6s ease-in-out infinite;
+  animation: lane-breathe var(--breath) ease-in-out infinite;
 }
 
 .state-waiting .lane-head {
@@ -376,6 +378,8 @@
 }
 
 .agents-pop.popover-leaving {
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
   animation: panel-settle var(--fold) var(--fold-easing) both;
 }
 
@@ -389,10 +393,12 @@
     max-height: 70dvh;
     padding-bottom: calc(var(--space-4) + var(--safe-bottom));
     border-radius: var(--radius-l) var(--radius-l) 0 0;
+    translate: var(--slide) var(--lift);
     animation-name: sheet-rise;
   }
 
   .agents-pop.popover-leaving {
+    translate: var(--slide) var(--lift);
     animation-name: sheet-sink;
   }
 

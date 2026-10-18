@@ -15,6 +15,9 @@ export type ProseEntry = Extract<Entry, { kind: "prose" }>;
 
 export interface StretchSaid {
   title: string;
+  /** The title in the parts a narrow line hides whole, set apart by the
+   *  words' `tallyGap`. */
+  parts: string[];
   added: number;
   removed: number;
   /** Its steps: a run of thinking is one. */
@@ -49,6 +52,7 @@ export function stretchSays(
   const only = thoughtOnly(group);
   const bare = only && !thinking.some((member) => member.text.trim());
   let title: string;
+  let parts: string[] | null = null;
   let figures = "";
   let added = 0;
   let removed = 0;
@@ -65,7 +69,8 @@ export function stretchSays(
     const counted = tokens(thinking);
     if (counted !== null) figures = words.thinkingTokens(counted);
   } else {
-    title = groupHeading(tools, thinking.length, words);
+    parts = groupHeading(tools, thinking.length, words);
+    title = parts.join(words.tallyGap);
     for (const tool of tools) {
       for (const write of tool.tool.run?.writes ?? []) {
         added += write.added ?? 0;
@@ -97,8 +102,8 @@ export function stretchSays(
     ? began === null ? "" : clockSays(steps, began, words)
     : only
       ? figures
-      : [steps < 2 ? "" : words.steps(steps), began !== null && ended !== null ? words.took(ended - began) : ""].filter(Boolean).join(" · ");
-  return { title, added, removed, steps, running, only, bare, figures, began, ended, time };
+      : [steps < 2 ? "" : words.steps(steps), began !== null && ended !== null ? words.took(ended - began) : ""].filter(Boolean).join(words.figureGap);
+  return { title, parts: parts ?? [title], added, removed, steps, running, only, bare, figures, began, ended, time };
 }
 
 /** How an agent one of a stretch's calls started stands. */
@@ -116,7 +121,7 @@ export interface StretchAgents {
 
 /** A running stretch's clock: its steps when more than one, and how long. */
 export function clockSays(steps: number, since: number, words: Words): string {
-  return [steps < 2 ? "" : words.steps(steps), words.took(Date.now() - since)].filter(Boolean).join(" · ");
+  return [steps < 2 ? "" : words.steps(steps), words.took(Date.now() - since)].filter(Boolean).join(words.figureGap);
 }
 
 /** Whether a stretch is nothing but thinking: one run of it, said by its

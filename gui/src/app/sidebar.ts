@@ -103,7 +103,7 @@ export class Sidebar {
     this.element.innerHTML = `
       <div class="sidebar-head">
         <button class="network-switch" type="button" aria-haspopup="menu">${mark()}<span class="network-name"></span>${glyph("chevron", 14)}</button>
-        <button class="icon-button sidebar-fold" type="button" aria-label="${escape(words.foldSidebar)}" title="${escape(words.foldSidebar)} · Ctrl+B">${glyph("sidebar", 18)}</button>
+        <button class="icon-button sidebar-fold" type="button" aria-label="${escape(words.foldSidebar)}" title="${escape(words.foldSidebar)} Ctrl+B">${glyph("sidebar", 18)}</button>
         <div class="network-pop" role="menu" aria-label="${escape(words.networks)}" hidden></div>
       </div>
       <button class="new-talk" type="button">${glyph("plus", 18)}<span>${escape(words.newTalk)}</span><kbd>Ctrl N</kbd></button>
@@ -234,7 +234,7 @@ export class Sidebar {
           const mine = talks.filter((r) => residentIn(world, group, r));
           const asking = mine.some((r) => r.now?.waiting_for_user);
           return `<section class="sidebar-account${shut ? " shut" : ""}">
-            <h2 class="side-account-title"><button class="side-account-fold" type="button" data-fold="group:${escape(key)}" aria-expanded="${!shut}" aria-label="${escape(words.groupOf(loginLabel(group.login)))}">${glyph("chevron", 14)}<span class="side-account-name">${escape(group.login.hubName)}<span class="side-account-sep">·</span>${escape(group.login.account)}</span>${shut && asking ? `<span class="mark mark-ask" aria-hidden="true"></span>` : ""}</button></h2>
+            <h2 class="side-account-title"><button class="side-account-fold" type="button" data-fold="group:${escape(key)}" aria-expanded="${!shut}" aria-label="${escape(words.groupOf(loginLabel(group.login)))}">${glyph("chevron", 14)}<span class="side-account-name">${escape(group.login.hubName)}<span class="side-account-sep"></span>${escape(group.login.account)}</span>${shut && asking ? `<span class="mark mark-ask" aria-hidden="true"></span>` : ""}</button></h2>
             ${shut ? "" : `<div class="side-account-body">${this.projects(group.towns, mine, place, now, facts, key)}${this.loose(mine, place, now, facts)}</div>`}
           </section>`;
         })
@@ -291,7 +291,7 @@ export class Sidebar {
         (network) => `<li class="network-row">
           <button class="network-pick${network.hub === shown ? " current" : ""}" type="button" role="menuitemradio" aria-checked="${network.hub === shown}" data-network="${escape(network.hub)}">
             <span class="network-dot${network.online ? " online" : ""}" aria-hidden="true"></span>
-            <span class="network-row-text"><span class="network-row-name">${escape(network.name)}</span><span class="network-row-note">${escape(network.admin ? words.admin : words.member)} · ${escape(words.machinesCount(network.machines))}</span></span>
+            <span class="network-row-text"><span class="network-row-name">${escape(network.name)}</span><span class="network-row-note">${escape(network.admin ? words.admin : words.member)} ${escape(words.machinesCount(network.machines))}</span></span>
             ${network.hub === shown ? glyph("check", 14) : ""}
           </button>
         </li>`,
@@ -429,8 +429,9 @@ function drawUpdate(bar: HTMLElement, offered: Offered | null, words: UpdateWord
         : stage.kind === "installing"
           ? words.barInstalling
           : words.bar;
-  const html = `<button class="update-place${stage.kind === "fetching" ? " coming" : ""}" type="button">${glyph("update", 18)}<span class="place-name">${escape(said)}</span><span class="update-version">${escape(offered.manifest.version)}</span>${
-    stage.kind === "fetching" ? `<span class="update-fill" style="width:${percent ?? 4}%"></span>` : ""
-  }</button>`;
+  // A row like the places above it; one drop of the accent on its mark says
+  // a version waits, and while it comes the row fills as far as it has come.
+  const fill = stage.kind === "fetching" ? `<span class="update-fill" style="width:${percent ?? 4}%"></span>` : "";
+  const html = `<button class="place update-place" type="button">${fill}<span class="update-mark">${glyph("update", 18)}</span><span class="place-name">${escape(said)}</span><span class="update-version">${escape(offered.manifest.version)}</span></button>`;
   if (bar.innerHTML !== html) bar.innerHTML = html;
 }

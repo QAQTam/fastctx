@@ -13,6 +13,7 @@ import type { ResidentNow } from "../world/world";
 import { layerOpened, type Layer } from "./back";
 import type { TalkActs } from "./talk-acts";
 import type { TalkMenuWords } from "./talk-menu-words";
+import { stepped } from "./menu-keys";
 
 export interface TalkMenuOptions {
   words: TalkMenuWords;
@@ -32,6 +33,8 @@ export interface MenuOpening {
   at?: { x: number; y: number };
   /** Renames it where it is shown. */
   rename(): void;
+  /** Finds in it, where its page is the one shown. */
+  find?: () => void;
   /** Once its deletion is asked for: a page of it goes. */
   deleted?: () => void;
 }
@@ -143,7 +146,7 @@ export class TalkMenu {
     const machine = r.about.machine;
     const away = !this.options.reachable(r);
     const head = narrow.matches
-      ? `<div class="talk-menu-head"><span class="talk-menu-host">${glyph(r.about.host.agent === "claude" || r.about.host.agent === "codex" ? r.about.host.agent : "agents", 18)}</span><span class="talk-menu-name">${escape(titleOf(r) ?? `${agentName(r.about.host.agent)} · ${machine}`)}</span></div>`
+      ? `<div class="talk-menu-head"><span class="talk-menu-host">${glyph(r.about.host.agent === "claude" || r.about.host.agent === "codex" ? r.about.host.agent : "agents", 18)}</span><span class="talk-menu-name">${escape(titleOf(r) ?? `${agentName(r.about.host.agent)} ${machine}`)}</span></div>`
       : "";
     const note = away ? `<p class="talk-menu-note">${escape(words.offline(machine))}</p>` : "";
     const item = (act: string, icon: Parameters<typeof glyph>[0], label: string, disabled: boolean, end = "") =>
@@ -161,6 +164,8 @@ export class TalkMenu {
     const body = r.removed
       ? [item("restore", "unarchive", words.restore, away), rule, item("delete", "trash", words.delete, false)]
       : [
+          // On a phone the head has no room for finding: it is here.
+          ...(narrow.matches && this.opened.how.find ? [item("find", "search", words.find, false), rule] : []),
           item("move", "move", words.move, away, `<span class="talk-menu-more">${glyph("chevron", 14)}</span>`),
           item("rename", "edit", words.rename, away),
           item("archive", "archive", words.archive, away),
@@ -220,6 +225,12 @@ export class TalkMenu {
         rename();
         return;
       }
+      case "find": {
+        const find = opened.how.find;
+        this.close();
+        find?.();
+        return;
+      }
       case "archive":
         this.close();
         this.options.acts.archive(r);
@@ -244,11 +255,10 @@ export class TalkMenu {
       this.close();
       return;
     }
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    event.preventDefault();
     const items = this.items();
-    const at = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = event.key === "ArrowDown" ? (at + 1) % items.length : (at - 1 + items.length) % items.length;
+    const next = stepped(items, document.activeElement, event.key);
+    if (next === null) return;
+    event.preventDefault();
     items[next]?.focus({ preventScroll: true });
   }
 }

@@ -7,14 +7,13 @@ use fastctx_hands::run::record;
 use fastctx_types::access::{Acting, Purpose};
 use fastctx_types::ipc::Failure;
 use fastctx_types::layout::WorldDir;
-use fastctx_types::remote::{RemoteCall, RemoteReply};
+use fastctx_types::remote::RemoteCall;
 use fastctx_types::residents::{Action, MessageKind, MessageLine};
 use fastctx_types::town::{CurrentTool, Looked, LookedUp, ResidentDetail, ResidentNow};
 use fastctx_types::{Address, JobId, ResidentId};
 
 use crate::Node;
 use crate::activity::entries;
-use crate::around::Heard;
 use crate::residents::OnRecord;
 
 // Twenty action lines provide the recent working context; the named file
@@ -36,25 +35,20 @@ pub async fn look(node: &Arc<Node>, acting: &Acting, ids: Vec<String>) -> Vec<Lo
         if node.works_here(acting).is_ok() && !crate::managed::is_managed(node) {
             match look_here(node, &id).await {
                 Ok((here, work)) => {
-                    found.extend(here);
+                    found.extend(crate::admission::seen::looked_here(node, acting, here));
                     jobs.extend(work);
                 }
                 Err(error) => unasked.push(format!("{} ({error})", node.machine())),
             }
         }
-        let machines = crate::around::reachable(node, acting, Purpose::Look);
-        for (name, heard) in crate::around::ask_each(machines, |_| RemoteCall::Look { id: id.clone() }).await {
-            match heard {
-                Heard::Answered(RemoteReply::Looked { looked, jobs: work }) => {
-                    found.extend(looked);
-                    jobs.extend(work);
-                }
-                Heard::Answered(_) => unasked.push(format!("{name} (answered something else)")),
-                Heard::Offline(_) => unasked.push(format!("{name} (offline)")),
-                Heard::NoAnswer(reason) => unasked.push(format!("{name} ({reason})")),
-            }
-        }
+        // Asked as each account whoever asks works for, which a machine
+        // shows its own conversations apart.
+        let machines = crate::around::reachable_each(node, acting, Purpose::Look);
+        let heard = crate::around::ask_each(machines, |_| RemoteCall::Look { id: id.clone() }).await;
         let mut one = LookedUp { id, found, unasked, jobs };
+        for answers in fastctx_net::around::answers::collect(heard) {
+            answers.look(&mut one);
+        }
         one.attach_jobs();
         looked.push(one);
     }
@@ -93,7 +87,7 @@ pub(crate) fn read_here(
             for resident in entries(&parent)? {
                 let path = resident.join("jobs").join(format!("{job}.json"));
                 if path.exists() {
-                    return Ok(Some(Looked::Job { record: Box::new(record::read(&path)?) }));
+                    return Ok(Some(Looked::Job { source: None, record: Box::new(record::read(&path)?) }));
                 }
             }
         }
@@ -121,6 +115,7 @@ pub(crate) fn read_here(
         jobs.sort_by_key(|job| job.started_at);
         Ok(Some(Looked::Resident(Box::new(ResidentDetail {
             resident: ResidentNow {
+                source: None,
                 last_action: actions.last().cloned(),
                 about: record.about.clone(),
                 town: record.town.clone(),

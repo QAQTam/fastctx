@@ -79,7 +79,7 @@ export class JournalPage {
     this.body.innerHTML = `
       <header class="journal-intro">
         ${about ? `<p class="project-lede">${escape(about.text)}</p><p class="project-facts">${escape(words.edited(this.writer(about.by), words.day(new Date(about.at))))}</p>` : ""}
-        <p class="project-facts">${escape(words.shown(first, last, view.total))}<span class="sep">·</span>${escape(words.writers(view.writers))}</p>
+        <p class="project-facts">${escape(words.shown(first, last, view.total))}<span class="sep"></span>${escape(words.writers(view.writers))}</p>
       </header>
       ${first > 1 ? `<button class="earlier" type="button">${escape(words.earlier)}</button>` : ""}
       <ol class="entries">${this.shown.map((entry) => this.entry(entry)).join("")}</ol>`;
@@ -87,7 +87,7 @@ export class JournalPage {
 
   private writer(writer: Writer): string {
     if (writer.kind === "user") return this.options.words.you;
-    if (writer.kind === "resident") return `${writer.address.resident} · ${writer.address.machine}`;
+    if (writer.kind === "resident") return `${writer.address.resident} ${writer.address.machine}`;
     if (writer.kind === "page") return this.options.words.aPage(writer.page.page);
     return agentName(writer.agent);
   }
@@ -103,7 +103,7 @@ export class JournalPage {
     const head = [`${words.day(at)} ${words.clock(at)}`, `${who} ${words.onMachine(stamp.machine)}`, model]
       .filter(Boolean)
       .map(escape)
-      .join(`<span class="sep">·</span>`);
+      .join(`<span class="sep"></span>`);
     const cites = stamp.cites.length
       ? `<p class="entry-note">${escape(words.cites)} ${stamp.cites.map((id) => `<code>${escape(id)}</code>`).join(" ")}</p>`
       : "";
@@ -117,7 +117,7 @@ export class JournalPage {
                 file.kept.kind === "on_machine" && (file.kind === "text" || file.kind === "image")
                   ? `<a href="${escape(fileLink(file.kept.location.machine, file.kept.location.path, file.kind === "text"))}">${escape(file.name)}</a>`
                   : escape(file.name)
-              } <span class="faint">${escape(file.kind)} · ${size(file.bytes)}${file.kept.kind === "on_machine" ? ` · ${escape(words.onMachine(file.kept.location.machine))}` : ""}</span></span>`,
+              } <span class="faint">${escape(file.kind)} ${size(file.bytes)}${file.kept.kind === "on_machine" ? ` ${escape(words.onMachine(file.kept.location.machine))}` : ""}</span></span>`,
           )
           .join("、")}</p>`
       : "";

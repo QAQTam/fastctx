@@ -111,8 +111,9 @@
 .machine-acts {
   margin: var(--space-2) 0 0;
   padding-left: calc(8px + 2px + var(--space-2) - var(--space-3));
-  opacity: 0;
-  transition: opacity var(--hover) ease;
+  --shown: 0;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease;
 }
 
 .machine-acts:focus-within {
@@ -121,7 +122,7 @@
 
 @media (hover: none) {
   .machine-acts {
-    opacity: 1;
+    --shown: 1;
   }
 }
 
@@ -252,63 +253,28 @@
   border-radius: var(--radius-l);
   background: var(--fill);
   text-align: left;
-  transition: background-color var(--hover) ease, transform var(--hover) ease, box-shadow var(--hover) ease;
+  translate: var(--slide) var(--lift);
+  transition: background-color var(--hover) ease, --lift var(--hover) ease, box-shadow var(--hover) ease;
 }
 
 .welcome-way:hover,
 .welcome-way:focus-visible {
   outline: 0;
   background: var(--fill-strong);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
-  transform: translateY(-2px);
+  --lift: -2px;
 }
 
 .welcome-way:active {
-  transform: translateY(0);
+  --lift: 0px;
 }
 
+/* Each way in, drawn in the film's hand (`../pen/sketch.css`). */
 .welcome-way-mark {
   width: 84px;
   height: auto;
   margin: 0 0 var(--space-3) -6px;
-  mix-blend-mode: var(--pen-blend);
 }
 
-.welcome-way-mark .ink-graphite {
-  color: var(--pen-graphite);
-  stroke: var(--pen-graphite);
-}
-
-.welcome-way-mark .ink-clay {
-  stroke: var(--pen-clay);
-}
-
-/* The stroke of each drawing is drawn in when the page opens. */
-.welcome-way-mark path,
-.welcome-way-mark circle {
-  stroke-dasharray: 200;
-  stroke-dashoffset: 200;
-  animation: way-draw 1.1s cubic-bezier(0.33, 1, 0.68, 1) 0.2s forwards;
-}
-
-.welcome-way-mark .ink-clay path,
-.welcome-way-mark .ink-clay circle {
-  animation-delay: 0.55s;
-}
-
-/* A drawing drawn in once stays drawn when what is around it is drawn
-   again. */
-.welcome-way-mark.drawn path,
-.welcome-way-mark.drawn circle {
-  animation: none;
-  stroke-dashoffset: 0;
-}
-
-@keyframes way-draw {
-  to {
-    stroke-dashoffset: 0;
-  }
-}
 
 .welcome-way-title {
   font-family: var(--font-emphasis);
@@ -398,7 +364,7 @@
 
 :root[data-reduced] .welcome-way,
 :root[data-reduced] .welcome-way:hover {
-  transform: none;
+  --lift: 0px;
 }
 
 :root[data-reduced] .welcome-way-mark path,
@@ -439,7 +405,7 @@
 
 .host-fact + .host-fact::before,
 .host-name + .host-fact::before {
-  content: "·";
+  content: "";
   margin-right: var(--space-2);
   color: var(--text-3);
 }
@@ -545,24 +511,25 @@
 }
 
 .home-dir > span::before {
-  content: "·";
+  content: "";
   margin-right: 6px;
 }
 
 .host-home .home-hide {
   margin-left: auto;
-  opacity: 0;
-  transition: opacity var(--hover) ease;
+  --shown: 0;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease;
 }
 
 .host-home:hover .home-hide,
 .home-hide:focus-visible {
-  opacity: 1;
+  --shown: 1;
 }
 
 @media (hover: none) {
   .host-home .home-hide {
-    opacity: 1;
+    --shown: 1;
   }
 }
 
@@ -776,7 +743,7 @@
   margin-bottom: var(--space-12);
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-m);
-  background: var(--code-bg, var(--hairline));
+  background: var(--surface-code);
   font-family: var(--font-code);
   font-variation-settings: var(--code-axes);
   font-size: var(--size-small);
@@ -828,7 +795,7 @@ a.details-job {
 /* Each page a sheet of paper on the desk: its own white, a soft edge. */
 .reader-pdf .world-pdf-page {
   border-radius: var(--radius-s);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-page);
 }
 
 .reader-pdf .world-pdf-pages {
@@ -948,7 +915,9 @@ a.details-job {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  animation: removal-rise 0.4s cubic-bezier(0.33, 1, 0.68, 1);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  animation: removal-rise var(--settle) var(--ease-out);
 }
 
 /* Drawn again for a press on it, it stays where it rose to. */
@@ -1300,7 +1269,7 @@ a.details-job {
 }
 
 .welcome-done-who {
-  font-family: var(--font-body, inherit);
+  font-family: var(--font-reading);
   letter-spacing: 0.02em;
 }
 

@@ -11,6 +11,7 @@
 import { layerOpened } from "../app/back";
 import { escape } from "./prose";
 import type { CommandArguments, CommandOffer, ControlKind, ModelOffer, Offers } from "../world/control";
+import { composing } from "../typing";
 
 export interface CommandWords {
   world: string;
@@ -147,7 +148,7 @@ export class Menu<T> {
       this.draw("");
       return true;
     }
-    if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.isComposing) {
+    if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !composing(event)) {
       const item = this.items[this.chosen];
       if (!item) return false;
       this.pick(item);
@@ -188,7 +189,7 @@ export function usageOf(command: MenuCommand): string {
 }
 
 export function modelRow(model: ModelOffer, current: string | null, words: CommandWords): string {
-  return `<span class="menu-name">${escape(model.name ?? model.id)}${model.id === current ? `<span class="menu-current"> · ${escape(words.current)}</span>` : ""}</span><span class="menu-what">${escape(model.description ?? "")}</span>${
+  return `<span class="menu-name">${escape(model.name ?? model.id)}${model.id === current ? `<span class="menu-current"> ${escape(words.current)}</span>` : ""}</span><span class="menu-what">${escape(model.description ?? "")}</span>${
     model.efforts.length ? `<span class="menu-source">${escape(words.effort)}：${model.efforts.map(escape).join(" / ")}</span>` : ""
   }`;
 }

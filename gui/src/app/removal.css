@@ -117,7 +117,9 @@
   align-items: flex-start;
   gap: var(--space-3);
   min-height: 0;
-  animation: removal-rise 0.28s cubic-bezier(0.33, 1, 0.68, 1);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  animation: removal-rise var(--settle) var(--ease-out);
 }
 
 /* Drawn again for a press within the step, it stays where it rose to. */
@@ -127,8 +129,8 @@
 
 @keyframes removal-rise {
   from {
-    opacity: 0;
-    transform: translateY(6px);
+    --shown: 0;
+    --lift: 6px;
   }
 }
 
@@ -224,27 +226,19 @@
   height: 16px;
 }
 
+/* A step's mark is drawn in the film's hand, in the colour of how it went. */
 .removal-mark svg {
   width: 16px;
   height: 16px;
-  fill: none;
-  stroke: var(--text-3);
-  stroke-width: 2;
-  stroke-linecap: round;
+  color: var(--text-3);
 }
 
 .removal-list li[data-result="done"] .removal-mark svg {
-  stroke: var(--pen-graphite);
+  color: var(--pen-graphite);
 }
 
 .removal-list li[data-result="failed"] .removal-mark svg {
-  stroke: var(--wrong);
-}
-
-.removal-list li[data-result] .removal-mark path {
-  stroke-dasharray: 30;
-  stroke-dashoffset: 30;
-  animation: way-draw 0.45s cubic-bezier(0.33, 1, 0.68, 1) forwards;
+  color: var(--wrong);
 }
 
 .removal-list li[data-result="failed"] .removal-what {
@@ -317,7 +311,8 @@
   background: var(--wrong);
   color: var(--bg);
   font-size: var(--size-ui);
-  transition: background-color var(--hover) ease, transform var(--hover) ease;
+  scale: var(--press);
+  transition: background-color var(--hover) ease, --press var(--settle) var(--spring);
 }
 
 .removal-button:hover:not(:disabled) {
@@ -325,14 +320,21 @@
 }
 
 .removal-button.armed {
-  animation: removal-armed 1.2s ease-in-out infinite;
+  translate: 0 var(--lift);
+  animation: removal-armed var(--armed) ease-in-out infinite;
 }
 
 @keyframes removal-armed {
   50% {
-    transform: translateY(-1px);
+    --lift: -1px;
     box-shadow: 0 4px 14px color-mix(in srgb, var(--wrong) 40%, transparent);
   }
+}
+
+.removal-button:active:not(:disabled) {
+  --press: 0.97;
+  transition-duration: var(--hover), var(--quick);
+  transition-timing-function: ease, var(--ease-out);
 }
 
 .removal-button:disabled {

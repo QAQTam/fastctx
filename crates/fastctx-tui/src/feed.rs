@@ -123,7 +123,7 @@ async fn here_agents(world: &World, machine: MachineName) -> Result<fastctx_type
         .machines
         .into_iter()
         .find_map(|answer| match answer {
-            fastctx_types::agents::MachineAgents::Answered { reply } if reply.machine == machine => Some(reply),
+            fastctx_types::agents::MachineAgents::Answered { reply, .. } if reply.machine == machine => Some(reply),
             _ => None,
         })
         .ok_or_else(|| format!("{machine} did not answer for its agents"))
@@ -332,7 +332,7 @@ async fn work(world: &World, job: Job) -> Result<Done, fastctx_client::Error> {
         Job::ServerLine { hub, account, hours } => {
             let expires = Timestamp::now() + jiff::SignedDuration::from_hours(i64::from(hours));
             Done::ServerLine {
-                text: world.server_command(Some(hub), account, None, expires, false, None, None, false).await?,
+                text: world.server_command(Some(hub), account, None, expires, false, None, None, false, false).await?,
                 expires,
             }
         }

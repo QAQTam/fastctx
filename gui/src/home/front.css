@@ -314,7 +314,8 @@
   margin: -11px 0 0 -11px;
   border-radius: var(--radius-full);
   color: var(--text-2);
-  transition: color var(--hover) ease, transform var(--hover) ease;
+  scale: var(--grow);
+  transition: color var(--hover) ease, --grow var(--hover) ease;
 }
 
 .front-mark svg {
@@ -329,7 +330,7 @@
 .front-mark:focus-visible {
   outline: 0;
   color: var(--accent);
-  transform: scale(1.35);
+  --grow: 1.35;
 }
 
 .front-mark.failed.lit {
@@ -457,7 +458,7 @@
   box-shadow: inset 0 0 0 1.8px var(--accent);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: pulse 1.6s ease-in-out infinite;
+  animation: pulse var(--breath) ease-in-out infinite;
 }
 
 .front-pulse.troubled {
@@ -599,25 +600,27 @@
 .front-board.arriving .front-result,
 .front-board.arriving .front-rows > li,
 .front-board.arriving .front-jobs > li {
-  animation: front-rise 0.7s cubic-bezier(0.2, 0, 0, 1) both;
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  animation: front-rise var(--slow) var(--fold-easing) both;
 }
 
 .front-board.arriving li:nth-child(2) {
-  animation-delay: 60ms;
+  animation-delay: var(--stagger);
 }
 
 .front-board.arriving li:nth-child(3) {
-  animation-delay: 120ms;
+  animation-delay: calc(var(--stagger) * 2);
 }
 
 .front-board.arriving li:nth-child(n + 4) {
-  animation-delay: 180ms;
+  animation-delay: calc(var(--stagger) * 3);
 }
 
 @keyframes front-rise {
   from {
-    opacity: 0;
-    transform: translateY(8px);
+    --shown: 0;
+    --lift: 8px;
   }
 }
 

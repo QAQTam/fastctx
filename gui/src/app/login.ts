@@ -10,6 +10,8 @@
 // much to become one. Once in, the page only confirms it; on a World just
 // made another device can be added at once.
 
+import type { Point } from "../pen/shapes";
+import { Sketch } from "../pen/sketch";
 import { escape } from "../conversation/prose";
 import type { KeptNow, LoggedIn, NameProblem, Setup } from "../world/bridge";
 import type { Login, TokenPeek } from "../world/accounts";
@@ -24,6 +26,7 @@ import { RemoteWorld, type RemoteSeams } from "./remote-world";
 import type { Page } from "./shell";
 import { effect } from "./signals";
 import type { Store } from "./store";
+import { composing } from "../typing";
 
 /** An address of this computer another might reach it at. */
 export interface HereAddress {
@@ -172,7 +175,7 @@ export class LoginPage implements Page {
     // A code is one line however it wraps: Enter goes on.
     this.element.addEventListener("keydown", (event) => {
       const field = event.target as HTMLElement;
-      if (event.key !== "Enter" || event.shiftKey || event.isComposing || !field.matches("[name=code]")) return;
+      if (event.key !== "Enter" || event.shiftKey || composing(event) || !field.matches("[name=code]")) return;
       event.preventDefault();
       field.closest("form")?.requestSubmit();
     });
@@ -507,10 +510,13 @@ export class LoginPage implements Page {
   private wanting(): { kept: string } {
     const { words } = this.options;
     const kept = this.done?.kept;
-    const said =
-      !kept || this.options.device
-        ? ""
-        : kept.kind === "command"
+    const said = this.options.device
+      ? ""
+      : this.done?.unkept
+        ? words.kept.declined
+        : !kept
+          ? ""
+          : kept.kind === "command"
           ? "command"
           : kept.kind === "declined" || kept.kind === "unsupported"
             ? words.kept[kept.kind]
@@ -529,10 +535,10 @@ export class LoginPage implements Page {
       wanting.kept === "command" && kept?.kind === "command"
         ? `<div class="welcome-slip"><span>${escape(words.keptCommand)}</span><pre class="welcome-command mono">${escape(kept.command)}</pre></div>`
         : wanting.kept
-          ? `<div class="welcome-slip"><span>${escape(wanting.kept)}</span>${this.options.keep && kept?.kind === "declined" ? `<button class="text-button keep-now" type="button">${escape(words.keepGo)}</button>` : ""}</div>`
+          ? `<div class="welcome-slip"><span title="${escape(done.unkept ?? "")}">${escape(wanting.kept)}</span>${this.options.keep && (kept?.kind === "declined" || done.unkept) ? `<button class="text-button keep-now" type="button">${escape(words.keepGo)}</button>` : ""}</div>`
           : "",
     ].join("");
-    const who = [done.account, this.options.device ? "" : done.name].filter(Boolean).join(" · ");
+    const who = [done.account, this.options.device ? "" : done.name].filter(Boolean).join(" ");
     // A picture, not a place to work: the drawing is shown, never pointed
     // at or pressed (`world-gui.md`, 登录或新建成功之后).
     this.body.innerHTML = `
@@ -574,13 +580,60 @@ export class LoginPage implements Page {
   }
 
   /** Says what went wrong under the form; the original words of a problem
-   *  stay a hover away. */
+   *  stay a hover away, or a touch where there is no pointer to rest. */
   private note(text: string, detail = ""): void {
     const note = this.body.querySelector<HTMLElement>(".sheet-note");
     if (!note) return;
     note.textContent = text;
     note.title = detail;
+    note.dataset.detail = detail && detail !== text ? detail : "";
     note.hidden = !text;
+  }
+
+  /** The original words of the problem under the form, shown or put away. */
+  private toggleDetail(note: HTMLElement): void {
+    const detail = note.dataset.detail;
+    if (!detail) return;
+    const shown = note.querySelector(".sheet-note-detail");
+    if (shown) return shown.remove();
+    const line = document.createElement("span");
+    line.className = "sheet-note-detail mono";
+    line.textContent = detail;
+    note.append(line);
+  }
+
+  /** This device's logins now, as `hub/account`, the store asked first. */
+  private async loginsNow(): Promise<Set<string>> {
+    await this.options.store.refresh();
+    // Every network this device is in: the one shown may not be the one joined.
+    return new Set(loginsOf(this.options.store.whole.peek()?.accounts).map((login) => `${login.hub}/${login.account}`));
+  }
+
+  /** After an error, whether this device is in all the same: an answer
+   *  lost on its way back, or a step after the hub let it in that failed,
+   *  leaves a login here that was not here `before`, to `account` where it
+   *  was typed. That login, as a login's result; none where there is no
+   *  such login. */
+  private async inAnyway(before: Set<string>, account: string | null): Promise<LoggedIn | null> {
+    await this.options.store.refresh();
+    const world = this.options.store.whole.peek();
+    const login = loginsOf(world?.accounts).find(
+      (one) => !before.has(`${one.hub}/${one.account}`) && (!account || one.account === account),
+    );
+    return login && world ? { hub: login.hubName, name: world.accounts.machine, account: login.account } : null;
+  }
+
+  /** In: where this device arrived, or for a managed machine its one page.
+   *  The page that says so failing to draw leaves the person in all the
+   *  same, on the World's own pages. */
+  private async landed(managed: boolean): Promise<void> {
+    try {
+      await this.options.store.refresh();
+      if (managed) return this.options.enter();
+      await this.arrived();
+    } catch {
+      this.options.enter();
+    }
   }
 
   private problem(error: unknown): void {
@@ -598,6 +651,8 @@ export class LoginPage implements Page {
       else this.chosen.add(address);
       return this.drawAddresses();
     }
+    const note = target.closest<HTMLElement>(".sheet-note");
+    if (note) return this.toggleDetail(note);
     if (target.closest(".enter")) return this.options.enter();
     if (target.closest(".remove-first")) return this.options.remove?.();
     if (target.closest(".invite-next") && this.done && this.options.invite) {
@@ -611,18 +666,22 @@ export class LoginPage implements Page {
       const named = this.body.querySelector<HTMLInputElement>("[name=name]");
       if (named && !named.reportValidity()) return;
       this.busy = true;
+      let token: string | null = null;
+      let before = new Set<string>();
       try {
-        const token = await this.options.scan();
+        token = await this.options.scan();
         if (!token) return;
+        before = await this.loginsNow();
         this.done = await this.options.loginToken(token, named?.value.trim() || null);
-        this.created = false;
-        await this.options.store.refresh();
-        await this.arrived();
       } catch (error) {
-        this.problem(error);
+        const inAnyway = token ? await this.inAnyway(before, null) : null;
+        if (!inAnyway) return this.problem(error);
+        this.done = inAnyway;
       } finally {
         this.busy = false;
       }
+      this.created = false;
+      await this.landed(false);
       return;
     }
     if (target.closest(".place-now") && this.options.place) {
@@ -633,7 +692,7 @@ export class LoginPage implements Page {
       this.busy = true;
       try {
         const kept = await this.options.keep();
-        this.done = { ...this.done, kept };
+        this.done = { ...this.done, kept, unkept: null };
         this.draw();
       } catch (error) {
         this.problem(error);
@@ -739,45 +798,122 @@ export class LoginPage implements Page {
     go.disabled = true;
     go.textContent = creating ? words.creating : words.going;
     this.note("");
+    const typed = this.step === "confirm" ? null : (field("account")?.value.trim() ?? null);
+    const before = await this.loginsNow();
     try {
       this.done = await act();
-      this.created = creating;
-      this.busy = false;
-      await this.options.store.refresh();
-      // A managed machine has nothing more to show here: its one page says
-      // what it is.
-      if (managed) return this.options.enter();
-      await this.arrived();
     } catch (error) {
-      this.busy = false;
-      go.disabled = false;
-      go.textContent = label;
-      this.problem(error);
+      const inAnyway = await this.inAnyway(before, typed);
+      if (!inAnyway) {
+        this.busy = false;
+        go.disabled = false;
+        go.textContent = label;
+        return this.problem(error);
+      }
+      this.done = inAnyway;
     }
+    this.created = creating;
+    this.busy = false;
+    // A managed machine has nothing more to show here: its one page says
+    // what it is.
+    await this.landed(managed);
   }
 }
 
-/** The World's mark, large, drawn with the marker: rings round a knot. */
+/** The World's mark, large: machines as rings drawn round a knot of clay,
+ *  each joined to it by a fine line that stops at its ring. */
 function heroMark(): string {
-  return `<svg class="welcome-mark" viewBox="0 0 120 96" aria-hidden="true"><g filter="url(#pen-marker)" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"><circle cx="60" cy="50" r="7"/><circle cx="22" cy="24" r="14"/><circle cx="98" cy="27" r="14"/><circle cx="58" cy="82" r="11"/><path d="M34 31 L53 45M86 34 L67 46M59 57 L58 70"/></g></svg>`;
+  const sheet = new Sketch("welcome-hero");
+  const knot: Point = [60, 50];
+  const machines: [Point, number][] = [
+    [[24, 25], 12],
+    [[96, 28], 12],
+    [[58, 82], 10],
+  ];
+  for (const [at, radius] of machines) {
+    const dx = at[0] - knot[0];
+    const dy = at[1] - knot[1];
+    const length = Math.hypot(dx, dy);
+    sheet.rule([knot[0] + (dx / length) * 7, knot[1] + (dy / length) * 7], [at[0] - (dx / length) * (radius + 3), at[1] - (dy / length) * (radius + 3)], 1.4, "graphite");
+    sheet.ring(at, radius, 1.8, "graphite");
+  }
+  return sheet.blot(knot, 5, "clay").svg(120, 96, "welcome-mark");
 }
 
-/** Joining: a ring drawn towards a knot that is there already. */
+/** Joining: a computer coming towards a knot that is there already. */
 function joinMark(): string {
-  return `<svg class="welcome-way-mark" viewBox="0 0 96 64" aria-hidden="true"><g filter="url(#pen-marker)" fill="none" stroke-linecap="round"><g class="ink-graphite" stroke-width="3"><circle cx="66" cy="32" r="7"/><circle cx="66" cy="32" r="2" fill="currentColor"/></g><g class="ink-clay" stroke-width="3"><circle cx="20" cy="32" r="11"/><path d="M34 32 C42 28 48 28 55 31"/><path d="M50 26 L56 31 L50 36"/></g></g></svg>`;
+  const sheet = new Sketch("welcome-join").blot([68, 32], 5, "graphite").ring([68, 32], 11, 1.2, "graphite").blot([20, 32], 8, "clay");
+  sheet.dashed([32, 32], [52, 31], 1.6, "clay", 4, 4);
+  return sheet
+    .stroke(
+      [
+        [48, 26],
+        [54, 31],
+        [48, 36],
+      ],
+      1.8,
+      "clay",
+      0.2,
+    )
+    .svg(96, 64, "welcome-way-mark");
 }
 
-/** Creating: a knot with its first ring round it, the second being drawn. */
+/** Creating: a knot with its first machine joined, the next being drawn. */
 function createMark(): string {
-  return `<svg class="welcome-way-mark" viewBox="0 0 96 64" aria-hidden="true"><g filter="url(#pen-marker)" fill="none" stroke-linecap="round"><g class="ink-graphite" stroke-width="3"><circle cx="48" cy="34" r="6"/><circle cx="20" cy="18" r="10"/><path d="M28 23 L43 31"/></g><g class="ink-clay" stroke-width="3"><path d="M70 36 A11 11 0 1 1 82 50"/><path d="M54 37 L62 40"/></g></g></svg>`;
+  return new Sketch("welcome-create")
+    .rule([42, 31], [29, 23], 1.4, "graphite")
+    .ring([22, 19], 8, 1.6, "graphite")
+    .blot([46, 34], 5, "clay")
+    .arc([74, 40], 10, Math.PI * 1.05, Math.PI * 2.6, 1.8, "clay")
+    .rule([52, 36], [61, 39], 1.4, "clay")
+    .svg(96, 64, "welcome-way-mark");
 }
 
-/** Scanning: the four corners of a code's frame, drawn with the marker. */
+/** Scanning: the four corners of a code's frame, the line that reads it. */
 function scanMark(): string {
-  return `<svg class="welcome-way-mark" viewBox="0 0 64 64" aria-hidden="true"><g filter="url(#pen-marker)" fill="none" stroke-linecap="round" stroke-width="3"><g class="ink-graphite"><path d="M10 22 V10 H22M42 10 H54 V22M54 42 V54 H42M22 54 H10 V42"/></g><g class="ink-clay"><path d="M20 32 H44"/></g></g></svg>`;
+  const sheet = new Sketch("welcome-scan");
+  const corners: [Point, Point, Point][] = [
+    [
+      [10, 22],
+      [10, 10],
+      [22, 10],
+    ],
+    [
+      [42, 10],
+      [54, 10],
+      [54, 22],
+    ],
+    [
+      [54, 42],
+      [54, 54],
+      [42, 54],
+    ],
+    [
+      [22, 54],
+      [10, 54],
+      [10, 42],
+    ],
+  ];
+  for (const corner of corners) sheet.stroke(corner, 2, "graphite", 0.15);
+  return sheet.rule([18, 32], [46, 32], 2, "clay").svg(64, 64, "welcome-way-mark");
 }
 
 /** On a server: a box with a knot inside it, the line reaching it drawn. */
 function remoteMark(): string {
-  return `<svg class="welcome-way-mark" viewBox="0 0 96 64" aria-hidden="true"><g filter="url(#pen-marker)" fill="none" stroke-linecap="round"><g class="ink-graphite" stroke-width="3"><rect x="52" y="16" width="30" height="34" rx="4"/><circle cx="67" cy="33" r="5"/></g><g class="ink-clay" stroke-width="3"><circle cx="18" cy="33" r="9"/><path d="M29 33 C36 30 42 30 47 32"/></g></g></svg>`;
+  return new Sketch("welcome-remote")
+    .wash(52, 14, 32, 36, "box", 5)
+    .blot([68, 32], 4.5, "graphite")
+    .blot([18, 33], 7, "clay")
+    .stroke(
+      [
+        [28, 33],
+        [36, 31],
+        [44, 31],
+        [49, 32],
+      ],
+      1.6,
+      "clay",
+      0.1,
+    )
+    .svg(96, 64, "welcome-way-mark");
 }

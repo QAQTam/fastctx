@@ -185,6 +185,19 @@ pub struct Report {
     /// It runs the hub of the network it tells.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hub_here: bool,
+    /// How fast, in bytes a second, its last download from GitHub went;
+    /// none before it made one. The hub asks the fastest to fetch for the
+    /// network first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_speed: Option<u64>,
+    /// The package of its World program for its system, as releases name
+    /// it: the hub brings in a new release's packages for the systems of
+    /// its network before they are asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Reports a fetch's progress and stops it when the hub cancels it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub package_progress: bool,
 }
 
 /// The versions a machine of the network runs; for one away, what it ran
@@ -283,6 +296,16 @@ pub struct Fetch {
     pub version: String,
     pub target: String,
     pub package: Package,
+    /// The hub accepts progress and can cancel this request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub progress: bool,
+}
+
+/// Bytes received while preparing a package, before its final answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageProgress {
+    pub received: u64,
+    pub total: Option<u64>,
 }
 
 /// A device's own choices about updates.

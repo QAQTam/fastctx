@@ -283,7 +283,8 @@ pub enum Call {
         change: crate::agents::HomeChange,
     },
     /// What the nodes of one machine, or of every machine the asker may
-    /// use, keep of their agents' logins (`logins`); no process starts.
+    /// use, keep of their agents' logins (`logins`); no process starts but
+    /// to ask again a login whose sign-in changed since it was asked.
     AgentLogins {
         machine: Option<MachineName>,
     },
@@ -593,6 +594,9 @@ pub enum Call {
         /// The line is for Windows computers, not Linux servers.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         windows: bool,
+        /// The line is for Macs, not Linux servers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mac: bool,
     },
     /// Moving the hub named `hub`, or the one hub, as `account`, its super
     /// administrator (`crate::hub_move`).

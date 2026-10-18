@@ -12,66 +12,172 @@
 .conversation-page > .page-head {
   position: relative;
   z-index: 2;
-  box-shadow: 0 1px 0 transparent;
-  transition: box-shadow var(--hover) ease;
 }
 
-.conversation-page.scrolled > .page-head {
-  box-shadow: 0 1px 0 var(--hairline);
+/* What scrolls up to the head fades into it rather than being cut, as it
+   fades out beneath the composer; the fade grows in once the conversation
+   has left its top. A shade over the words, not a mask on them: masked,
+   the whole conversation would lose its subpixel smoothing on Windows. */
+.conversation-page > .page-head::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: var(--edge);
+  background: linear-gradient(to bottom, var(--bg), transparent);
+  pointer-events: none;
+  transition: --edge var(--hover) ease;
+}
+
+.conversation-page.scrolled > .page-head::after {
+  --edge: var(--space-6);
 }
 
 .talk-scroller {
   flex: 1;
 }
 
+/* A conversation's head, one line by design: the agent's seal, which says
+   who it is; the title, in the display face; where it lives, quietly, on a
+   computer; then, at the right, what it is pointed at and the tools. That it
+   works is the conversation's own line and the composer's to say; only
+   trouble with the line or the conversation is said here, in words. */
 .who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
   min-width: 0;
 }
 
+.who-seal {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--fill-strong);
+  color: var(--text-2);
+  transition: color var(--hover) ease;
+}
+
+button.who-seal {
+  cursor: pointer;
+}
+
+button.who-seal:hover {
+  color: var(--text-strong);
+}
+
+.who-seal.gone {
+  opacity: 0.55;
+}
+
 .who-name {
+  min-width: 0;
   margin: 0;
-  font-family: var(--font-emphasis);
+  font-family: var(--font-display);
   font-weight: 400;
-  font-size: var(--size-h2);
-  line-height: var(--leading-heading);
+  font-size: var(--size-head);
+  line-height: 1.25;
+  letter-spacing: 0.02em;
   color: var(--text-strong);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.who-at {
-  font-family: var(--font-reading);
-  color: var(--text-2);
-}
-
-.who-state {
-  display: flex;
+.who-home {
+  flex: none;
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 5px;
   font-size: var(--size-small);
   color: var(--text-3);
   white-space: nowrap;
-  overflow: hidden;
 }
 
-.who-state span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.who-state.working {
-  color: var(--text-2);
-}
-
-.who-state.gone {
-  color: var(--caution);
-}
-
-.who-state .pulse {
+.who-home .glyph {
   flex: none;
-  width: 6px;
-  height: 6px;
+}
+
+.who-state {
+  flex: none;
+  font-size: var(--size-small);
+  color: var(--caution);
+  white-space: nowrap;
+}
+
+.who-state[hidden] {
+  display: none;
+}
+
+/* What the conversation is pointed at, in the head's line before its tools,
+   its panel opening below it at the right. */
+.page-head .focus-strip {
+  z-index: 5;
+  margin-right: var(--space-2);
+  padding: 0;
+}
+
+.page-head .focus-chip {
+  margin-left: 0;
+}
+
+/* Its panel hangs from the chip's right edge, as wide as its own content
+   wants, not as narrow as the chip; on a phone it is a sheet from below
+   (`focus-panel.css`). */
+@media (min-width: 761px) {
+  .page-head .focus-pop {
+    top: calc(100% + 6px);
+    right: 0;
+    left: auto;
+    width: min(440px, calc(100vw - 2 * var(--space-4)));
+  }
+}
+
+.focus-count {
+  display: none;
+}
+
+/* On a phone the line keeps the seal, the title, the machines as a mark and
+   a count, and the "⋯"; where it lives, finding and the details are a
+   press of the seal or the "⋯" away. */
+@media (max-width: 760px) {
+  .who {
+    gap: 10px;
+  }
+
+  .who-seal {
+    width: 28px;
+    height: 28px;
+  }
+
+  .who-home {
+    display: none;
+  }
+
+  .page-head .focus-strip {
+    margin-right: 0;
+  }
+
+  .page-head .focus-chip :is(.talk-chip-name, .talk-chip-sub, .focus-more),
+  .page-head .focus-chip > .glyph:last-child {
+    display: none;
+  }
+
+  .page-head .focus-count {
+    display: inline;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .page-head-actions:has(.talk-menu-toggle) :is(.find-toggle, .details-toggle) {
+    display: none;
+  }
 }
 
 /* The composer: a raised sheet resting on the foot of the page. */
@@ -100,9 +206,11 @@
   border-radius: 50%;
   background: var(--bg-elevated);
   color: var(--text-2);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  box-shadow: var(--shadow-float);
   cursor: pointer;
   transform: translateX(-50%);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
   animation: to-latest-in var(--enter) ease-out;
   transition: color var(--hover) ease;
 }
@@ -117,7 +225,10 @@
 }
 
 @keyframes to-latest-in {
-  from { opacity: 0; transform: translate(-50%, 6px); }
+  from {
+    --shown: 0;
+    --lift: 6px;
+  }
 }
 
 /* Back to each step's context, after one of its rows was opened in the
@@ -133,7 +244,10 @@
   padding: 2px;
   border-radius: var(--radius-full);
   background: var(--bg-elevated);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  box-shadow: var(--shadow-float);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  scale: var(--grow);
   animation: sheet-in var(--enter) var(--fold-easing) both;
 }
 
@@ -196,12 +310,7 @@
     width: 38px;
     height: 38px;
     transform: none;
-    animation-name: to-latest-in-side;
   }
-}
-
-@keyframes to-latest-in-side {
-  from { opacity: 0; transform: translateY(6px); }
 }
 
 /* The conversation fades out beneath the composer rather than being cut. */
@@ -222,7 +331,7 @@
   padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
   border-radius: var(--radius-l);
   background: var(--bg-elevated);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+  box-shadow: var(--shadow-sheet);
 }
 
 /* Archived or deleted: a quiet slip where the composer was, saying so, and
@@ -407,6 +516,9 @@
   border-radius: var(--radius-m);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  scale: var(--grow);
   animation: sheet-in var(--enter) var(--fold-easing) both;
 }
 
@@ -481,7 +593,8 @@
   place-items: center;
   background: var(--accent);
   color: var(--bg);
-  transition: background-color var(--hover) ease, opacity var(--hover) ease, transform var(--hover) ease;
+  scale: var(--press);
+  transition: background-color var(--hover) ease, --press var(--settle) var(--spring);
 }
 
 .composer-action:hover:not(:disabled) {
@@ -489,7 +602,9 @@
 }
 
 .composer-action:active:not(:disabled) {
-  transform: scale(0.94);
+  --press: 0.94;
+  transition-duration: var(--hover), var(--quick);
+  transition-timing-function: ease, var(--ease-out);
 }
 
 .composer-action:disabled {
@@ -504,12 +619,13 @@
 
 /* Asked to stop: it breathes until the turn has ended. */
 .composer-action.stopping {
-  animation: stopping 1.2s ease-in-out infinite alternate;
+  opacity: var(--shown);
+  animation: stopping var(--armed) ease-in-out infinite alternate;
 }
 
 @keyframes stopping {
   to {
-    opacity: 0.45;
+    --shown: 0.45;
   }
 }
 
@@ -538,6 +654,9 @@
   border-radius: var(--radius-l);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  scale: var(--grow);
   animation: sheet-in var(--enter) var(--fold-easing) both;
 }
 
@@ -732,15 +851,6 @@
   }
 }
 
-.who-state.waiting .who-first {
-  color: var(--accent);
-}
-
-.who-state .ask-mark {
-  flex: none;
-  width: 7px;
-  height: 7px;
-}
 
 /* What is attached to the words: a row of small cards above them, each
    with its picture or its kind, its name and how it is going. */
@@ -1043,49 +1153,6 @@ button.composer-context[hidden] {
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
-}
-
-/* The context in its parts: one ink, a lighter shade for each part. */
-.usage-stack {
-  display: flex;
-  height: 4px;
-}
-
-.usage-stack > span {
-  flex: none;
-  border-radius: 0;
-  background: color-mix(in oklab, var(--accent) var(--tone), var(--hairline));
-}
-
-.usage-parts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: var(--space-3);
-  row-gap: 2px;
-  margin-top: 2px;
-  font-size: var(--size-small);
-  color: var(--text-2);
-}
-
-.usage-part {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  column-gap: var(--space-1);
-  font-variant-numeric: tabular-nums;
-}
-
-.usage-part > span:first-of-type {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.usage-part > i {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-full);
-  background: color-mix(in oklab, var(--accent) var(--tone), var(--hairline));
 }
 
 /* A conversation's title, renamed in place. */

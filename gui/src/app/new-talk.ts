@@ -47,7 +47,7 @@ import type { WorldNow } from "../world/bridge";
 import type { Offers } from "../world/control";
 import type { Address } from "../world/events";
 import { accountOf, homeChoice, homeLabel, homesOf, installed, listed, loggedOut, type HomeWords } from "./agent-homes";
-import { agentPicker, FILTER_PAST, narrowPicker, type PickerMachine, type PickerRow } from "./agent-picker";
+import { agentKinds, agentPicker, FILTER_PAST, narrowPicker, type PickerKind, type PickerMachine, type PickerRow } from "./agent-picker";
 import type { ConsentHome } from "./claude-consent";
 import {
   assistantsOf,
@@ -69,6 +69,7 @@ import { DraftFit } from "../conversation/fit-draft";
 import { Steady } from "./steady";
 import type { Store } from "./store";
 import type { FocusWords, NewTalkWords } from "./words";
+import { composing } from "../typing";
 
 export interface Begun {
   agent: string;
@@ -334,7 +335,7 @@ export class NewTalk {
       this.drawStart();
     });
     this.input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !coarse()) {
+      if (event.key === "Enter" && !event.shiftKey && !composing(event) && !coarse()) {
         event.preventDefault();
         void this.submit();
       }
@@ -347,7 +348,7 @@ export class NewTalk {
   get title(): string {
     const { words, store } = this.options;
     const town = this.options.town ? store.world.peek()?.towns.find((one) => one.town === this.options.town) : null;
-    return town ? `${words.title} · ${town.record.name}` : words.title;
+    return town ? `${words.title} ${town.record.name}` : words.title;
   }
 
   /** The page is shown again: what each machine has is asked again, as a
@@ -392,6 +393,12 @@ export class NewTalk {
   private popSteady: Steady | null = null;
   /** What narrows the table of agents, while it is open. */
   private narrowed = "";
+  /** Which agents the picker shows, and the people opened or closed in it. */
+  private kind: PickerKind = "all";
+  private readonly pickerFolds = new Map<string, boolean>();
+  /** The reader opened a person or chose an agent: the table changes within
+   *  the panel's size, scrolling, and the panel does not grow for it. */
+  private keepSize = false;
 
   private fit(): void {
     this.fitter ??= new DraftFit(this.input);
@@ -679,7 +686,7 @@ export class NewTalk {
 
   /** The agents the user may begin with: the machines as the user holds
    *  them, a row a login, in one table (`./agent-picker`). */
-  private picker(lines: Line[]): string {
+  private picker(lines: Line[]): { machines: PickerMachine[]; html: string } {
     const { words } = this.options;
     const now = new Date();
     const machines: PickerMachine[] = lines.map((line) => {
@@ -688,23 +695,40 @@ export class NewTalk {
         line.hold === "assist"
           ? [words.assistFrom(line.owner ?? ""), assistant?.until ? words.assistUntil(new Date(assistant.until), now) : ""]
           : [line.here ? words.here : "", line.owner && line.hold !== "mine" ? words.ownedBy(line.owner) : ""];
+      const facts = this.machineOf(line);
+      const form = facts?.form === "laptop" ? "laptop" : facts?.form === "server" ? "server" : "desktop";
       return {
         hold: line.hold === "others" ? (line.shared ? "shared" : "others") : line.hold,
         written: line.written,
+        owner: line.owner,
+        form,
         online: line.online,
         notes: [...notes, line.online === false ? words.offline : ""].filter(Boolean),
         rows: line.options.map((option) => this.row(option, line)),
       };
     });
-    return agentPicker(machines, {
+    return { machines, html: agentPicker(machines, this.pickerWords(), { kind: this.kind, open: (key, byDefault) => this.pickerFolds.get(key) ?? byDefault }) };
+  }
+
+  private pickerWords() {
+    const { words } = this.options;
+    return {
       holds: { mine: words.mine, shared: words.others(true), others: words.others(false), assist: words.assisting },
       agent: words.agent,
+      allAgents: words.allAgents,
       noAgents: words.noAgents,
       noMachine: words.noMachine,
       token: words.token,
       onCredits: words.onCredits,
       reset: words.limitReset,
-    });
+      personSub: words.personSub,
+    };
+  }
+
+  /** What is known of a line's computer: its kind, for its icon. */
+  private machineOf(line: Line) {
+    const machine = machinesOf(this.options.store.world.peek()).find((one) => one.written === line.written);
+    return machine && "Ok" in machine.facts && machine.facts.Ok ? machine.facts.Ok : null;
   }
 
   /** A short list to choose one from, the chosen one marked. */
@@ -765,6 +789,14 @@ export class NewTalk {
         break;
       case "account":
         this.account = value;
+        break;
+      case "kind":
+        this.kind = value === "codex" || value === "claude" ? value : "all";
+        this.keepSize = true;
+        break;
+      case "fold":
+        this.pickerFolds.set(value, target.getAttribute("aria-expanded") !== "true");
+        this.keepSize = true;
         break;
       case "town":
         this.town = value || null;
@@ -856,8 +888,8 @@ export class NewTalk {
       const who = this.who(option, line);
       const asking = !this.factsOf(option) && this.askingAll;
       const assistant = option.assistant;
-      const sub = assistant ? [words.assistFrom(assistant.owner ?? ""), assistant.until ? words.assistUntil(new Date(assistant.until), new Date()) : ""].filter(Boolean).join(" · ") : option.written;
-      const said = [programName(option.agent), sub, who].filter(Boolean).join(" · ");
+      const sub = assistant ? [words.assistFrom(assistant.owner ?? ""), assistant.until ? words.assistUntil(new Date(assistant.until), new Date()) : ""].filter(Boolean).join(" ") : option.written;
+      const said = [programName(option.agent), sub, who].filter(Boolean).join(" ");
       chips.push(
         label(
           "agent",
@@ -873,13 +905,13 @@ ${words.assistantWorks(option.assistant.owner ?? "")}` : said,
     }
     if (towns.length > 1 || this.town) {
       const name = this.town ? (world?.towns.find((one) => one.town === this.town)?.record.name ?? this.town) : words.outsideProject;
-      chips.push(label("town", "folder", `<span class="talk-chip-name">${escape(name)}</span>`, `${words.project} · ${name}`, this.town ? "" : " quiet"));
+      chips.push(label("town", "folder", `<span class="talk-chip-name">${escape(name)}</span>`, `${words.project}\n${name}`, this.town ? "" : " quiet"));
     }
     if (option) {
       const summary = focusSummary(this.focus, focusWords);
       chips.push(
         summary
-          ? label("focus", "machine", summary.html, `${focusWords.title} · ${summary.said}`)
+          ? label("focus", "machine", summary.html, `${focusWords.title}\n${summary.said}`)
           : label("focus", "machine", `<span class="talk-chip-name">${escape(focusWords.none)}</span>`, focusWords.title, " quiet"),
       );
     }
@@ -912,8 +944,10 @@ ${words.assistantWorks(option.assistant.owner ?? "")}` : said,
               logins.chosen ? `${logins.chosen.hub}/${logins.chosen.account}` : "",
             )}</div>`
           : "";
-      this.drawAgents(lines, `${this.picker(lines)}${account}`);
-      this.popSteady?.settle();
+      const { machines, html: table } = this.picker(lines);
+      this.drawAgents(lines, agentKinds(machines, this.pickerWords(), this.kind), `${table}${account}`);
+      if (!this.keepSize) this.popSteady?.settle();
+      this.keepSize = false;
       return;
     } else if (this.opened === "town") {
       html = `<h3 class="picker-title">${escape(words.project)}</h3>${this.list("town", words.project, towns, this.town ?? "")}`;
@@ -929,16 +963,25 @@ ${words.assistantWorks(option.assistant.owner ?? "")}` : said,
   /** The table of agents, under the field that narrows it once there are
    *  many; the field and what is typed in it stay as the table is drawn
    *  again. */
-  private drawAgents(lines: Line[], html: string): void {
+  private drawAgents(lines: Line[], kinds: string, html: string): void {
     const pop = this.pop;
+    let top = pop.querySelector<HTMLElement>(":scope > .agent-top");
     let list = pop.querySelector<HTMLElement>(":scope > .agent-list");
-    let field = pop.querySelector<HTMLInputElement>(":scope > .agent-filter");
-    if (!list) {
+    let field = top?.querySelector<HTMLInputElement>(":scope > .agent-filter") ?? null;
+    if (!list || !top) {
       pop.replaceChildren();
+      top = document.createElement("div");
+      top.className = "agent-top";
       list = document.createElement("div");
       list.className = "agent-list";
-      pop.append(list);
+      pop.append(top, list);
       field = null;
+    }
+    // The choice of agents stands beside the field, or alone above the table.
+    const shown = top.querySelector<HTMLElement>(":scope > .picker-kinds");
+    if ((shown?.outerHTML ?? "") !== kinds) {
+      shown?.remove();
+      if (kinds) top.insertAdjacentHTML("beforeend", kinds);
     }
     const many = lines.reduce((sum, line) => sum + line.options.length, 0) > FILTER_PAST;
     if (many && !field) {
@@ -951,9 +994,9 @@ ${words.assistantWorks(option.assistant.owner ?? "")}` : said,
       field.spellcheck = false;
       field.addEventListener("input", () => {
         this.narrowed = field!.value;
-        narrowPicker(list!, this.narrowed);
+        narrowPicker(list!, this.narrowed, this.kind);
       });
-      pop.prepend(field);
+      top.prepend(field);
     } else if (!many && field) {
       field.remove();
       this.narrowed = "";
@@ -963,7 +1006,8 @@ ${words.assistantWorks(option.assistant.owner ?? "")}` : said,
       list.innerHTML = html;
       pop.scrollTop = scroll;
     }
-    narrowPicker(list, this.narrowed);
+    top.hidden = !top.childElementCount;
+    narrowPicker(list, this.narrowed, this.kind);
   }
 
   /** The machines its account may use: where it lives and those the
@@ -1158,7 +1202,7 @@ ${words.assistantWorks(option.assistant.owner ?? "")}` : said,
       if (this.starting) {
         // Said under the words that went; the words come back to the input
         // to be sent again.
-        this.starting.failed(error instanceof NotSent ? `${words.filesNotSent} · ${why}` : why);
+        this.starting.failed(error instanceof NotSent ? `${words.filesNotSent}: ${why}` : why);
         if (!this.input.value) {
           this.input.value = text;
           this.fit();

@@ -103,6 +103,7 @@ pub fn fixtures() -> Fixtures {
             exit: Some(Exited { status: ExitStatus::Code(7), at }),
             script: "exit 7".into(),
             output: "C:/world/output.log".into(),
+            account: None,
         });
     }
     for outcome in [
@@ -139,6 +140,8 @@ pub fn fixtures() -> Fixtures {
         .into_iter()
         .enumerate()
         .map(|(index, what)| SinceEvent {
+            hub: None,
+            source: None,
             id: format!("event-{index}"),
             at,
             machine: resident.machine.clone(),
@@ -170,6 +173,7 @@ pub fn fixtures() -> Fixtures {
     ]
     .into_iter()
     .map(|what| UndatedFact {
+        hub: None,
         resident: resident.clone(),
         town: SinceTown::Unrecorded { recorded_in: vec![town.clone()] },
         source: source.clone(),
@@ -182,10 +186,14 @@ pub fn fixtures() -> Fixtures {
         since: at,
         town: town.clone(),
         machines: vec![
-            MachineSince::Answered { reply: coverage },
-            MachineSince::Offline { machine: "laptop".parse().unwrap(), since: Some(at) },
-            MachineSince::Offline { machine: "server".parse().unwrap(), since: None },
-            MachineSince::NoAnswer { machine: "workstation".parse().unwrap(), reason: "the connection broke".into() },
+            MachineSince::Answered { observation: None, reply: coverage },
+            MachineSince::Offline { observation: None, machine: "laptop".parse().unwrap(), since: Some(at) },
+            MachineSince::Offline { observation: None, machine: "server".parse().unwrap(), since: None },
+            MachineSince::NoAnswer {
+                observation: None,
+                machine: "workstation".parse().unwrap(),
+                reason: "the connection broke".into(),
+            },
         ],
         events,
         undated,

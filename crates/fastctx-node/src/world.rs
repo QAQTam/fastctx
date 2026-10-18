@@ -928,18 +928,30 @@ impl fastctx_net::link::Node for Handler {
                 RemoteCall::Look { id } => {
                     let (looked, mut jobs) = crate::look::look_here(&node, &id).await?;
                     jobs.retain(|job| crate::admission::seen::job(&node, &asker, job));
-                    Ok(RemoteReply::Looked { looked: crate::admission::seen::looked(&node, &asker, looked), jobs })
+                    Ok(RemoteReply::Looked {
+                        looked: crate::admission::seen::looked(&node, &asker, looked),
+                        jobs,
+                        read_at: Some(jiff::Timestamp::now()),
+                    })
                 }
                 RemoteCall::Find { resident } => {
-                    let lives_here = crate::admission::seen::resident(&node, &asker, &resident);
+                    let lives_here = crate::admission::seen::resident(
+                        &node,
+                        crate::admission::seen::Looker::Asker(&asker),
+                        &resident,
+                    );
                     Ok(RemoteReply::Found { lives_here })
                 }
                 RemoteCall::Who { all, town, since } => crate::server::who_here(&node, all, town, since)
                     .await
                     .map(|reply| RemoteReply::Who(crate::admission::seen::who(&node, &asker, reply))),
-                RemoteCall::Since { since, town } => crate::since::here(&node, since, town)
-                    .await
-                    .map(|reply| RemoteReply::Since(crate::admission::seen::since(&node, &asker, reply))),
+                RemoteCall::Since { since, town } => crate::since::here(&node, since, town).await.map(|reply| {
+                    RemoteReply::Since(crate::admission::seen::since(
+                        &node,
+                        crate::admission::seen::Looker::Asker(&asker),
+                        reply,
+                    ))
+                }),
                 RemoteCall::Canon { path } => {
                     tokio::task::spawn_blocking(move || crate::town::map::heads(std::path::Path::new(&path)))
                         .await
@@ -1222,11 +1234,12 @@ impl fastctx_net::link::Node for Handler {
     fn relay(
         &self,
         fetch: fastctx_types::update::Fetch,
+        progress: tokio::sync::watch::Sender<fastctx_types::update::PackageProgress>,
     ) -> fastctx_net::link::BoxFuture<Result<std::path::PathBuf, String>> {
         let node = self.node.upgrade();
         Box::pin(async move {
             match node {
-                Some(node) => crate::updates::relay(&node, fetch).await,
+                Some(node) => crate::updates::relay(&node, fetch, progress).await,
                 None => Err("the node is stopping".to_string()),
             }
         })

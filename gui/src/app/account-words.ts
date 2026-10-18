@@ -602,6 +602,12 @@ export interface MachinesWords {
   groups: GroupWords;
   /** Under a group's name on the drawing: how many, how many online. */
   groupSub(count: number, online: number): string;
+  /** The list's sections past the account's own: the machines shared with
+   *  it, the members' its administrator sees, and those whose agents
+   *  assist it. */
+  sharedSection: string;
+  membersSection: string;
+  assistSection: string;
   /** The page's two ways of showing the machines, and what the choice is. */
   viewMap: string;
   viewList: string;
@@ -751,8 +757,8 @@ export const zhMachines: MachinesWords = {
   levelMember: "成员",
   inviteDevice: "添加设备",
   manageHub: "管理账号",
-  linkOnline: (address) => `已连上 · ${address}`,
-  linkVia: (through, address) => `经 ${through} 连上 · ${address}`,
+  linkOnline: (address) => `已连上 ${address}`,
+  linkVia: (through, address) => `经 ${through} 连上 ${address}`,
   linkConnecting: () => "连接中",
   linkStopped: () => "已被中枢服务器移除",
   linkDissolved: "网络已解散",
@@ -849,7 +855,7 @@ export const zhMachines: MachinesWords = {
     groupName: "组名",
     groupGo: "好",
     cancel: "取消",
-    more: (group) => `${group} · 更多`,
+    more: (group) => `${group}：更多`,
     renameGroup: "改组名",
     renameGroupTitle: (group) => `给「${group}」改个名字`,
     endGroup: "解散分组",
@@ -860,7 +866,10 @@ export const zhMachines: MachinesWords = {
     groupNameLong: "组名最多 32 个字",
     groupNameEmpty: "写一个组名",
   },
-  groupSub: (count, online) => `${count} 台 · ${online} 在线`,
+  groupSub: (count, online) => `${count} 台　${online} 在线`,
+  sharedSection: "共享给我的",
+  membersSection: "其他成员的",
+  assistSection: "协助我的",
   viewMap: "图",
   viewList: "列表",
   views: "显示方式",
@@ -899,7 +908,7 @@ export const zhMachines: MachinesWords = {
   directPort: "端口",
   directPickOne: "至少选一个地址",
   directPortWrong: "端口是 1 到 65535 之间的数",
-  directWhat: "开了之后，别的机器和它之间的往来直接走，不经中枢服务器；哪台到中枢服务器的线断了，也可以经它绕过去。按下之后中枢服务器从外面试连一次，连不上会说卡在哪一层。防火墙、安全组或路由器要放行这个端口。",
+  directWhat: "别的机器和它直接往来，不经中枢服务器，连不上中枢的机器也能经它绕过去。开启时中枢会从外面试连一次，防火墙、安全组或路由器要放行这个端口。",
   directGo: "允许",
   directChecking: "中枢服务器正在试着连它",
   directAllowed: (machine) => `已允许直接连到 ${machine}`,
@@ -961,7 +970,7 @@ export const zhMachines: MachinesWords = {
   logEmpty: "暂无记录",
   logEarlier: "更早",
   logFailed: "读取失败",
-  logBy: (account, device) => [account, device].filter(Boolean).join(" · "),
+  logBy: (account, device) => [account, device].filter(Boolean).join("　"),
   logUnverified: "未验证",
   logSaid: (a) => {
     switch (a.change) {
@@ -1003,12 +1012,12 @@ export const zhMachines: MachinesWords = {
         return a.to ? `把 ${a.owner} 的「${a.from}」改叫「${a.to}」` : `解散 ${a.owner} 的「${a.from}」`;
       case "token": {
         const named = a.label ?? a.name;
-        const many = a.uses === 0 ? " · 不限台数" : a.uses && a.uses > 1 ? ` · ${a.uses} 台` : "";
+        const many = a.uses === 0 ? "，不限台数" : a.uses && a.uses > 1 ? `，${a.uses} 台` : "";
         const what = a.way === "line" || (!a.way && a.register && !a.managed) ? (a.managed ? "受管 Linux 一行命令" : "Linux 一行命令") : a.managed ? "受管机器的入网码" : a.register ? "电脑入网码" : "手机二维码";
-        return `生成${what}${named ? ` · ${named}` : ""}${many}`;
+        return `生成${what}${named ? `「${named}」` : ""}${many}`;
       }
       case "revoke_token":
-        return `作废${a.way === "scan" ? "手机二维码" : a.way === "line" ? "Linux 一行命令" : a.managed ? "受管机器的入网码" : "入网码"}${a.label ? ` · ${a.label}` : ""}`;
+        return `作废${a.way === "scan" ? "手机二维码" : a.way === "line" ? "Linux 一行命令" : a.managed ? "受管机器的入网码" : "入网码"}${a.label ? `「${a.label}」` : ""}`;
       case "joined":
         if (a.managed) return `${a.name} 作为受管机器加入`;
         return a.registered ? `${a.name} 加入` : `${a.name} 登录`;
@@ -1019,7 +1028,7 @@ export const zhMachines: MachinesWords = {
       case "acting_stopped":
         return `${a.machine} 不再能替 ${a.account} 访问`;
       case "forget":
-        return `删除对话 ${a.conversation.resident} · ${a.conversation.machine}`;
+        return `删除 ${a.conversation.machine} 上的对话 ${a.conversation.resident}`;
       case "forgotten":
         return `${a.on} 上删除 ${a.conversation.resident}`;
       case "dissolve":
@@ -1056,8 +1065,8 @@ export const enMachines: MachinesWords = {
   levelMember: "member",
   inviteDevice: "Add device",
   manageHub: "Accounts",
-  linkOnline: (address) => `connected · ${address}`,
-  linkVia: (through, address) => `connected through ${through} · ${address}`,
+  linkOnline: (address) => `connected to ${address}`,
+  linkVia: (through, address) => `connected to ${address} through ${through}`,
   linkConnecting: () => "connecting",
   linkStopped: () => "removed by the hub",
   linkDissolved: "network dissolved",
@@ -1154,7 +1163,7 @@ export const enMachines: MachinesWords = {
     groupName: "Group name",
     groupGo: "OK",
     cancel: "Cancel",
-    more: (group) => `${group} · more`,
+    more: (group) => `More for ${group}`,
     renameGroup: "Rename group",
     renameGroupTitle: (group) => `Rename “${group}”`,
     endGroup: "Ungroup",
@@ -1165,7 +1174,10 @@ export const enMachines: MachinesWords = {
     groupNameLong: "A group's name is at most 32 characters",
     groupNameEmpty: "Give the group a name",
   },
-  groupSub: (count, online) => `${count} · ${online} online`,
+  groupSub: (count, online) => `${count}, ${online} online`,
+  sharedSection: "Shared with me",
+  membersSection: "Other members'",
+  assistSection: "Assisting me",
   viewMap: "Map",
   viewList: "List",
   views: "Show as",
@@ -1204,7 +1216,7 @@ export const enMachines: MachinesWords = {
   directPort: "Port",
   directPickOne: "Choose at least one address",
   directPortWrong: "A port is a number from 1 to 65535",
-  directWhat: "Once allowed, what goes between it and other machines goes straight, not through the hub, and a machine whose own line to the hub is down can reach the hub through it. The hub then tries to connect to it once from outside and says where it was stopped if it can't. Allow the port in the firewall, security group or router.",
+  directWhat: "Other machines reach it directly, not through the hub, and one cut off from the hub can go through it. The hub tries it once from outside; allow the port in the firewall, security group or router.",
   directGo: "Allow",
   directChecking: "The hub is trying to reach it",
   directAllowed: (machine) => `Allowed direct connections to ${machine}`,
@@ -1266,7 +1278,7 @@ export const enMachines: MachinesWords = {
   logEmpty: "No changes yet",
   logEarlier: "Earlier",
   logFailed: "Couldn't load",
-  logBy: (account, device) => [account, device].filter(Boolean).join(" · "),
+  logBy: (account, device) => [account, device].filter(Boolean).join(", "),
   logUnverified: "unverified",
   logSaid: (a) => {
     switch (a.change) {
@@ -1308,12 +1320,12 @@ export const enMachines: MachinesWords = {
         return a.to ? `Renamed ${a.owner}'s “${a.from}” to “${a.to}”` : `Ungrouped ${a.owner}'s “${a.from}”`;
       case "token": {
         const named = a.label ?? a.name;
-        const many = a.uses === 0 ? " · any number" : a.uses && a.uses > 1 ? ` · ${a.uses} devices` : "";
+        const many = a.uses === 0 ? ", any number" : a.uses && a.uses > 1 ? `, ${a.uses} devices` : "";
         const what = a.way === "line" || (!a.way && a.register && !a.managed) ? (a.managed ? "a managed Linux command" : "a Linux command") : a.managed ? "a code for managed machines" : a.register ? "a computer code" : "a sign-in QR code";
-        return `Made ${what}${named ? ` · ${named}` : ""}${many}`;
+        return `Made ${what}${named ? ` “${named}”` : ""}${many}`;
       }
       case "revoke_token":
-        return `Revoked ${a.way === "scan" ? "a sign-in QR code" : a.way === "line" ? "a Linux command" : a.managed ? "a code for managed machines" : "a code"}${a.label ? ` · ${a.label}` : ""}`;
+        return `Revoked ${a.way === "scan" ? "a sign-in QR code" : a.way === "line" ? "a Linux command" : a.managed ? "a code for managed machines" : "a code"}${a.label ? ` “${a.label}”` : ""}`;
       case "joined":
         if (a.managed) return `${a.name} joined as a managed machine`;
         return a.registered ? `${a.name} joined` : `${a.name} signed in`;
@@ -1324,7 +1336,7 @@ export const enMachines: MachinesWords = {
       case "acting_stopped":
         return `${a.machine} no longer acts for ${a.account}`;
       case "forget":
-        return `Deleted conversation ${a.conversation.resident} · ${a.conversation.machine}`;
+        return `Deleted conversation ${a.conversation.resident} on ${a.conversation.machine}`;
       case "forgotten":
         return `${a.conversation.resident} deleted on ${a.on}`;
       case "dissolve":
@@ -1571,8 +1583,8 @@ export const zhToken: TokenWords = {
   unit: "台",
   usesSaid: (most) => `填 1 到 ${most} 之间的台数`,
   makeManaged: "生成入网码",
-  codeUntil: (at, uses) => `${at} 前有效 · ${zhUses(uses)}`,
-  codeLasting: (uses) => `不过期 · ${zhUses(uses)}`,
+  codeUntil: (at, uses) => `${at} 前有效，${zhUses(uses)}`,
+  codeLasting: (uses) => `不过期，${zhUses(uses)}`,
   codes: "入网码",
   codesNone: "没有还能用的入网码",
   steps: ["换到使用者\u200b不登录的\u200b系统账户", "装好 Fastctx，\u200b打开", "在「加入网络」里\u200b粘贴"],
@@ -1622,8 +1634,8 @@ export const enToken: TokenWords = {
   unit: "",
   usesSaid: (most) => `Give a number from 1 to ${most}`,
   makeManaged: "Create code",
-  codeUntil: (at, uses) => `Valid until ${at} · ${enUses(uses)}`,
-  codeLasting: (uses) => `Never expires · ${enUses(uses)}`,
+  codeUntil: (at, uses) => `Valid until ${at}, ${enUses(uses)}`,
+  codeLasting: (uses) => `Never expires, ${enUses(uses)}`,
   codes: "Codes",
   codesNone: "No code lets a device in now",
   steps: ["Sign in as a system account no one at it uses", "Install Fastctx and open it", "Paste it in Join a network"],

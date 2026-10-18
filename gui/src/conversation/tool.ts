@@ -210,21 +210,21 @@ function call(tool: Tool, tense: Tense, say: (act: Act) => string, words: Words)
       return { glyph: "tasks", action: say("tasks"), object: null, ...plain };
     default: {
       // Another server's tool keeps the name it acts by.
-      const name = tool.server ? `${tool.server} · ${tool.name}` : tool.name;
+      const name = tool.server ? `${tool.server} ${tool.name}` : tool.name;
       return { glyph: "tool", action: tense === "failed" ? words.failedTool(name) : name, object: null, ...plain };
     }
   }
 }
 
-/** A group's heading: while something runs, what it is doing; once done,
- *  what the group did, by kind. */
+/** A group's heading, in its parts: while something runs, what it is
+ *  doing; once done, what the group did, by kind. */
 export function groupHeading(
   tools: { tool: Tool; ended: { use: Use } | null }[],
   thinking: number,
   words: Words,
-): string {
+): string[] {
   const running = tools.find((entry) => entry.ended === null);
-  if (running) return headline(running.tool, null, words).action;
+  if (running) return [headline(running.tool, null, words).action];
   const tally: Tally = { read: 0, edited: 0, ran: 0, searched: 0, asked: 0, delegated: 0, coordinated: 0, other: 0, failed: 0, thinking };
   for (const { tool, ended } of tools) {
     if (ended && (ended.use === "failed" || ended.use === "declined")) tally.failed += 1;

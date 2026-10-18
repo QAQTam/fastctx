@@ -116,7 +116,7 @@
 .gap-row.loading .gap-line {
   transform: scaleX(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: gap-draw 1.4s var(--fold-easing) infinite alternate;
+  animation: gap-draw var(--linger) var(--fold-easing) infinite alternate;
 }
 
 :root[data-reduced] .gap-row.loading .gap-line {
@@ -139,7 +139,8 @@
   color: var(--on-bubble);
   line-height: var(--leading-prose);
   overflow-wrap: anywhere;
-  transition: opacity var(--hover) ease;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease;
 }
 
 .bubble p {
@@ -151,7 +152,7 @@
 }
 
 .bubble.going {
-  opacity: 0.62;
+  --shown: 0.62;
 }
 
 .bubble.failed {
@@ -219,7 +220,7 @@
 }
 
 .relayed-how::before {
-  content: "·";
+  content: "";
   margin-right: var(--space-2);
 }
 
@@ -238,7 +239,7 @@
 }
 
 .told-how::before {
-  content: "·";
+  content: "";
   margin-right: var(--space-2);
 }
 
@@ -393,10 +394,14 @@
 /* An activity group: a heading that says what the stretch did, and the
    rail beneath it. */
 
+/* The heading runs across the column: what the stretch did on the left,
+   cut where it must; how many steps and how long at the right, before the
+   arrow, standing over the rows' own figures. */
 .group-head {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: var(--space-1);
+  width: 100%;
   max-width: 100%;
   min-height: var(--row-line);
   line-height: var(--row-leading);
@@ -415,15 +420,21 @@
   white-space: nowrap;
 }
 
+/* Each kind of thing a stretch did stands whole or not at all. */
+.group-part {
+  display: inline-block;
+}
+
 .group-head .glyph {
   flex: none;
   color: var(--text-3);
-  transform: rotate(-90deg);
-  transition: transform var(--fold) var(--fold-easing), color var(--hover) ease;
+  --turn: -90deg;
+  rotate: var(--turn);
+  transition: --turn var(--fold) var(--fold-easing), color var(--hover) ease;
 }
 
 .group-head[aria-expanded="true"] .glyph {
-  transform: rotate(0deg);
+  --turn: 0deg;
 }
 
 .group-head:not(:disabled):hover > .glyph {
@@ -434,7 +445,7 @@
    brightening and dimming. They stay drawn as words: painted through a
    moving background they would lose their subpixel smoothing. */
 .group-head.going .group-title {
-  animation: heading-glow 2.2s ease-in-out infinite;
+  animation: heading-glow var(--glow) ease-in-out infinite;
 }
 
 @keyframes heading-glow {
@@ -642,15 +653,20 @@
 }
 
 .row-outcome,
+/* Done on another machine than the conversation's: a small machine and
+   its name after the object, never cut. */
 .row-machine {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
+  color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
 
-.row-machine::before {
-  content: "·";
-  margin-right: var(--space-2);
+.row-machine > .glyph {
+  flex: none;
 }
 
 /* The arrow that opens a row shows under a pointer, on focus and while the
@@ -661,19 +677,21 @@
   align-self: center;
   margin-left: calc(-1 * var(--space-1));
   color: var(--text-3);
-  opacity: 0;
-  transform: rotate(-90deg);
-  transition: opacity var(--hover) ease, transform var(--fold) var(--fold-easing);
+  --shown: 0;
+  opacity: var(--shown);
+  --turn: -90deg;
+  rotate: var(--turn);
+  transition: --shown var(--hover) ease, --turn var(--fold) var(--fold-easing);
 }
 
 .row-line:hover .row-chevron,
 .row-line:focus-visible .row-chevron,
 .row-line[aria-expanded="true"] .row-chevron {
-  opacity: 1;
+  --shown: 1;
 }
 
 .row-line[aria-expanded="true"] .row-chevron {
-  transform: rotate(0deg);
+  --turn: 0deg;
 }
 
 .row-failed .rail {
@@ -717,7 +735,7 @@
 }
 
 .group-head.thought .group-mark .glyph {
-  transform: none;
+  --turn: 0deg;
 }
 
 /* A heading with nothing beneath to open: thinking without words. It does
@@ -758,7 +776,7 @@
   background: var(--accent);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: pulse 1.6s ease-in-out infinite;
+  animation: pulse var(--breath) ease-in-out infinite;
 }
 
 .row-running .row-action,
@@ -1039,7 +1057,7 @@
   height: 28px;
   margin: -4px -6px -4px auto;
   background: transparent;
-  opacity: 1;
+  --shown: 1;
 }
 
 .io-foot .io-end + .long-text-full {
@@ -1130,7 +1148,7 @@
   vertical-align: 0.05em;
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: pulse 1.6s ease-in-out infinite;
+  animation: pulse var(--breath) ease-in-out infinite;
 }
 
 :root[data-reduced] .prose.writing > :last-child::after {
@@ -1144,7 +1162,8 @@
 .ask-card {
   position: relative;
   padding: 2px 0 2px var(--space-5);
-  transition: opacity var(--hover) ease;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease;
 }
 
 .ask-card::before {
@@ -1161,7 +1180,7 @@
 }
 
 .ask-card.busy {
-  opacity: 0.66;
+  --shown: 0.66;
 }
 
 .ask-head {
@@ -1186,7 +1205,7 @@
   box-shadow: inset 0 0 0 2px var(--accent);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: pulse 1.6s ease-in-out infinite;
+  animation: pulse var(--breath) ease-in-out infinite;
 }
 
 .ask-waiting::before {
@@ -1197,7 +1216,7 @@
   box-shadow: inset 0 0 0 2px var(--accent);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
-  animation: pulse 1.6s ease-in-out infinite;
+  animation: pulse var(--breath) ease-in-out infinite;
 }
 
 .ask-title {
@@ -1297,7 +1316,8 @@
   text-align: left;
   color: var(--text-2);
   background: var(--fill);
-  transition: color var(--hover) ease, background-color var(--hover) ease, box-shadow var(--hover) ease, transform var(--hover) ease;
+  scale: var(--press);
+  transition: color var(--hover) ease, background-color var(--hover) ease, box-shadow var(--hover) ease, --press var(--settle) var(--spring);
 }
 
 .ask-button:hover:not(:disabled) {
@@ -1322,7 +1342,9 @@
 }
 
 .ask-button:active:not(:disabled) {
-  transform: scale(0.97);
+  --press: 0.97;
+  transition-duration: var(--hover), var(--hover), var(--hover), var(--quick);
+  transition-timing-function: ease, ease, ease, var(--ease-out);
 }
 
 .ask-status {
@@ -1521,14 +1543,15 @@
   place-items: center;
   border-radius: var(--radius-s);
   color: var(--text-3);
-  opacity: 0;
-  transition: opacity var(--hover) ease, color var(--hover) ease, background-color var(--hover) ease;
+  --shown: 0;
+  opacity: var(--shown);
+  transition: --shown var(--hover) ease, color var(--hover) ease, background-color var(--hover) ease;
 }
 
 .block-prose:hover .prose-copy,
 .prose-copy:focus-visible,
 .prose-copy.copied {
-  opacity: 1;
+  --shown: 1;
 }
 
 .prose-copy:hover {
@@ -1541,7 +1564,7 @@
     position: static;
     margin-top: var(--space-1);
     margin-left: -6px;
-    opacity: 0.7;
+    --shown: 0.7;
   }
 }
 
@@ -1563,6 +1586,9 @@
   border-radius: var(--radius-full);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  scale: var(--grow);
   animation: sheet-in var(--enter) var(--fold-easing) both;
 }
 
@@ -1770,10 +1796,13 @@ a.bubble-file:hover {
 }
 
 .picture-viewer::backdrop {
-  background: rgba(0, 0, 0, 0.42);
+  background: var(--scrim);
 }
 
 .picture-viewer[open] .pv-card {
+  opacity: var(--shown);
+  translate: var(--slide) var(--lift);
+  scale: var(--grow);
   animation: sheet-in var(--enter) var(--fold-easing) both;
 }
 
@@ -1921,6 +1950,7 @@ a.bubble-file:hover {
   }
 
   .picture-viewer[open] .pv-card {
+    translate: var(--slide) var(--lift);
     animation-name: sheet-rise;
   }
 }
@@ -1938,7 +1968,8 @@ a.bubble-file:hover {
   border-radius: var(--radius-s);
   font-size: var(--size-small);
   color: var(--text-3);
-  transition: color var(--hover) ease, background-color var(--hover) ease, opacity var(--hover) ease;
+  opacity: var(--shown);
+  transition: color var(--hover) ease, background-color var(--hover) ease, --shown var(--hover) ease;
 }
 
 .turn-act:hover {
@@ -1954,12 +1985,12 @@ a.bubble-file:hover {
 
 .turn-rewind {
   margin-top: var(--space-1);
-  opacity: 0;
+  --shown: 0;
 }
 
 .block.from-user:hover .turn-rewind,
 .turn-rewind:focus-visible {
-  opacity: 1;
+  --shown: 1;
 }
 
 .prose-acts {
@@ -1969,12 +2000,12 @@ a.bubble-file:hover {
 .turn-fork {
   margin-top: var(--space-1);
   margin-left: -6px;
-  opacity: 0;
+  --shown: 0;
 }
 
 .block-prose:hover .turn-fork,
 .turn-fork:focus-visible {
-  opacity: 1;
+  --shown: 1;
 }
 
 @media (hover: none), (max-width: 900px) {
@@ -1985,7 +2016,7 @@ a.bubble-file:hover {
   }
   .turn-rewind,
   .turn-fork {
-    opacity: 0.7;
+    --shown: 0.7;
     margin-left: 0;
   }
 }
@@ -2057,7 +2088,8 @@ a.bubble-file:hover {
   bottom: 0;
   padding: var(--space-3) var(--space-3) calc(var(--space-4) + var(--safe-bottom));
   border-radius: var(--radius-l) var(--radius-l) 0 0;
-  animation: file-menu-rise 0.22s cubic-bezier(0.33, 1, 0.68, 1) both;
+  translate: var(--slide) var(--lift);
+  animation: file-menu-rise var(--enter) var(--ease-out) both;
 }
 
 .file-menu.as-sheet .file-menu-item {
@@ -2066,7 +2098,7 @@ a.bubble-file:hover {
 
 @keyframes file-menu-rise {
   from {
-    transform: translateY(100%);
+    --lift: 100%;
   }
 }
 

@@ -47,6 +47,7 @@ import { detailOf } from "../app/problem";
 import { DraftFit } from "./fit-draft";
 import { Popover } from "./popover";
 import { Steady } from "../app/steady";
+import { composing } from "../typing";
 
 /** How many events the page holds at most, and how many its latest part
  *  holds before what comes before its newest turns is let go, down to how
@@ -57,6 +58,9 @@ const HELD_MOST = 6000;
 const KEEP_SCREENS = 3;
 const LATEST_MOST = 2400;
 const LATEST_KEPT = 800;
+
+/** The mark of an agent named "Claude" or "Codex". */
+const markOf = (agent: string) => (/claude/i.test(agent) ? "claude" : "codex");
 
 export interface Someone {
   /** "Claude" or "Codex": the agent by the name it goes by. */
@@ -177,6 +181,23 @@ export interface PageOptions {
   agentRecord?: ((agent: string) => Promise<AgentActivity>) | undefined;
 }
 
+/** How many times what a conversation offers is asked again after asking
+ *  failed, before only a turn's end asks again. */
+const OFFERS_TRIES = 5;
+
+/** How long after the reader's own wheel, finger, key or scroll bar the
+ *  view is theirs: nothing keeps it at the newest meanwhile. */
+const READING_MS = 150;
+
+/** Whether something between `target` and `region` scrolls up by itself
+ *  before the region would. */
+function scrollsUpWithin(target: Element | null, region: HTMLElement): boolean {
+  for (let at = target; at && at !== region; at = at.parentElement) {
+    if (at.scrollTop > 0 && at.scrollHeight > at.clientHeight && /(auto|scroll)/.test(getComputedStyle(at).overflowY)) return true;
+  }
+  return false;
+}
+
 export class ConversationPage {
   readonly element: HTMLElement;
   private view: ConversationView;
@@ -209,6 +230,10 @@ export class ConversationPage {
   /** Why the watch ended or broke, in the kernel's words, for the hover. */
   private goneWhy = "";
   private offered: Offers | null = null;
+  /** The next asking of what the conversation offers, after one that
+   *  failed, and how many failed in a row. */
+  private offersAgain = -1;
+  private offersFailed = 0;
   private wasMoving = false;
   private commandMenu: Menu<MenuCommand> | null = null;
   private modelPanel: ModelPanel | null = null;
@@ -239,8 +264,10 @@ export class ConversationPage {
     this.element.innerHTML = `
       ${options.head(
         `<div class="who">
-        <h1 class="who-name">${escape(someone.agent)}<span class="who-at"> · ${escape(someone.machine)}</span></h1>
-        <div class="who-state"></div>
+        ${options.details ? `<button class="who-seal" type="button" aria-expanded="false">${glyph(markOf(someone.agent), 16)}</button>` : `<span class="who-seal">${glyph(markOf(someone.agent), 16)}</span>`}
+        <h1 class="who-name">${escape(someone.agent)}</h1>
+        <span class="who-home">${glyph("machine", 14)}<span>${escape(someone.assistFrom ? words.assistFrom(someone.assistFrom) : someone.machine)}</span></span>
+        <span class="who-state" hidden></span>
       </div>`,
         `<button class="icon-button find-toggle" type="button" aria-label="${escape(words.find.find)}" title="${escape(words.find.find)}">${glyph("search", 18)}</button>${
           options.details
@@ -335,6 +362,8 @@ export class ConversationPage {
       this.element.append(card.element);
       const toggle = this.element.querySelector<HTMLButtonElement>(".details-toggle")!;
       toggle.addEventListener("click", () => this.toggleDetails(!card.open));
+      // The seal says who the agent is: pressed, everything known of it.
+      this.element.querySelector(".who-seal")!.addEventListener("click", () => this.toggleDetails(!card.open));
       this.element.addEventListener("keydown", (event) => {
         if (event.key === "Escape" && card.open) this.toggleDetails(false);
       });
@@ -501,7 +530,7 @@ export class ConversationPage {
       }
       // Enter sends where there is a keyboard; on a touch screen it is a new
       // line, and the button sends.
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !matchMedia("(pointer: coarse)").matches) {
+      if (event.key === "Enter" && !event.shiftKey && !composing(event) && !matchMedia("(pointer: coarse)").matches) {
         event.preventDefault();
         this.submit();
       }
@@ -511,25 +540,65 @@ export class ConversationPage {
     // The region itself shrinks when the composer grows (an attachment, a
     // longer draft): the same holds.
     const keep = new ResizeObserver(() => {
-      if (this.following) this.scroller.scrollTop = this.scroller.scrollHeight;
+      if (this.following && !this.reading()) this.scroller.scrollTop = this.scroller.scrollHeight;
     });
     keep.observe(main);
     keep.observe(this.scroller);
-    // Only a scroll the reader made says whether they still follow: one
-    // that comes with the region or its content changing size (the
-    // browser keeping the view anchored) does not.
+    // A wheel, a finger, a key or the scroll bar moving the view says the
+    // reader scrolls: upward, they stop following at once, and for a moment
+    // after any of them nothing pulls the view back to the foot. While words
+    // stream in, the browser merges the reader's scroll with the one that
+    // kept the newest in view, so the scroll alone cannot tell them apart.
+    const reading = () => {
+      this.readAt = performance.now();
+    };
+    const up = () => {
+      reading();
+      this.following = false;
+      this.drawLatest();
+    };
+    // A wheel over something in it that scrolls up by itself (a long code
+    // block) moves that, not the view; keys in a field move its caret.
+    this.scroller.addEventListener(
+      "wheel",
+      (event) => (event.deltaY < 0 && !scrollsUpWithin(event.target as Element, this.scroller) ? up() : reading()),
+      { passive: true },
+    );
+    this.scroller.addEventListener("touchmove", reading, { passive: true });
+    // The scroll bar is the region itself, not anything in it.
+    this.scroller.addEventListener("pointerdown", (event) => {
+      if (event.target === this.scroller) reading();
+    });
+    this.scroller.addEventListener("keydown", (event) => {
+      if ((event.target as Element).closest("input, textarea, select, [contenteditable]")) return;
+      if (event.key === "PageUp" || event.key === "ArrowUp" || event.key === "Home") up();
+      else if (event.key === "PageDown" || event.key === "ArrowDown" || event.key === "End" || event.key === " ") reading();
+    });
+    // Otherwise only a scroll the reader made says whether they still
+    // follow: one that comes with the region or its content changing size
+    // (the browser keeping the view anchored) does not.
     let sized = { client: 0, content: 0 };
     this.scroller.addEventListener("scroll", () => {
       const { scrollTop, clientHeight, scrollHeight } = this.scroller;
       this.element.classList.toggle("scrolled", scrollTop > 0);
-      if (clientHeight !== sized.client || scrollHeight !== sized.content) {
-        sized = { client: clientHeight, content: scrollHeight };
+      const resized = clientHeight !== sized.client || scrollHeight !== sized.content;
+      sized = { client: clientHeight, content: scrollHeight };
+      if (resized && !this.reading()) {
         if (this.following) this.scroller.scrollTop = scrollHeight;
         return;
       }
       this.following = scrollTop + clientHeight >= scrollHeight - 48;
       this.drawLatest();
     });
+  }
+
+  /** When the reader last moved the view themselves. */
+  private readAt = -Infinity;
+
+  /** Whether the reader is moving the view now: a moment after their last
+   *  wheel, finger, key or scroll bar. */
+  private reading(): boolean {
+    return performance.now() - this.readAt < READING_MS;
   }
 
   /** The way back to the newest, shown when the reader is far from it: more
@@ -620,7 +689,9 @@ export class ConversationPage {
     // turn ends; nothing else it offers changes with a turn, and what does
     // change is said by the host (commands, above).
     const moving = this.options.conversation.moving();
-    if (this.wasMoving && !moving && this.offered?.checkpoints) void this.askOffers();
+    // So does an answer given without the host's own part (its commands),
+    // as when its host was too busy to say in the middle of a turn.
+    if (this.wasMoving && !moving && (this.offered?.checkpoints || !this.offered?.commands.length)) void this.askOffers();
     this.wasMoving = moving;
     this.releaseQueued();
     if (!this.frame) this.frame = requestAnimationFrame(() => this.render());
@@ -643,7 +714,7 @@ export class ConversationPage {
     this.finder.refresh();
     this.drawState();
     this.drawAction();
-    if (follow) this.scroller.scrollTop = this.scroller.scrollHeight;
+    if (follow && !this.reading()) this.scroller.scrollTop = this.scroller.scrollHeight;
     this.drawLatest();
     this.bound();
   }
@@ -721,6 +792,7 @@ export class ConversationPage {
   /** Stops what the page keeps asking for. */
   leave(): void {
     clearTimeout(this.looking);
+    clearTimeout(this.offersAgain);
     cancelAnimationFrame(this.frame);
     this.view.destroy();
     this.badge?.dispose();
@@ -954,12 +1026,15 @@ export class ConversationPage {
     if (open && !details.card.open) layerOpened({ isOpen: () => details.card.open && this.element.isConnected, close: () => this.toggleDetails(false) });
     details.card.open = open;
     toggle?.setAttribute("aria-expanded", String(open));
+    const seal = this.element.querySelector<HTMLElement>("button.who-seal");
+    seal?.setAttribute("aria-expanded", String(open));
     clearTimeout(this.looking);
     if (open) {
       details.card.element.focus({ preventScroll: true });
       void this.lookAgain();
     } else if (inside) {
-      toggle?.focus({ preventScroll: true });
+      // Back to what opened it: on a phone the seal, the head's only way in.
+      (toggle?.offsetParent ? toggle : seal)?.focus({ preventScroll: true });
     }
   }
 
@@ -1158,6 +1233,11 @@ export class ConversationPage {
   private renaming = false;
 
   /** Renames the conversation in its title, as from its "⋯". */
+  /** Finds in the conversation: from the head's "⋯" on a phone. */
+  showFind(): void {
+    this.finder.show();
+  }
+
   startRename(): void {
     this.rename();
   }
@@ -1171,7 +1251,7 @@ export class ConversationPage {
     const field = document.createElement("input");
     field.className = "who-rename";
     field.value = this.options.conversation.title ?? "";
-    field.placeholder = `${this.options.someone.agent} · ${this.options.someone.machine}`;
+    field.placeholder = `${this.options.someone.agent} ${this.options.someone.machine}`;
     field.setAttribute("aria-label", controls.words.commands.rename);
     this.name.replaceChildren(field);
     field.focus();
@@ -1198,7 +1278,7 @@ export class ConversationPage {
       this.drawState();
     };
     field.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.isComposing) {
+      if (event.key === "Enter" && !composing(event)) {
         event.preventDefault();
         finish(true);
         this.name.focus();
@@ -1303,12 +1383,23 @@ export class ConversationPage {
 
   private async askOffers(): Promise<void> {
     const controls = this.options.controls;
-    if (!controls) return;
+    if (!controls || this.left) return;
+    clearTimeout(this.offersAgain);
     try {
       this.offered = await controls.offers();
+      this.offersFailed = 0;
     } catch {
+      // The way to its machine broke for a moment: asked again a few times,
+      // soon and then less often; after that, when a turn ends. Its machine
+      // offers a model picker whatever its host answers, so only a machine
+      // out of reach leaves it out.
       this.offered = null;
+      if (this.offersFailed < OFFERS_TRIES) {
+        const wait = 1000 * 2 ** this.offersFailed++;
+        this.offersAgain = window.setTimeout(() => void this.askOffers(), wait);
+      }
     }
+    if (this.left) return;
     this.drawChip();
     this.drawState();
     // What the conversation takes decides which of its turns' actions show.
@@ -1564,7 +1655,7 @@ export class ConversationPage {
     const model = offered.models.find((one) => one.id === offered.model);
     const tier = offered.service_tier && offered.service_tier !== "default" ? (model?.service_tiers.find((one) => one.id === offered.service_tier)?.name ?? offered.service_tier) : null;
     const effort = offered.effort ? effortLabel(offered.effort, this.options.words.english) : null;
-    this.say(words.model(model?.name ?? offered.model ?? "", [effort, tier].filter(Boolean).join(" · ") || null));
+    this.say(words.model(model?.name ?? offered.model ?? "", [effort, tier].filter(Boolean).join(" ") || null));
   }
 
   /** Does a command, the World's own control or the host's; says whether
@@ -1756,7 +1847,8 @@ export class ConversationPage {
     strip.className = "focus-strip";
     strip.hidden = true;
     strip.innerHTML = `<button type="button" class="talk-chip focus-chip" aria-haspopup="dialog" aria-expanded="false"></button><span class="focus-state" aria-live="polite"></span><div class="focus-pop" role="dialog" hidden></div>`;
-    this.element.querySelector(".page-head")?.after(strip);
+    // In the head's one line, before its tools.
+    this.element.querySelector(".page-head-actions")?.prepend(strip);
     const chip = strip.querySelector<HTMLButtonElement>(".focus-chip")!;
     const pop = strip.querySelector<HTMLElement>(".focus-pop")!;
     chip.addEventListener("click", () => (pop.hidden ? this.openFocus(focus) : this.closeFocus(focus)));
@@ -1825,7 +1917,7 @@ export class ConversationPage {
     focus
       .set(next)
       .then((unfinished) => {
-        state.textContent = unfinished.join(" · ");
+        state.textContent = unfinished.join(" ");
       })
       .catch((error: unknown) => {
         this.options.someone.focus = before;
@@ -1849,10 +1941,12 @@ export class ConversationPage {
     if (!focus) return;
     const chip = strip.querySelector<HTMLButtonElement>(".focus-chip")!;
     const summary = focusSummary(focus, words);
-    const html = `${glyph("machine", 16)}${summary ? summary.html : `<span class="talk-chip-name">${escape(words.none)}</span>`}${glyph("chevron", 12)}`;
+    // On a phone the chip is its machine and how many places it holds.
+    const count = focus.machines.reduce((sum, chosen) => sum + Math.max(1, chosen.folders.length), 0);
+    const html = `${glyph("machine", 16)}${summary ? summary.html : `<span class="talk-chip-name">${escape(words.none)}</span>`}${count ? `<span class="focus-count">${count}</span>` : ""}${glyph("chevron", 12)}`;
     if (chip.innerHTML !== html) chip.innerHTML = html;
     chip.classList.toggle("quiet", !summary);
-    chip.title = summary ? `${words.title} · ${summary.said}` : words.title;
+    chip.title = summary ? `${words.title}\n${summary.said}` : words.title;
     chip.disabled = this.focusSaving;
   }
 
@@ -1908,12 +2002,10 @@ export class ConversationPage {
 
   private drawState(): void {
     const { words, someone, conversation } = this.options;
-    // The host's own title for the conversation, once it gives one, with
-    // who and where in the line under it.
+    // The host's own title for the conversation, once it gives one; until
+    // then the agent's name. Where it lives follows, on a computer.
     const title = conversation.title;
-    const name = title
-      ? `${escape(title)}`
-      : `${escape(someone.agent)}<span class="who-at"> · ${escape(someone.machine)}</span>`;
+    const name = escape(title ?? someone.agent);
     if (!this.renaming && this.name.innerHTML !== name) this.name.innerHTML = name;
     const renamable = !!this.offered?.controls.includes("rename");
     this.name.classList.toggle("renamable", renamable);
@@ -1943,24 +2035,21 @@ export class ConversationPage {
             : words.idle);
     // A screen reader hears the conversation change state, once each time:
     // its words as they stream would be too many to hear.
-    if (this.said !== null && this.said !== now) this.spoken.textContent = `${someone.agent} · ${now}`;
+    if (this.said !== null && this.said !== now) this.spoken.textContent = `${someone.agent}　${now}`;
     this.said = now;
-    // Under the title, where it lives, and whose agent assists.
-    const facts = [
-      now,
-      title ? `${someone.agent} · ${someone.machine}` : null,
-      someone.assistFrom ? words.assistFrom(someone.assistFrom) : null,
-      someone.project,
-      // The model that answered, by its name rather than its id.
-      this.options.conversation.answeredBy ? modelName(this.options.conversation.answeredBy) : someone.model,
-    ].filter(Boolean) as string[];
-    const mark = waiting ? `<span class="ask-mark" aria-hidden="true"></span>` : working ? `<span class="pulse" aria-hidden="true"></span>` : "";
-    // Waiting for the user is said in the accent; the rest stays quiet.
-    const [first, ...rest] = facts.map(escape);
-    this.state.innerHTML = `${mark}<span><span class="who-first">${first}</span>${rest.map((fact) => ` · ${fact}`).join("")}</span>`;
-    this.state.classList.toggle("working", working);
-    this.state.classList.toggle("waiting", waiting);
-    this.state.classList.toggle("gone", this.gone !== null);
+    // The seal says who; how it stands is on a pointer's rest. That it works
+    // or waits is the conversation's own to show, below; only what is wrong
+    // with the line or the conversation is said in words, after the title.
+    const seal = this.element.querySelector<HTMLElement>(".who-seal")!;
+    seal.classList.toggle("gone", this.gone !== null || this.away !== null);
+    const model = this.options.conversation.answeredBy ? modelName(this.options.conversation.answeredBy) : someone.model;
+    const sealSaid = [someone.agent, now, model].filter(Boolean).join("　");
+    seal.title = sealSaid;
+    seal.setAttribute("aria-label", sealSaid);
+    const trouble = this.gone ?? (this.away !== null ? now : null);
+    this.state.hidden = !trouble;
+    if (this.state.textContent !== (trouble ?? "")) this.state.textContent = trouble ?? "";
+    this.state.classList.toggle("gone", trouble !== null);
     // How long it has been broken is as of when the pointer comes to it.
     const why = this.interrupted && this.brokenSince
       ? words.brokenFor(words.took(Date.now() - this.brokenSince.getTime()), this.brokenWhy)

@@ -5,7 +5,7 @@
 //! login's directory named. Nothing is left running.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use fastctx_hosts::codex::LimitsHow;
@@ -31,25 +31,13 @@ pub(super) struct Asked {
 pub(super) async fn codex(node: &Arc<Node>, dir: &Path, limits: bool) -> Asked {
     let at = Timestamp::now();
     if let Some(host) = node.codex.existing(dir)
-        && let Some(said) = host.ask_running(limits).await
+        && let Some((launch, said)) = host.ask_running(limits).await
     {
-        // The running app-server's program is the host's launch.
-        let launcher = host.launch().ok().flatten().map(|launch| Launcher {
-            path: launch.binary,
-            version: None,
-            desktop_app: launch.source == ProgramSource::DesktopApp,
-        });
-        return asked_codex(at, said, launcher);
+        let launcher =
+            Launcher { path: launch.binary, version: None, desktop_app: launch.source == ProgramSource::DesktopApp };
+        return asked_codex(at, said, Some(launcher));
     }
-    let path = node
-        .codex
-        .environment()
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| value.clone());
-    let default = node.codex.default().config_home().to_path_buf();
-    let program_home = (!crate::homes::same_dir(&default, dir)).then_some(default);
-    let launch = match fastctx_hosts::codex::launch::discover_for(dir, program_home.as_deref(), path.as_ref()) {
+    let launch = match node.codex.launch(dir) {
         Ok(Some(launch)) => launch,
         Ok(None) => {
             return failed(at, "neither the ChatGPT desktop app nor a codex command was found to ask it".into());
@@ -102,21 +90,15 @@ fn asked_codex(at: Timestamp, said: fastctx_hosts::codex::identify::Said, launch
     }
 }
 
-fn failed(at: Timestamp, reason: String) -> Asked {
+pub(super) fn failed(at: Timestamp, reason: String) -> Asked {
     Asked { identified: Identified { at, who: Fact::failed(reason) }, launcher: None, models: Vec::new(), limits: None }
-}
-
-/// The `claude` command the World runs: the first on the node's search
-/// path, as for every Claude Code command it runs (`claude.rs`).
-pub(super) fn claude_program() -> Option<PathBuf> {
-    fastctx_hosts::claude::background::find(std::env::var_os("PATH").as_ref())
 }
 
 /// Asks the Claude Code login in `dir`; `programs` are the Claude programs
 /// found here, whose records say the command's version.
 pub(super) fn claude(dir: &Path, default: bool, programs: &[FoundProgram]) -> Result<Asked, Failure> {
     let at = Timestamp::now();
-    let Some(program) = claude_program() else {
+    let Some(program) = crate::claude::program() else {
         return Ok(Asked {
             identified: Identified { at, who: Fact::unavailable("no claude command is on the node's search path") },
             launcher: None,

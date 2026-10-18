@@ -31,7 +31,6 @@
 
 import { ActsMenu } from "../app/acts-menu";
 import type { AgentActivity, Content, Health, MachineName, Notice, Speaker, Tool, TurnEnd } from "../world/events";
-import { STOPPED_BY_USER } from "../world/events";
 import type { Attachment } from "../world/attachments";
 import type { Decoding } from "../world/remote-lines";
 import type { RunFacts, WriteFact } from "../world/run-facts";
@@ -66,6 +65,7 @@ import { FindContent, displayedDiff, toolText } from "./find-content";
 import { clockSays, sections, stretchSays, thoughtOnly, thoughtText, thoughtTook } from "./stretch-says";
 import { displayedText, htmlText as displayedTextHtml, type TextMatch } from "./find-text";
 import { GAP, type FindChanges, type FindMatch, type FindPart } from "./find-index";
+import { composing } from "../typing";
 
 export interface Context {
   words: Words;
@@ -184,7 +184,7 @@ interface Slot {
 /** A change of the machines and folders, as one line. */
 function focusSaid(focus: Focus, words: Words): string {
   const items = focus.machines.flatMap((chosen) =>
-    chosen.folders.length ? chosen.folders.map((folder) => `${chosen.machine} · ${folderName(folder)}`) : [chosen.machine],
+    chosen.folders.length ? chosen.folders.map((folder) => `${chosen.machine}: ${folderName(folder)}`) : [chosen.machine],
   );
   return items.length ? words.focusChanged(items.join(words.listSeparator)) : words.focusCleared;
 }
@@ -326,7 +326,7 @@ export class ConversationView {
     root.addEventListener("keydown", (event) => {
       if (!this.own(event)) return;
       const field = (event.target as HTMLElement).closest(".ask-card .ask-input, .question-card .ask-input");
-      if (!field || event.key !== "Enter" || event.isComposing) return;
+      if (!field || event.key !== "Enter" || composing(event)) return;
       event.preventDefault();
       field.closest(".ask-card, .question-card")?.querySelector<HTMLButtonElement>(".ask-primary")?.click();
     });
@@ -1072,7 +1072,7 @@ export class ConversationView {
       case "question":
         return this.question(entry);
       case "forked": {
-        const from = `${entry.source.resident} · ${entry.source.machine}`;
+        const from = `${entry.source.resident} ${entry.source.machine}`;
         const link = this.context.link ? `<a href="${escape(this.context.link(entry.source))}">${escape(from)}</a>` : escape(from);
         return `<div class="divider"><span>${words.forkedFrom(link)}</span></div>`;
       }
@@ -1156,7 +1156,7 @@ export class ConversationView {
   /** A request as its card: what it asks, and the answers it takes. */
   private ask(entry: AskEntry): string {
     const asks = this.context.asks;
-    if (!asks) return `<div class="note caution">${escape(this.context.words.waitingForYou)} · ${escape(entry.request)}</div>`;
+    if (!asks) return `<div class="note caution">${escape(this.context.words.waitingForYou)}: ${escape(entry.request)}</div>`;
     const ask = readAsk(entry.request, entry.params, asks.words);
     // A change waiting for approval is the edit already shown above: its
     // files are named from there.
@@ -1287,12 +1287,12 @@ export class ConversationView {
   }
 
   /** The notice a heard entry carries, when it is one the page draws as a
-   *  line of its own: the World's facts, a job's end, a colleague's answer
-   *  or trouble. Words another agent wrote stay words. */
+   *  line of its own: the World's facts, a colleague's answer or trouble.
+   *  Words another agent wrote stay words; a job's end is not drawn. */
   private noticeOf(entry: HeardEntry): Notice | null {
     const notice = entry.notice;
     if (!notice || entry.from?.kind === "user") return null;
-    return notice.kind === "job_ended" || notice.kind === "answer" || notice.kind === "health" || notice.kind === "world" ? notice : null;
+    return notice.kind === "answer" || notice.kind === "health" || notice.kind === "world" ? notice : null;
   }
 
   private heardEntry(entry: HeardEntry): string {
@@ -1331,24 +1331,6 @@ export class ConversationView {
     let ok = true;
     let more = "";
     switch (notice.kind) {
-      case "job_ended": {
-        const byUser = notice.stop?.by === STOPPED_BY_USER;
-        const code = notice.status && "code" in notice.status ? notice.status.code : null;
-        if (byUser) said = words.jobStoppedByYou;
-        else if (notice.how.kind === "failed") {
-          said = words.jobCouldNotRun;
-          ok = false;
-        } else if (notice.how.kind === "interrupted") {
-          said = words.jobInterrupted;
-          ok = false;
-        } else if (notice.how.kind === "stopped") said = words.jobStopped;
-        else {
-          said = code === null ? words.jobDone(null) : words.jobDone(code);
-          ok = code === null || code === 0;
-        }
-        more = notice.last?.text ? "last" : "";
-        break;
-      }
       case "answer": {
         const failed = notice.end.how === "failed";
         ok = !failed;
@@ -1358,7 +1340,7 @@ export class ConversationView {
       }
       case "health":
         ok = false;
-        said = `${notice.label} · ${healthSaid(notice.health, words)}`;
+        said = `${notice.label}: ${healthSaid(notice.health, words)}`;
         break;
       case "world": {
         const fact = notice.fact;
@@ -1387,24 +1369,12 @@ export class ConversationView {
     return `<div class="notice-line${ok ? "" : " failed"}"><button class="notice-open" type="button" data-open="${escape(entry.key)}" aria-expanded="${open}">${line}${glyph("chevron", 14)}</button></div><div class="fold-box notice-box"${open ? "" : " style=\"height:0\" inert"}><div class="fold-content"></div></div>`;
   }
 
-  /** What a notice holds, opened: a job's last lines and where its output
-   *  is, a colleague's answer, what the World handed over. */
+  /** What a notice holds, opened: a colleague's answer, what the World
+   *  handed over. */
   private noticeDetails(entry: HeardEntry, into: HTMLElement): void {
     const notice = entry.notice;
     if (!notice) return;
-    if (notice.kind === "job_ended") {
-      const longs: LongText[] = [];
-      if (notice.last?.text) {
-        const text = new LongText(notice.last.text, notice.job, this.layoutAnchor, this.longWords());
-        longs.push(text);
-        into.append(text.element);
-      }
-      const where = document.createElement("p");
-      where.className = "notice-path";
-      where.textContent = `${notice.machine} · ${notice.output}`;
-      into.append(where);
-      this.longs.set(entry.key, longs);
-    } else if (notice.kind === "answer" && notice.end.last_message) {
+    if (notice.kind === "answer" && notice.end.last_message) {
       into.innerHTML = `<div class="prose notice-answer">${render(notice.end.last_message)}</div>`;
     } else if (notice.kind === "world") {
       into.innerHTML = `<div class="told-plain">${plain(entry.text)}</div>`;
@@ -1432,7 +1402,7 @@ export class ConversationView {
     // written for the model are said again in the interface's words.
     const world = from.kind === "world";
     const told = readTold(text);
-    let label = world ? words.world : from.kind === "page" ? words.aPage(from.page.page) : `${from.address.resident} · ${from.address.machine}`;
+    let label = world ? words.world : from.kind === "page" ? words.aPage(from.page.page) : `${from.address.resident} ${from.address.machine}`;
     let how = "";
     let body: string;
     switch (told.kind) {
@@ -1440,7 +1410,7 @@ export class ConversationView {
         body = `<p class="told-line">${escape(words.jobEnded(told.job, told.machine))}<span class="told-how">${escape(words.ended(told.how))}</span></p><p class="told-path">${escape(told.output)}</p>`;
         break;
       case "colleague":
-        label = `${told.colleague} · ${told.machine}`;
+        label = `${told.colleague} ${told.machine}`;
         how = words.ended(told.how);
         body = `<div class="prose">${render(told.body)}</div>`;
         break;
@@ -1578,7 +1548,7 @@ export class ConversationView {
         named: (tool) => this.agentsObject(tool, null),
       },
     );
-    const { title, added, removed, steps, running, only, bare, began } = said;
+    const { title, parts, added, removed, steps, running, only, bare, began } = said;
     const stats = added || removed ? `<span class="add">+${added}</span><span class="del">−${removed}</span>` : "";
     stretch.head.classList.toggle("bare", bare);
     stretch.head.classList.toggle("thought", only);
@@ -1586,8 +1556,18 @@ export class ConversationView {
     const titleElement = stretch.head.querySelector<HTMLElement>(".group-title")!;
     if (titleElement.textContent !== title) {
       // The step in hand changes in place: the new words fade in, the line
-      // keeps its height.
-      titleElement.textContent = title;
+      // keeps its height. What it did is said in whole parts, so a narrow
+      // line ends on an ellipsis after the last that fits.
+      if (parts.length > 1) {
+        titleElement.replaceChildren(
+          ...parts.flatMap((part, index) => {
+            const span = document.createElement("span");
+            span.className = "group-part";
+            span.textContent = part;
+            return index ? [words.tallyGap, span] : [span];
+          }),
+        );
+      } else titleElement.textContent = title;
       if (running) {
         titleElement.classList.remove("fresh");
         void titleElement.offsetWidth;
@@ -1726,7 +1706,7 @@ export class ConversationView {
       line.added !== null && line.removed !== null
         ? `<span class="row-stats"><span class="add">+${line.added}</span><span class="del">−${line.removed}</span></span>`
         : "";
-    const elsewhere = write.machine !== this.context.residentMachine ? `<span class="row-machine">${escape(words.on(write.machine))}</span>` : "";
+    const elsewhere = write.machine !== this.context.residentMachine ? `<span class="row-machine">${glyph("machine", 12)}${escape(words.on(write.machine))}</span>` : "";
     const chevron = expandable ? `<span class="row-chevron">${glyph("chevron", 16)}</span>` : "";
     const fold = expandable ? `<div class="fold-box"${open ? "" : " style=\"height:0\" inert"}><div class="fold-content"></div></div>` : "";
     // A change that could not be read line by line says why on hover.
@@ -1761,7 +1741,7 @@ export class ConversationView {
     const expandable = this.hasDetails(entry.tool);
     const elsewhere =
       entry.tool.machine && entry.tool.machine !== this.context.residentMachine
-        ? `<span class="row-machine">${escape(words.on(entry.tool.machine))}</span>`
+        ? `<span class="row-machine">${glyph("machine", 12)}${escape(words.on(entry.tool.machine))}</span>`
         : "";
     const stats =
       line.added !== null && line.removed !== null
@@ -1796,7 +1776,7 @@ export class ConversationView {
     const open = this.openRows.has(entry.key);
     const elsewhere =
       entry.tool.machine && entry.tool.machine !== this.context.residentMachine
-        ? `<span class="row-machine">${escape(words.on(entry.tool.machine))}</span>`
+        ? `<span class="row-machine">${glyph("machine", 12)}${escape(words.on(entry.tool.machine))}</span>`
         : "";
     return `<div class="row row-tool row-agent${enter}" data-row="${escape(entry.key)}"><span class="rail"></span><button class="row-line" type="button" data-open="${escape(entry.key)}" aria-expanded="${open}"><span class="row-action">${escape(line.action)}</span><span class="row-rest"><span class="row-object agent-object"><span class="agent-kind" hidden></span><span class="agent-task">${escape(line.object ?? "")}</span></span><span class="row-meta"><span class="agent-meta"></span>${elsewhere}<span class="row-chevron">${glyph("chevron", 16)}</span></span></span></button><div class="agent-now" hidden><span class="agent-now-mark"></span><span class="agent-now-said"></span></div><div class="fold-box"${open ? "" : ' style="height:0" inert'}><div class="fold-content"></div></div></div>`;
   }
@@ -1820,7 +1800,7 @@ export class ConversationView {
     const steps = run.tools ?? run.steps.length;
     if (run.going) return run.began === null ? "" : clockSays(steps, run.began, words);
     const took = run.duration ?? (run.ended !== null && run.began !== null ? run.ended - run.began : null);
-    return [steps ? words.steps(steps) : "", took !== null ? words.took(took) : ""].filter(Boolean).join(" · ");
+    return [steps ? words.steps(steps) : "", took !== null ? words.took(took) : ""].filter(Boolean).join(words.figureGap);
   }
 
   /** The agents a call names, as the row says them: each by its name, its

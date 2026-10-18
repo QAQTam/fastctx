@@ -82,7 +82,7 @@
 }
 
 .me-facts > span + span::before {
-  content: "·";
+  content: "";
   margin-right: var(--space-2);
 }
 
@@ -107,7 +107,7 @@
 }
 
 .me-link.online i {
-  background: var(--alive);
+  background: var(--text-2);
 }
 
 .me-link.connecting i {

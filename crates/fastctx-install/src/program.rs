@@ -1,5 +1,8 @@
 //! Executable identity without opening a World or an agent's configuration.
 
+mod answer;
+
+use answer::answer;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -12,42 +15,47 @@ use fastctx_types::renewal::Build;
 /// response; protocol zero means that executable did not identify a protocol.
 pub fn inspect(path: &Path) -> anyhow::Result<Build> {
     let path = std::fs::canonicalize(path)?;
-    let revision = revision(&path)?;
+    let marked = mark(&path)?;
     let cache = CACHE.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()));
-    if let Some((held, build)) = cache.lock().expect("kernel identity cache").get(&path)
-        && *held == revision
+    let held = cache.lock().expect("kernel identity cache").get(&path).cloned();
+    if let Some((held, build)) = held
+        && (held == marked || crate::renewal::digest(&path)? == build.digest)
     {
-        return Ok(build.clone());
+        cache.lock().expect("kernel identity cache").insert(path, (marked, build.clone()));
+        return Ok(build);
     }
     let build = identify(&path)?;
-    ensure!(revision == self::revision(&path)?, "kernel changed during identification: {}", path.display());
-    cache.lock().expect("kernel identity cache").insert(path, (revision, build.clone()));
+    // Its bytes are what decide: Windows or other software may mark a
+    // program the first time it runs without changing one of them.
+    ensure!(crate::renewal::digest(&path)? == build.digest, "kernel changed during identification: {}", path.display());
+    cache.lock().expect("kernel identity cache").insert(path.clone(), (mark(&path)?, build.clone()));
     Ok(build)
 }
 
-type Revision = fastctx_platform::file_read::Snapshot;
-type Cache = std::collections::BTreeMap<PathBuf, (Revision, Build)>;
+/// Everything the filesystem says of the file; equal marks spare hashing it.
+type Mark = String;
+type Cache = std::collections::BTreeMap<PathBuf, (Mark, Build)>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-fn revision(path: &Path) -> std::io::Result<Revision> {
+fn mark(path: &Path) -> std::io::Result<Mark> {
     let file = fastctx_platform::file_read::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "kernel must be a regular file"));
     }
-    fastctx_platform::file_read::snapshot(&file, &metadata)
+    Ok(fastctx_platform::file_read::snapshot(&file, &metadata)?.fingerprint())
 }
 
 fn identify(path: &Path) -> anyhow::Result<Build> {
     let digest = crate::renewal::digest(path)?;
-    let identified = command(path).args(["renew", "identify"]).output()?;
+    let identified = answer(command(path).args(["renew", "identify"]), path)?;
     if identified.status.success() {
         let build: Build = serde_json::from_slice(&identified.stdout).context("reading kernel identity")?;
         ensure!(build.digest == digest, "the identified executable changed: {}", path.display());
         semver::Version::parse(&build.version).context("kernel version is not semver")?;
         return Ok(build);
     }
-    let version = command(path).arg("--version").output()?;
+    let version = answer(command(path).arg("--version"), path)?;
     ensure!(version.status.success(), "{} cannot report its version", path.display());
     let text = std::str::from_utf8(&version.stdout)?;
     let version = text.trim().strip_prefix("fastctx ").context("executable is not fastctx")?;
@@ -90,7 +98,7 @@ pub fn newer(candidate: &Build, previous: &Build) -> anyhow::Result<bool> {
 }
 
 pub fn notices(path: &Path) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
-    let output = command(path).args(["renew", "notices"]).output()?;
+    let output = answer(command(path).args(["renew", "notices"]), path)?;
     ensure!(output.status.success(), "the World program cannot provide its embedded notices");
     let notices: std::collections::BTreeMap<String, String> = serde_json::from_slice(&output.stdout)?;
     ensure!(

@@ -33,7 +33,7 @@ export interface ShellWords {
   foldSidebar: string;
   /** A page head's way back, for a screen reader: to the page named. */
   backTo(page: string): string;
-  /** "Claude · laptop". */
+  /** "laptop 上的 Claude". */
   someone(agent: string, machine: string): string;
   colleagueFor(asker: string): string;
   busy(lasted: string): string;
@@ -159,6 +159,11 @@ export interface NewTalkWords {
   others(shared: boolean): string;
   assisting: string;
   ownedBy(owner: string): string;
+  /** Over the table: all agents, rather than one of them. */
+  allAgents: string;
+  /** Another person's row in the table: how many machines, how many
+   *  logins. */
+  personSub(machines: number, logins: number): string;
   noAgents: string;
   /** The field that narrows many agents to those typed for. */
   narrow: string;
@@ -220,6 +225,8 @@ export const zhNewTalk: NewTalkWords = {
   others: (shared) => (shared ? "共享给我的" : "其他成员的"),
   assisting: "协助我的",
   ownedBy: (owner) => `${owner} 的`,
+  allAgents: "全部",
+  personSub: (machines, logins) => `${machines} 台　${logins} 个登录`,
   noAgents: "没有可用的智能体",
   narrow: "按机器、智能体、账号筛选",
   assistantGone: "该登录已不可用",
@@ -262,6 +269,8 @@ export const enNewTalk: NewTalkWords = {
   others: (shared) => (shared ? "Shared with me" : "Other members'"),
   assisting: "Assisting me",
   ownedBy: (owner) => `${owner}'s`,
+  allAgents: "All",
+  personSub: (machines, logins) => `${machines} machine${machines === 1 ? "" : "s"}, ${logins} login${logins === 1 ? "" : "s"}`,
   noAgents: "No agents available",
   narrow: "Filter by machine, agent or account",
   assistantGone: "Login unavailable",
@@ -449,7 +458,7 @@ export const zhSettings: SettingsWords = {
   hub: (name) => `中枢服务器 ${name}`,
   as: (accounts) => (accounts ? `已登录 ${accounts}` : ""),
   version: "版本",
-  online: (hub, since) => `已连接 ${hub} · ${since} 起`,
+  online: (hub, since) => `已连接 ${hub}，${since} 起`,
   connecting: () => "连接中",
   stopped: () => "未连接",
   dissolved: "网络已解散",
@@ -560,7 +569,7 @@ export const enSettings: SettingsWords = {
   hub: (name) => `Hub ${name}`,
   as: (accounts) => (accounts ? `signed in to ${accounts}` : ""),
   version: "Version",
-  online: (hub, since) => `connected to ${hub} · since ${since}`,
+  online: (hub, since) => `connected to ${hub} since ${since}`,
   connecting: () => "connecting",
   stopped: () => "not connected",
   dissolved: "network dissolved",
@@ -738,12 +747,12 @@ export const zhDetails: DetailsWords = {
   startedByWorld: "后台会话",
   origin: "来源",
   openedByYou: "由你开启",
-  askedBy: (asker, label) => `${asker} 调用的模型 · ${label}`,
+  askedBy: (asker, label) => `${asker} 调用的模型：${label}`,
   here: "加入",
   since: (ago) => `${ago}前`,
   state: "状态",
-  busy: (lasted) => `工作中 · ${lasted}`,
-  idle: (ago) => `空闲 · ${ago}前`,
+  busy: (lasted) => `工作中　${lasted}`,
+  idle: (ago) => `空闲　${ago}前`,
   removed: (ago) => `${ago}前已移除`,
   waiting: "等待回复",
   trouble: "异常",
@@ -781,12 +790,12 @@ export const enDetails: DetailsWords = {
   startedByWorld: "background session",
   origin: "Origin",
   openedByYou: "opened by you",
-  askedBy: (asker, label) => `called by ${asker} · ${label}`,
+  askedBy: (asker, label) => `called by ${asker}: ${label}`,
   here: "Joined",
   since: (ago) => `${ago} ago`,
   state: "Status",
-  busy: (lasted) => `working · ${lasted}`,
-  idle: (ago) => `idle · ${ago} ago`,
+  busy: (lasted) => `working, ${lasted}`,
+  idle: (ago) => `idle, ${ago} ago`,
   removed: (ago) => `removed ${ago} ago`,
   waiting: "waiting for your reply",
   trouble: "Issues",
@@ -971,7 +980,7 @@ export const zhPalette: PaletteWords = {
   theme: (name) => `主题：${name}`,
   invite: (login) => `添加设备到 ${login}`,
   fold: "显示/隐藏侧栏",
-  hint: "↑↓ 选择 · Enter 打开 · Esc 关闭",
+  hint: "↑↓ 选择　Enter 打开　Esc 关闭",
 };
 
 export const enPalette: PaletteWords = {
@@ -984,7 +993,7 @@ export const enPalette: PaletteWords = {
   theme: (name) => `Theme: ${name}`,
   invite: (login) => `Add device to ${login}`,
   fold: "Show/hide sidebar",
-  hint: "↑↓ to select · Enter to open · Esc to close",
+  hint: "↑↓ to select, Enter to open, Esc to close",
 };
 
 export interface ComposerWords {
@@ -1142,7 +1151,7 @@ export const zhComposer: ComposerWords = {
     plan: "计划待批准",
     planAt: (path) => path,
     planGo: "批准并执行",
-    planGoWith: (kept) => `批准 · ${kept}`,
+    planGoWith: (kept) => `批准，${kept}`,
     planKeep: "继续规划",
     planNote: "修改意见",
     rule: (allow, rules, where) =>
@@ -1200,7 +1209,7 @@ export const zhComposer: ComposerWords = {
     },
   },
   said: {
-    model: (model, effort) => `下一轮起使用 ${model}${effort ? ` · ${effort}` : ""}`,
+    model: (model, effort) => `下一轮起使用 ${model}${effort ? `（${effort}）` : ""}`,
     compact: "正在压缩…",
     rewind: "已回退，文件改动未撤销",
     review: "正在审查…",
@@ -1259,11 +1268,11 @@ export const zhComposer: ComposerWords = {
     cold: "已冷",
     left: (ms) => (ms < 60_000 ? `${Math.max(1, Math.ceil(ms / 1000))} 秒` : ms < 3_600_000 ? `${Math.ceil(ms / 60_000)} 分` : `${Math.round(ms / 3_600_000)} 小时`),
     ttl: (ms) => (ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)} 小时缓存` : `${Math.round(ms / 60_000)} 分钟缓存`),
-    contextTitle: (used, window) => (window ? `上下文 ${used.toLocaleString()} / ${window.toLocaleString()} · ${Math.round((used / window) * 100)}%` : `上下文 ${used.toLocaleString()}`),
+    contextTitle: (used, window) => (window ? `上下文 ${used.toLocaleString()} / ${window.toLocaleString()}，${Math.round((used / window) * 100)}%` : `上下文 ${used.toLocaleString()}`),
     hitTitle: (hit) => `最近一次请求，缓存命中 ${hit}`,
     warmTitle: (left, ttl) => `从最后一次回答算起，缓存还能留 ${left}（${ttl}）；过了这段时间，下一次请求要把整个上下文重新写进缓存`,
     coldTitle: "缓存已经过期，下一次请求要把整个上下文重新写进缓存",
-    requests: (n, span) => `${n} 次请求 · ${span}`,
+    requests: (n, span) => `${n} 次请求，${span}`,
     span: (ms) => {
       const minutes = Math.round(ms / 60_000);
       if (minutes < 1) return "不到一分钟";
@@ -1276,7 +1285,7 @@ export const zhComposer: ComposerWords = {
     lowest: "最低",
     mean: "平均",
     latest: "最近",
-    readout: (time, hit, context) => `${time} · 命中 ${hit} · 上下文 ${context}`,
+    readout: (time, hit, context) => `${time}　命中 ${hit}　上下文 ${context}`,
     stretch: "选一段",
     steps: "每一步的上下文",
     close: "关闭",
@@ -1286,7 +1295,7 @@ export const zhComposer: ComposerWords = {
     causes: { call: "工具返回", answer: "回答", other: "其他" },
     compactions: () => "次压缩",
     compacted: "压缩",
-    stepSaid: (step, context, grew) => [`第 ${step} 步`, `上下文 ${context}`, grew].filter(Boolean).join(" · "),
+    stepSaid: (step, context, grew) => [`第 ${step} 步`, `上下文 ${context}`, grew].filter(Boolean).join("　"),
     step: (step) => `第 ${step} 步`,
     heaviest: "最占地方的工具调用",
     heaviestWhy: "一步里几次调用各占多少，按各自返回了多少来分",
@@ -1357,7 +1366,7 @@ export const enComposer: ComposerWords = {
     plan: "Plan ready for approval",
     planAt: (path) => path,
     planGo: "Approve and run",
-    planGoWith: (kept) => `Approve · ${kept}`,
+    planGoWith: (kept) => `Approve, ${kept}`,
     planKeep: "Keep planning",
     planNote: "Changes to the plan",
     rule: (allow, rules, where) =>
@@ -1415,7 +1424,7 @@ export const enComposer: ComposerWords = {
     },
   },
   said: {
-    model: (model, effort) => `Using ${model}${effort ? ` · ${effort}` : ""} from the next turn`,
+    model: (model, effort) => `Using ${model}${effort ? ` (${effort})` : ""} from the next turn`,
     compact: "Compacting…",
     rewind: "Rewound; file changes were kept",
     review: "Reviewing…",
@@ -1474,11 +1483,11 @@ export const enComposer: ComposerWords = {
     cold: "Cold",
     left: (ms) => (ms < 60_000 ? `${Math.max(1, Math.ceil(ms / 1000))}s` : ms < 3_600_000 ? `${Math.ceil(ms / 60_000)}m` : `${Math.round(ms / 3_600_000)}h`),
     ttl: (ms) => (ms >= 3_600_000 ? `${Math.round(ms / 3_600_000)}h cache` : `${Math.round(ms / 60_000)}m cache`),
-    contextTitle: (used, window) => (window ? `Context ${used.toLocaleString()} / ${window.toLocaleString()} · ${Math.round((used / window) * 100)}%` : `Context ${used.toLocaleString()}`),
+    contextTitle: (used, window) => (window ? `Context ${used.toLocaleString()} / ${window.toLocaleString()}, ${Math.round((used / window) * 100)}%` : `Context ${used.toLocaleString()}`),
     hitTitle: (hit) => `Last request: ${hit} of the prompt served from the cache`,
     warmTitle: (left, ttl) => `The cache stays ${left} more from the last answer (${ttl}); after that the next request writes the whole context to it again`,
     coldTitle: "The cache has expired: the next request writes the whole context to it again",
-    requests: (n, span) => `${n} requests · ${span}`,
+    requests: (n, span) => `${n} requests, ${span}`,
     span: (ms) => {
       const minutes = Math.round(ms / 60_000);
       if (minutes < 1) return "under a minute";
@@ -1491,7 +1500,7 @@ export const enComposer: ComposerWords = {
     lowest: "lowest",
     mean: "mean",
     latest: "latest",
-    readout: (time, hit, context) => `${time} · ${hit} hit · ${context} context`,
+    readout: (time, hit, context) => `${time}, ${hit} hit, ${context} context`,
     stretch: "Choose a stretch",
     steps: "Context, step by step",
     close: "Close",
@@ -1501,7 +1510,7 @@ export const enComposer: ComposerWords = {
     causes: { call: "tool results", answer: "answers", other: "other" },
     compactions: (n) => `compaction${n === 1 ? "" : "s"}`,
     compacted: "compacted",
-    stepSaid: (step, context, grew) => [`step ${step}`, `context ${context}`, grew].filter(Boolean).join(" · "),
+    stepSaid: (step, context, grew) => [`step ${step}`, `context ${context}`, grew].filter(Boolean).join(", "),
     step: (step) => `step ${step}`,
     heaviest: "Calls that took the most room",
     heaviestWhy: "Within a step, its calls share what it added by how much each returned",
@@ -1566,9 +1575,9 @@ export const zhShell: ShellWords = {
   openSidebar: "显示侧栏",
   foldSidebar: "隐藏侧栏",
   backTo: (page) => `返回${page}`,
-  someone: (agent, machine) => `${agent} · ${machine}`,
+  someone: (agent, machine) => `${machine} 上的 ${agent}`,
   colleagueFor: (asker) => `${asker} 调用的模型`,
-  busy: (lasted) => `工作中 · ${lasted}`,
+  busy: (lasted) => `工作中　${lasted}`,
   idle: "空闲",
   waiting: "等待回复",
   offline: "离线",
@@ -1612,9 +1621,9 @@ export const enShell: ShellWords = {
   openSidebar: "Show sidebar",
   foldSidebar: "Hide sidebar",
   backTo: (page) => `Back to ${page}`,
-  someone: (agent, machine) => `${agent} · ${machine}`,
+  someone: (agent, machine) => `${agent} on ${machine}`,
   colleagueFor: (asker) => `called by ${asker}`,
-  busy: (lasted) => `working · ${lasted}`,
+  busy: (lasted) => `working, ${lasted}`,
   idle: "idle",
   waiting: "waiting for your reply",
   offline: "offline",

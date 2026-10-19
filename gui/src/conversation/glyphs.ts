@@ -22,11 +22,12 @@ type Frame =
 
 /** Which agent and which kind of device, drawn small beside a conversation's
  *  name; what is done to a turn; the places of the frame added since; what an
- *  agent asks the user. None is a maker's mark: the agents are told apart by
- *  shapes of our own. */
+ *  agent asks the user; a command that takes the output of the row above;
+ *  where a folder walk starts. None is a maker's mark: the agents are told
+ *  apart by shapes of our own. */
 type Marks =
-  | "claude" | "codex" | "desktop" | "laptop" | "server" | "group" | "features" | "agents" | "folder" | "fork" | "info" | "regenerate"
-  | "terminal" | "cross" | "fit" | "ask";
+  | "claude" | "codex" | "desktop" | "laptop" | "server" | "group" | "features" | "agents" | "folder" | "folder-open" | "fork" | "info" | "regenerate"
+  | "terminal" | "cross" | "fit" | "ask" | "fed" | "home" | "disk";
 
 const paths: Record<Named, string> = {
   menu: '<path d="M4 7h12M4 13h8"/>',
@@ -42,6 +43,8 @@ const paths: Record<Named, string> = {
   features: '<rect x="4" y="4" width="5" height="5" rx="1.25"/><rect x="11" y="4" width="5" height="5" rx="1.25"/><rect x="4" y="11" width="5" height="5" rx="1.25"/><path d="M13.5 11v5M11 13.5h5"/>',
   agents: '<rect x="3.75" y="4.75" width="12.5" height="10.5" rx="2"/><path d="M6.75 8.5l2 1.5-2 1.5M10.5 11.75h3"/>',
   folder: '<path d="M3.75 6.25a1 1 0 0 1 1-1h3.2l1.5 1.5h5.8a1 1 0 0 1 1 1v6.75a1 1 0 0 1-1 1H4.75a1 1 0 0 1-1-1z"/>',
+  // The same folder open: its front leaf let down before it.
+  "folder-open": '<path d="M3.75 13.5V6.25a1 1 0 0 1 1-1h3.2l1.5 1.5h5.3a1 1 0 0 1 1 1v1"/><path d="M3.75 14.75l1.85-4.9a1 1 0 0 1 .94-.65h9.4a.7.7 0 0 1 .65.95l-1.6 4.25a1 1 0 0 1-.94.65H4.25a.5.5 0 0 1-.5-.3z"/>',
   fork: '<circle cx="6" cy="5" r="1.6"/><circle cx="14" cy="5" r="1.6"/><circle cx="10" cy="15.2" r="1.6"/><path d="M6 6.6v.9a2.5 2.5 0 0 0 2.5 2.5h3a2.5 2.5 0 0 0 2.5-2.5v-.9M10 10v3.6"/>',
   info: '<circle cx="10" cy="10" r="6.25"/><path d="M10 9.25v4"/><circle cx="10" cy="6.9" r="0.6" fill="currentColor"/>',
   // A speech balloon with a question in it: something asked of the user.
@@ -108,6 +111,11 @@ const paths: Record<Named, string> = {
   rows: '<circle cx="5" cy="5.75" r="0.9" fill="currentColor"/><circle cx="5" cy="10" r="0.9" fill="currentColor"/><circle cx="5" cy="14.25" r="0.9" fill="currentColor"/><path d="M8.25 5.75h7.5M8.25 10h7.5M8.25 14.25h7.5"/>',
   clock: '<circle cx="10" cy="10" r="6.25"/><path d="M10 6.4V10l2.5 1.6"/>',
   relay: '<circle cx="4.5" cy="10" r="1.5"/><circle cx="15.5" cy="10" r="1.5"/><path d="M6 10h2.25M11.75 10H14"/><rect x="8.25" y="8" width="3.5" height="4" rx="0.75"/>',
+  // Where a folder walk starts: a machine's home, and each of its disks.
+  home: '<path d="M4 9.25L10 4.25l6 5"/><path d="M5.75 8v7.25a.75.75 0 0 0 .75.75h7a.75.75 0 0 0 .75-.75V8"/><path d="M8.5 16v-3.5h3V16"/>',
+  disk: '<rect x="3.75" y="6.25" width="12.5" height="7.5" rx="1.5"/><path d="M6.25 10h4.5"/><circle cx="13.4" cy="10" r="0.65" fill="currentColor"/>',
+  // A hook from the row above into this one.
+  fed: '<path d="M6 4.5v6a2 2 0 0 0 2 2h7.5"/><path d="M12.75 9.75l2.75 2.75-2.75 2.75"/>',
   camera: '<path d="M3.75 7.5a1 1 0 0 1 1-1h2.1l1.2-1.75h3.9l1.2 1.75h2.1a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H4.75a1 1 0 0 1-1-1z"/><circle cx="10" cy="10.75" r="2.6"/>',
 };
 

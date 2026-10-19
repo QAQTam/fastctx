@@ -52,7 +52,7 @@
   height: var(--row-line);
   padding: 0;
   font: inherit;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   background: none;
   border: 0;
@@ -85,7 +85,7 @@
   height: calc(var(--gap-row) - var(--space-4));
   padding: 0;
   font: inherit;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   background: none;
   border: 0;
@@ -147,6 +147,32 @@
   margin: 0;
 }
 
+/* A long message of the user's: its first ten lines, fading out under
+   them, and the way to the rest at its foot. */
+.bubble.long:not(.open) > .bubble-text {
+  max-height: calc(1em * var(--leading-prose) * 10);
+  overflow: hidden;
+  -webkit-mask: linear-gradient(to bottom, #000 calc(100% - 2.5em), transparent);
+  mask: linear-gradient(to bottom, #000 calc(100% - 2.5em), transparent);
+}
+
+.bubble.long > .bubble-text {
+  overflow: hidden;
+}
+
+.bubble-more {
+  display: block;
+  margin: var(--space-1) 0 -2px auto;
+  font-size: var(--size-text);
+  color: var(--on-bubble);
+  opacity: 0.7;
+  transition: opacity var(--hover) ease;
+}
+
+.bubble-more:hover {
+  opacity: 1;
+}
+
 .bubble p + p {
   margin-top: 0.7em;
 }
@@ -166,7 +192,7 @@
 .bubble-note {
   max-width: min(85%, calc(var(--body-size) * 36));
   margin: var(--space-1) var(--space-2) 0 0;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   text-align: right;
 }
@@ -176,7 +202,7 @@
 }
 
 .bubble-from {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   margin: 0 var(--space-2) var(--space-1) 0;
 }
@@ -206,7 +232,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
   margin-bottom: var(--space-1);
 }
@@ -247,7 +273,7 @@
   margin: var(--space-1) 0 0;
   font-family: var(--font-code);
   font-variation-settings: var(--code-axes);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   overflow-wrap: anywhere;
 }
@@ -269,7 +295,7 @@
 .told-more > summary {
   cursor: pointer;
   width: fit-content;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   list-style-position: inside;
 }
@@ -280,7 +306,7 @@
 
 .told-more[open] > .told-plain {
   margin-top: var(--space-2);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
 }
 
@@ -293,7 +319,7 @@
 }
 
 .plan-label {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
   margin-bottom: var(--space-2);
 }
@@ -304,7 +330,7 @@
   list-style: none;
   margin: 0;
   padding: 0;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   line-height: var(--leading-ui);
 }
 
@@ -350,13 +376,13 @@
 .steps-note {
   margin: var(--space-2) 0 0;
   color: var(--text-2);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
 }
 
 /* Notes: what the World knows of the session, said in a line. */
 
 .note {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
   line-height: var(--leading-ui);
 }
@@ -377,7 +403,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -394,15 +420,17 @@
 /* An activity group: a heading that says what the stretch did, and the
    rail beneath it. */
 
-/* The heading runs across the column: what the stretch did on the left,
-   cut where it must; how many steps and how long at the right, before the
-   arrow, standing over the rows' own figures. */
+/* The heading is one line read from the left: what the stretch did, cut
+   where it must, how long it took, and the arrow right after; nothing
+   stands apart at the far edge. */
 .group-head {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: var(--space-1);
   width: 100%;
   max-width: 100%;
+  text-align: left;
   min-height: var(--row-line);
   line-height: var(--row-leading);
   color: var(--text-2);
@@ -410,11 +438,13 @@
   transition: color var(--hover) ease;
 }
 
-.group-head:not(:disabled):hover {
+.group-head:not([aria-disabled]):hover {
   color: var(--text);
 }
 
 .group-title {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -423,6 +453,12 @@
 /* Each kind of thing a stretch did stands whole or not at all. */
 .group-part {
   display: inline-block;
+}
+
+/* A heading of one part, the step in hand above all, ends on an ellipsis
+   where it does not fit rather than being cut. */
+.group-part:only-child {
+  display: inline;
 }
 
 .group-head .glyph {
@@ -437,25 +473,8 @@
   --turn: 0deg;
 }
 
-.group-head:not(:disabled):hover > .glyph {
+.group-head:not([aria-disabled]):hover > .glyph {
   color: var(--text-2);
-}
-
-/* While something runs, the heading says what, its words slowly
-   brightening and dimming. They stay drawn as words: painted through a
-   moving background they would lose their subpixel smoothing. */
-.group-head.going .group-title {
-  animation: heading-glow var(--glow) ease-in-out infinite;
-}
-
-@keyframes heading-glow {
-  0%,
-  100% {
-    color: var(--text-2);
-  }
-  50% {
-    color: var(--text-strong);
-  }
 }
 
 /* Folding: one duration and one curve, the height carried by the grid so
@@ -519,7 +538,7 @@
   gap: 2px;
   padding: 2px 4px 2px 8px;
   border-radius: var(--radius-full);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
   text-decoration: none;
   transition: color var(--hover) ease, background-color var(--hover) ease;
@@ -589,8 +608,14 @@
   transition: color var(--hover) ease;
 }
 
-.row-line:not(:disabled):hover {
+.row-line:not([aria-disabled]):hover {
   color: var(--text);
+}
+
+/* A row with nothing to open is marked, not disabled: a disabled control
+   would swallow the middle button and the page's autoscroll with it. */
+.row-line[aria-disabled] {
+  cursor: default;
 }
 
 .row-action {
@@ -617,7 +642,7 @@
   transition: color var(--hover) ease;
 }
 
-.row-line:not(:disabled):hover .row-object {
+.row-line:not([aria-disabled]):hover .row-object {
   color: var(--text-2);
 }
 
@@ -669,6 +694,152 @@
   flex: none;
 }
 
+/* A copy's way between machines, each with its mark. */
+.row-route {
+  margin: 0 2px;
+}
+
+/* How many of the machines one command went to did not end well. */
+.row-trouble {
+  white-space: nowrap;
+  color: var(--wrong);
+}
+
+/* A command whose input flowed straight from the row above begins with a
+   small hook from it, in the ink of the machines' marks. */
+.row-fed {
+  display: inline-flex;
+  vertical-align: -0.12em;
+  margin-right: 2px;
+  color: var(--text-3);
+}
+
+/* One command sent to many machines, opened: a quiet grid, a tile for each
+   machine, those that did not end well first in the colour of a fault; a
+   tile pressed shows that machine's command and last lines beneath. */
+.fan {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 var(--space-3);
+}
+
+/* However many machines, the grid stops at half the view and scrolls in
+   itself; those that did not end well are at its top. */
+.fan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.fan-tile {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 30px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-s);
+  background: var(--surface-code);
+  color: var(--text-2);
+  font-size: var(--size-text);
+  text-align: left;
+  transition: background-color var(--hover) ease, color var(--hover) ease;
+}
+
+.fan-tile > .glyph,
+.fan-tile > .pulse {
+  flex: none;
+  color: var(--text-3);
+}
+
+.fan-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fan-tile:hover {
+  background: var(--surface-header);
+  color: var(--text);
+}
+
+.fan-tile.troubled,
+.fan-tile.troubled > .glyph {
+  color: var(--wrong);
+}
+
+.fan-tile[aria-pressed="true"] {
+  background: var(--accent-wash);
+  color: var(--text-strong);
+}
+
+@media (hover: none) {
+  .fan-tile {
+    min-height: 44px;
+  }
+}
+
+/* What a copy moved, or a look read: the facts, plainly, on a solid sheet. */
+.step-facts {
+  display: grid;
+  gap: 4px;
+  margin: var(--space-1) 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-m);
+  background: var(--surface-code);
+  font-size: var(--size-text);
+  color: var(--text-2);
+}
+
+.step-facts dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px var(--space-3);
+  margin: 0;
+}
+
+.step-facts dt {
+  color: var(--text-3);
+}
+
+.step-facts dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.step-machine {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: var(--space-2);
+  color: var(--text-3);
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.step-machine > .glyph {
+  flex: none;
+}
+
+.step-path {
+  overflow-wrap: anywhere;
+}
+
+.step-sum {
+  margin: 0;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.step-problems {
+  display: grid;
+  margin: 0;
+  color: var(--wrong);
+}
+
 /* The arrow that opens a row shows under a pointer, on focus and while the
    row is open: the whole line is what is pressed. */
 .row-chevron {
@@ -710,10 +881,6 @@
 .row-said {
   flex: none;
   white-space: nowrap;
-}
-
-.row-thinking.row-running .row-said {
-  color: var(--text);
 }
 
 .row-figures {
@@ -768,20 +935,18 @@
   line-height: var(--leading-prose);
 }
 
-/* A running tool: its glyph gives way to a slow pulse. */
+/* A running tool, an agent at work among them: its glyph gives way to a
+   slow pulse in the ink of the glyphs around it. The pulse is all that says
+   it runs: its words, its stretch's heading and the rest of the turn read as
+   they do once it is done. */
 .pulse {
   width: 7px;
   height: 7px;
   border-radius: var(--radius-full);
-  background: var(--accent);
+  background: var(--text-2);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
   animation: pulse var(--breath) ease-in-out infinite;
-}
-
-.row-running .row-action,
-.row-tool.row-running .row-action {
-  color: var(--text);
 }
 
 /* A tool that arrives in a live conversation comes in once, quietly. */
@@ -789,11 +954,6 @@
   opacity: var(--rise);
   translate: 0 calc((1 - var(--rise)) * 4px);
   animation: rise var(--enter) var(--fold-easing) both;
-}
-
-:root[data-reduced] .group-head.going .group-title {
-  animation: none;
-  color: var(--text);
 }
 
 :root[data-reduced] .pulse {
@@ -823,7 +983,7 @@
   height: var(--tool-header);
   padding: 0 var(--space-3);
   background: var(--surface-header);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
 }
 
@@ -850,9 +1010,109 @@
   overflow: hidden;
 }
 
-.long-text.diff + .diff-path,
-.long-text.diff + .long-text.diff {
+/* A change to a file: one solid card, its head a shade deeper saying which
+   file it is and on which machine, the change scrolling beneath it. */
+.diff-card {
+  border-radius: var(--radius-m);
+  background: var(--surface-code);
+  overflow: hidden;
+}
+
+.diff-card + .diff-card {
   margin-top: var(--space-2);
+}
+
+.diff-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 34px;
+  padding: 0 var(--space-1) 0 var(--space-3);
+  background: var(--surface-header);
+  font-size: var(--size-text);
+  color: var(--text-3);
+}
+
+.diff-card-machine {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+/* The path: its folders give way from the front, the file's name stays. */
+.diff-card-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  white-space: nowrap;
+}
+
+.diff-card-folder {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+}
+
+.diff-card-folder > bdi {
+  direction: ltr;
+}
+
+.diff-card-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+}
+
+.diff-card-acts {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The way to the whole of it stands in the head, always there, as the
+   copy does. */
+.diff-card-acts .long-text-full {
+  position: static;
+  background: transparent;
+  --shown: 1;
+}
+
+.diff-card-acts .icon-button,
+.diff-card-acts .long-text-full {
+  width: 28px;
+  height: 28px;
+  color: var(--text-3);
+}
+
+.diff-card-acts .icon-button:hover,
+.diff-card-acts .long-text-full:hover {
+  color: var(--text);
+  background: var(--hairline);
+}
+
+.diff-card-copy.copied,
+.diff-card-copy.copied:hover {
+  color: var(--alive);
+}
+
+@media (hover: none) {
+  .diff-card-acts .icon-button,
+  .diff-card-acts .long-text-full {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+.diff-card .long-text.diff {
+  border-radius: 0;
+  background: transparent;
 }
 
 /* Tinted rows run to the box's edge. */
@@ -862,17 +1122,6 @@
 
 .long-text.diff .io-more {
   margin: var(--space-1) 0 0 var(--space-3);
-}
-
-.diff-path {
-  margin: 0 0 var(--space-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl;
-  text-align: left;
-  font-size: var(--size-small);
-  color: var(--text-3);
 }
 
 .lv-line.diff-row,
@@ -949,7 +1198,7 @@
   padding-left: calc(var(--diff-number) * 2 + 2.4ch);
   color: var(--text-3);
   font-family: var(--font-reading);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   background: var(--surface-code-2);
 }
 
@@ -992,7 +1241,7 @@
 .io-note {
   margin: 0;
   padding: var(--space-1) 0;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -1033,7 +1282,7 @@
   align-items: baseline;
   gap: var(--space-4);
   padding: 0 var(--io-pad) var(--space-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   line-height: var(--leading-ui);
 }
 
@@ -1089,7 +1338,7 @@
 }
 
 .io-more {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   transition: color var(--hover) ease;
 }
@@ -1193,7 +1442,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--accent);
 }
 
@@ -1242,7 +1491,7 @@
   margin: var(--space-2) 0 0;
   font-family: var(--font-code);
   font-variation-settings: var(--code-axes);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   overflow-wrap: anywhere;
 }
@@ -1254,7 +1503,7 @@
 .ask-reason,
 .ask-message {
   margin: var(--space-2) 0 0;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   line-height: var(--leading-ui);
   color: var(--text-2);
 }
@@ -1271,7 +1520,6 @@
   padding: var(--space-2) var(--space-3);
   max-height: min(60vh, 32rem);
   overflow-y: auto;
-  overscroll-behavior: contain;
   border-radius: var(--radius-s);
   background: var(--bg);
   background: var(--fill);
@@ -1289,7 +1537,7 @@
   padding: 0;
   font-family: var(--font-code);
   font-variation-settings: var(--code-axes);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-2);
 }
 
@@ -1311,7 +1559,7 @@
   min-height: 32px;
   padding: 5px 14px;
   border-radius: var(--radius-full);
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   line-height: var(--leading-ui);
   text-align: left;
   color: var(--text-2);
@@ -1349,7 +1597,7 @@
 
 .ask-status {
   margin: var(--space-2) 0 0;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -1369,7 +1617,7 @@
 }
 
 .ask-question-head {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -1398,7 +1646,7 @@
   border-radius: var(--radius-s);
   background: var(--fill);
   text-align: left;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   line-height: var(--leading-ui);
   color: var(--text-2);
   transition: color var(--hover) ease, background-color var(--hover) ease, box-shadow var(--hover) ease;
@@ -1416,7 +1664,7 @@
 }
 
 .ask-option-what {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -1443,7 +1691,7 @@
   background: var(--field);
   color: var(--text);
   font: inherit;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   color-scheme: inherit;
 }
 
@@ -1471,7 +1719,7 @@
 }
 
 .ask-field-title {
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   color: var(--text);
 }
 
@@ -1481,7 +1729,7 @@
 }
 
 .ask-field-what {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -1508,7 +1756,7 @@
   grid-template-columns: var(--rail-glyph) minmax(0, 1fr);
   column-gap: var(--rail-gap);
   align-items: center;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   color: var(--text-2);
 }
 
@@ -1612,7 +1860,7 @@
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
 }
 
 .find-input::-webkit-search-cancel-button {
@@ -1626,7 +1874,7 @@
 .find-count {
   flex: none;
   padding: 0 var(--space-1);
-  font-size: var(--size-small);
+  font-size: var(--size-fine);
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -1716,7 +1964,7 @@
   border-radius: var(--radius-m);
   background: var(--bubble);
   color: var(--on-bubble);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   text-decoration: none;
 }
 
@@ -1746,7 +1994,7 @@ a.bubble-file:hover {
   border-radius: var(--radius-m);
   background: var(--fill);
   color: var(--text-2);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
 }
 
 .picture-missing .picture-why {
@@ -1864,7 +2112,7 @@ a.bubble-file:hover {
 .pv-counter {
   flex: none;
   color: var(--text-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1872,7 +2120,7 @@ a.bubble-file:hover {
 .pv-note {
   flex: none;
   color: var(--text-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1966,7 +2214,7 @@ a.bubble-file:hover {
   min-height: 24px;
   padding: 0 var(--space-2);
   border-radius: var(--radius-s);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   opacity: var(--shown);
   transition: color var(--hover) ease, background-color var(--hover) ease, --shown var(--hover) ease;
@@ -2053,7 +2301,7 @@ a.bubble-file:hover {
   padding: var(--space-1) var(--space-3) var(--space-2);
   overflow: hidden;
   color: var(--text-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2069,7 +2317,7 @@ a.bubble-file:hover {
   background: transparent;
   color: var(--text-2);
   font: inherit;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   text-align: left;
   cursor: pointer;
 }
@@ -2119,8 +2367,8 @@ a.bubble-file:hover {
 @media (max-width: 600px) {
   .transcript {
     --body-size: var(--size-under);
-    --size-small: calc(var(--body-size) - 2px);
-    --size-ui: calc(var(--body-size) - 1px);
+    --size-text: var(--body-size);
+    --size-fine: calc(var(--body-size) - 2px);
     --size-code: calc(var(--body-size) * 0.88);
     --size-h1: calc(var(--body-size) * 1.154);
     --size-h2: calc(var(--body-size) * 1.154);

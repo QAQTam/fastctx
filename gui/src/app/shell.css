@@ -14,7 +14,7 @@ body {
 }
 
 .shell {
-  --sidebar: 268px;
+  --sidebar: 292px;
   display: grid;
   grid-template-columns: var(--sidebar) minmax(0, 1fr);
   height: 100dvh;
@@ -126,14 +126,14 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 38px;
+  height: 40px;
   margin: var(--space-2) 0 var(--space-3);
   padding: 0 var(--space-3);
   border-radius: var(--radius-m);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-lift);
   color: var(--text);
-  font-size: var(--size-ui);
+  font-size: var(--body-size);
   transition: box-shadow var(--hover) ease, background-color var(--hover) ease;
 }
 
@@ -173,11 +173,11 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 32px;
+  min-height: 34px;
   padding: 4px var(--space-3);
   border-radius: var(--radius-s);
   color: var(--text-2);
-  font-size: var(--size-ui);
+  font-size: var(--body-size);
   line-height: var(--leading-ui);
   text-decoration: none;
   transition: color var(--hover) ease, background-color var(--hover) ease;
@@ -216,7 +216,7 @@ body {
 
 .count {
   flex: none;
-  font-size: var(--size-small);
+  font-size: var(--size-fine);
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -228,7 +228,7 @@ body {
 .sidebar-trouble {
   margin: var(--space-1) 0 0;
   padding: 0 var(--space-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--caution);
 }
 
@@ -241,7 +241,7 @@ body {
   padding: 0 var(--space-3);
   font-family: var(--font-reading);
   font-weight: 400;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   letter-spacing: 0.04em;
   color: var(--text-3);
 }
@@ -300,45 +300,119 @@ body {
 .place-row .place {
   flex: 1;
   min-width: 0;
-  padding-right: 34px;
 }
 
-.place-fold {
+/* A project is a folder: pressed, it opens and closes on its conversations.
+   Shut, the end of its line says whether something in it waits or works
+   and how many are in it; under a pointer those give way to its "⋯", as a
+   conversation's marks give way to its buttons. */
+.project-fold {
+  width: 100%;
+  text-align: left;
+  padding-right: var(--space-2);
+}
+
+.project-shut-marks {
+  flex: none;
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.project-place.shut .project-shut-marks {
+  display: inline-flex;
+}
+
+.side-project-more {
   position: absolute;
   right: 4px;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: var(--radius-s);
   color: var(--text-3);
   --shown: 0;
   opacity: var(--shown);
+  pointer-events: none;
   transition: --shown var(--hover) ease, color var(--hover) ease, background-color var(--hover) ease;
 }
 
-.place-fold .glyph {
-  rotate: var(--turn);
-  transition: --turn var(--fold) var(--fold-easing);
-}
-
-.place-row:hover .place-fold,
-.place-fold:focus-visible {
+.project-row:hover .side-project-more,
+.project-row:focus-within .side-project-more,
+.side-project-more[aria-expanded="true"] {
   --shown: 1;
+  pointer-events: auto;
 }
 
-.place-fold:hover {
+.project-row:hover .project-shut-marks,
+.project-row:focus-within .project-shut-marks,
+.project-row:has(.side-project-more[aria-expanded="true"]) .project-shut-marks {
+  visibility: hidden;
+}
+
+.side-project-more:hover,
+.side-project-more[aria-expanded="true"] {
   color: var(--text);
   background: var(--hairline);
 }
 
-.shut .place-fold .glyph {
-  --turn: -90deg;
+/* Under a finger the "⋯" is always there, after the marks, a finger's
+   width; a long press on the line opens it as well. */
+@media (hover: none) {
+  .project-fold {
+    padding-right: 48px;
+  }
+
+  .side-project-more {
+    width: 44px;
+    height: 44px;
+    right: 0;
+    --shown: 1;
+    pointer-events: auto;
+  }
+
+  .project-row:hover .project-shut-marks,
+  .project-row:focus-within .project-shut-marks {
+    visibility: visible;
+  }
 }
 
-@media (hover: none) {
-  .place-fold {
-    --shown: 1;
+/* Its conversations slide in under it and out again: the height is carried
+   by the grid, so nothing is measured, and a folder shut is out of the
+   way of the keyboard. */
+.project-talks {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--fold) var(--fold-easing);
+}
+
+.project-talks.shut {
+  grid-template-rows: 0fr;
+}
+
+.project-talks-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.project-empty {
+  margin: 1px 0 var(--space-1);
+  padding: 6px var(--space-3) 6px calc(var(--space-3) + 28px);
+  font-size: var(--size-text);
+  color: var(--text-3);
+}
+
+/* A page gone to comes in over a moment: its ink settles, nothing moves;
+   a registered property, so its words stay smooth on Windows. */
+.main > .page-arriving {
+  opacity: var(--shown);
+  animation: page-arrive var(--enter) var(--ease-out) both;
+}
+
+@keyframes page-arrive {
+  from {
+    --shown: 0;
   }
 }
 
@@ -370,19 +444,21 @@ body {
   grid-template-columns: 16px minmax(0, 1fr) 10px 16px;
   align-items: center;
   column-gap: 9px;
-  min-height: 32px;
+  min-height: 34px;
   padding: 4px var(--space-3);
   border-radius: var(--radius-s);
   color: var(--text-2);
-  font-size: var(--size-ui);
+  font-size: var(--body-size);
   line-height: var(--leading-ui);
   text-decoration: none;
   transition: color var(--hover) ease, background-color var(--hover) ease;
 }
 
+/* A project's conversations stand under its name, a step in from its
+   folder. */
 .talks.in-project .talk-row,
 .talks.in-project .talk-all {
-  padding-left: calc(var(--space-3) + 8px);
+  padding-left: calc(var(--space-3) + 18px);
 }
 
 .talk-row:hover,
@@ -434,7 +510,7 @@ body {
 
 .talk-all {
   color: var(--text-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
 }
 
 .talk-all .count {
@@ -596,7 +672,7 @@ body {
     top: 0;
     bottom: 0;
     left: 0;
-    width: min(86vw, 320px);
+    width: min(88vw, 344px);
     --slide: -102%;
     translate: var(--slide) var(--lift);
     transition: --slide var(--fold) var(--fold-easing);
@@ -712,7 +788,7 @@ html.framed .page-head {
   border-radius: var(--radius-s);
   background: var(--text-strong);
   color: var(--bg);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   line-height: 1.45;
   white-space: pre-line;
   pointer-events: none;
@@ -766,7 +842,7 @@ html.framed .page-head {
   background: var(--field);
   color: var(--text);
   font: inherit;
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
 }
 
 .talks-search:focus {
@@ -780,7 +856,7 @@ html.framed .page-head {
 .talks-none {
   margin-top: var(--space-6);
   color: var(--text-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
 }
 
 /* At the foot of every conversation, the way on to the archived ones. */
@@ -793,7 +869,7 @@ html.framed .page-head {
   padding: 4px var(--space-3);
   border-radius: var(--radius-s);
   color: var(--text-3);
-  font-size: var(--size-ui);
+  font-size: var(--size-text);
   text-decoration: none;
   transition: color var(--hover) ease, background-color var(--hover) ease;
 }
@@ -952,7 +1028,7 @@ html.framed .page-head {
 }
 
 .network-row-note {
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 

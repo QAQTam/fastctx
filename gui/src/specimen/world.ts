@@ -100,18 +100,45 @@ function node(name: string, online: boolean | null, since: string, owner: string
 /** With `?many` in the address, a team's network of about a hundred
  *  machines: twenty-five more of the account's own and others' shared with
  *  it, every seventh out of reach. */
-function many(): Node[] {
+interface ManyOne {
+  name: string;
+  owner: string;
+  online: boolean;
+  group: string | null;
+}
+
+/** The machines `?many` adds: the user's own in the groups a school's would
+ *  be in, most of them away at any hour, and the members' by team. */
+function manyOnes(): ManyOne[] {
   if (!new URLSearchParams(location.search).has("many")) return [];
-  const teams: [string, number][] = [["me", 25], ["ada", 18], ["bo", 21], ["chen", 14], ["dee", 9], ["eva", 7]];
+  const ones: ManyOne[] = [];
+  const floors: [string, string[]][] = [
+    ["教学楼2层", ["A1", "A2", "A3", "A4", "A5", "B1", "B2", "B3", "B4", "B5", "C1", "C2", "C3", "C4", "D1", "D2", "D3", "D4", "E1", "E2"]],
+    ["教学楼3层", ["AG4", "AG5", "AG6", "AG7", "AG8", "AG9", "AG10", "AG11", "AG12", "B2", "B3", "B4", "教师机"]],
+    ["实验楼3层", Array.from({ length: 24 }, (_, n) => `AG${n + 1}`)],
+  ];
   let index = 0;
-  return teams.flatMap(([owner, count]) =>
-    Array.from({ length: count }, (_, n) => {
+  for (const [floor, seats] of floors) {
+    for (const seat of seats) {
       index += 1;
-      const linux = index % 3 !== 0;
-      const name = `${owner === "me" ? "node" : owner}-${String(n + 1).padStart(2, "0")}`;
-      return node(name, index % 7 !== 0, "01:00:00", owner, linux ? "linux" : "windows", linux ? `/home/${owner}` : `C:/Users/${owner}`, ["me", true, true]);
-    }),
-  );
+      ones.push({ name: `${floor}${seat}`, owner: "me", online: index % 9 === 0, group: floor });
+    }
+  }
+  const teams: [string, number][] = [["ada", 12], ["bo", 9]];
+  for (const [owner, count] of teams) {
+    for (let n = 1; n <= count; n += 1) {
+      index += 1;
+      ones.push({ name: `${owner}-${String(n).padStart(2, "0")}`, owner, online: index % 4 !== 0, group: null });
+    }
+  }
+  return ones;
+}
+
+function many(): Node[] {
+  return manyOnes().map((one, index) => {
+    const linux = index % 3 !== 0;
+    return node(one.name, one.online, "01:00:00", one.owner, linux ? "linux" : "windows", linux ? `/home/${one.owner}` : `C:/Users/${one.owner}`, ["me", true, true]);
+  });
 }
 
 /** The hubs this desktop is logged in to, as `nodes` and `accounts` see
@@ -197,6 +224,10 @@ function hubs(two: boolean): { nodes: HubNodes[]; accounts: HubAccounts[] } {
         member("cy-mac", "computer", ["cy"], "cy", "09:20:00", true, "e7c13d52"),
         member("bo-phone", "phone", ["bo"], null, "14:02:00", true, "6c1d9b03"),
         member("cy-phone", "phone", ["cy"], null, "09:25:00", true, "d4e8a217"),
+        ...manyOnes().map((one, index) => {
+          const seen = member(one.name, "computer", [one.owner], one.owner, "01:00:00", one.online, `m${String(index).padStart(7, "0")}`);
+          return one.group ? { ...seen, group: one.group } : seen;
+        }),
       ],
       tokens: [
         { key: LAB_CODE, account: "me", label: "机房 A", kind: "computer", managed: true, uses: 40, used: 2, expires: daysAhead(6), way: "paste", made_by: "desktop", made_at: at("10:40:00") },
@@ -208,7 +239,8 @@ function hubs(two: boolean): { nodes: HubNodes[]; accounts: HubAccounts[] } {
       assists: [
         { machine: "desktop", account: "ada", agent: "codex", home: "C:\\Users\\me\\.codex-work", until: daysAhead(3) },
         { machine: "desktop", account: "bo", agent: "codex", home: "C:\\Users\\me\\.codex-work", until: null },
-        { machine: "desktop", account: "ada", agent: "claude", home: null, until: daysAhead(6), weekly: 20_000_000 },
+        { machine: "desktop", account: "ada", agent: "claude", home: null, until: daysAhead(6), weekly: 20_000_000, daily: 5_000_000, five_hour: 80 },
+        { machine: "desktop", account: "bo", agent: "claude", home: null, until: null, five_hour: 80 },
       ],
       plans: [],
       acting: [{ machine: "gpu", account: "me", since: at("03:42:00") }],
@@ -251,7 +283,7 @@ function hubs(two: boolean): { nodes: HubNodes[]; accounts: HubAccounts[] } {
         member("render", "computer", ["ops"], "ops", "00:07:00", true, "4e11d3a9"),
       ],
       shares: [{ machine: "build", account: "yc" }],
-      assists: [{ machine: "render", account: "yc", agent: "claude", home: null, until: daysAhead(1), weekly: 40_000_000 }],
+      assists: [{ machine: "render", account: "yc", agent: "claude", home: null, until: daysAhead(1), weekly: 40_000_000, daily: 10_000_000, five_hour: 80 }],
       plans: [{ machine: "render", agent: "claude", home: null, plan: "max" }],
       acting: [{ machine: "build", account: "yc", since: at("09:15:00") }],
       projects: [{ name: "ingest", owner: "yc", granted: [] }],
@@ -616,7 +648,13 @@ export function specimenAgents(machine: string, at: Date = new Date()): WorldAge
   // A machine of another answers only with the logins assisting the asker.
   const asks: AgentFacts = { ...claude, unattended: { kind: "known", value: false } };
   const agents =
-    machine === "desktop" ? [codex, claude, work, trial, token, personal] : machine === "render" ? [claude] : machine === "server" ? [codex, asks] : [codex, claude];
+    machine === "desktop"
+      ? [codex, claude, work, trial, token, personal]
+      : machine === "render"
+        ? [{ ...claude, limits: { kind: "unavailable" as const, reason: "the windows of the login's account are its owner's to see" } }]
+        : machine === "server"
+          ? [codex, asks]
+          : [codex, claude];
   return {
     machine,
     machines: [{ kind: "answered", reply: { machine, checked_at: at.toISOString(), elapsed_ms: 180, agents } }],
@@ -644,7 +682,7 @@ export function specimenChange(world: WorldNow | null, hub: string, made: Accoun
     const hubs = world.accounts.hubs.map((one) => {
       if (one.hub !== hub) return one;
       const kept = one.assists.filter((assist) => !(assist.machine === made.machine && assist.account === made.to && assist.agent === made.agent && assist.home === home));
-      const assists = made.assisting ? [...kept, { machine: made.machine, account: made.to, agent: made.agent, home, until: made.until ?? null, ...(made.weekly ? { weekly: made.weekly } : {}) }] : kept;
+      const assists = made.assisting ? [...kept, { machine: made.machine, account: made.to, agent: made.agent, home, until: made.until ?? null, ...(made.weekly ? { weekly: made.weekly } : {}), ...(made.daily ? { daily: made.daily } : {}), ...(made.five_hour ? { five_hour: made.five_hour } : {}) }] : kept;
       return { ...one, assists };
     });
     return { ...world, accounts: { ...world.accounts, hubs } };

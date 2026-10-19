@@ -1,5 +1,6 @@
 import type { HealthKind } from "./world/events";
-import { enProblems, zhProblems } from "./app/problem";
+import { dollars, underCent } from "./world/money";
+import { enProblems, zhProblems, type Reached } from "./app/problem";
 import type { FileLinkWords } from "./conversation/file-links";
 import type { PictureWords } from "./conversation/pictures";
 import type { QueueWords } from "./conversation/queue";
@@ -22,6 +23,7 @@ export type Act =
   | "move"
   | "write"
   | "command"
+  | "copy"
   | "search"
   | "image"
   | "ask"
@@ -37,10 +39,20 @@ export type Act =
   | "resume"
   | "list";
 
+/** One kind of thing a stretch did, said: "修改 5 个文件". The files it
+ *  changed carry the lines added and removed after them; a failure is
+ *  coloured as one. */
+export interface TallyPart {
+  said: string;
+  kind: "edited" | "done" | "failed";
+}
+
 export interface Tally {
   read: number;
   edited: number;
   ran: number;
+  /** Files copied between machines. */
+  copied: number;
   searched: number;
   asked: number;
   /** The host's own agents it started. */
@@ -85,6 +97,27 @@ export interface AgentWords {
   unknownAgents(n: number): string;
 }
 
+/** The rows of what a run did through the World. */
+export interface TripWords {
+  /** One command sent to `n` machines. */
+  machines(n: number): string;
+  /** How many of them did not end as they should. */
+  troubled(n: number): string;
+  command: string;
+  lastLines: string;
+  stopped: string;
+  lost(why: string): string;
+  /** A command whose machine went away under it, as its row says it. */
+  unfinished: string;
+  /** Under the pointer on the hook of a command whose input flowed
+   *  straight from the row above. */
+  fed: string;
+  from: string;
+  to: string;
+  copied(files: number, size: string): string;
+  problems: string;
+}
+
 export interface Words {
   english: boolean;
   queue: QueueWords;
@@ -94,7 +127,10 @@ export interface Words {
   failedTool(name: string): string;
   /** What a finished stretch did, by kind: its heading's parts in the order
    *  read, set apart by `tallyGap`. */
-  tally(tally: Tally): string[];
+  /** What a stretch did, kind by kind, the weightiest first: files changed,
+   *  commands run, agents and models called, searches, reads; then how
+   *  many failed. */
+  tally(tally: Tally): TallyPart[];
   tallyGap: string;
   /** Thinking under way, as both hosts say it, in every language. */
   thinking: string;
@@ -108,6 +144,10 @@ export interface Words {
   thinkingTokens(n: number): string;
   plan: string;
   copyMessage: string;
+  /** A long message of the user's, its first lines shown: the rest, and
+   *  back. */
+  bubbleMore: string;
+  bubbleLess: string;
   copyCode: string;
   rewind: string;
   fork: string;
@@ -138,6 +178,8 @@ export interface Words {
   showLess: string;
   copy: string;
   copied: string;
+  /** A change's card: its whole as a unified diff. */
+  copyDiff: string;
   sendPlaceholder(agent: string): string;
   send: string;
   stop: string;
@@ -175,6 +217,8 @@ export interface Words {
   /** What a command printed and what a write changed, opened under their
    *  rows: what was left out of what the model got, the whole output on
    *  its machine beside it, and what is said when either is gone. */
+  /** What a run did through the World, row by row (`conversation/trip.ts`). */
+  trip: TripWords;
   output: OutputWords & {
     /** What a call was given, and what it gave back, as their boxes are named. */
     input: string;
@@ -189,7 +233,8 @@ export interface Words {
   /** How long something took: "1 分 12 秒". */
   took(ms: number): string;
   /** What a turn took, under its info mark: the model and effort the host
-   *  reported, how long, and the tokens. */
+   *  reported, how long, the tokens, what it cost by the host's own ledger,
+   *  and the login's windows as the turn left them. */
   turnInfo: {
     model: string;
     effort: string;
@@ -197,6 +242,10 @@ export interface Words {
     took: string;
     tokens: string;
     spent(input: number, cached: number, output: number, reasoning: number): string;
+    cost: string;
+    costOf(usd: number): string;
+    limits: string;
+    window(name: string, minutes: number | null): string;
   };
   /** How many steps a stretch of work has taken. */
   steps(n: number): string;
@@ -222,9 +271,9 @@ export interface Words {
   /** What the session's host said of its own health, in a plain line; the
    *  host's words go on hover. */
   health: Record<HealthKind, string>;
-  /** An assistance's weekly amount spent, and when its week ends: a turn
-   *  stopped for it says so. */
-  allowanceUsed(amount: string, until: Date): string;
+  /** An assistance's allowance reached, and until when: a turn stopped
+   *  for it says so. */
+  allowanceUsed(reached: Reached): string;
   /** Links an agent writes to files. */
   files: FileLinkWords;
   /** The conversation's pictures, small and over the whole window. */
@@ -278,6 +327,7 @@ const zhActs: Record<Act, [string, string, string]> = {
   move: ["移动", "移动中", "移动失败"],
   write: ["写入", "写入中", "写入失败"],
   command: ["运行", "运行中", "命令失败"],
+  copy: ["复制", "复制中", "复制失败"],
   search: ["搜索", "搜索中", "搜索失败"],
   image: ["看图", "查看中", "查看失败"],
   ask: ["调用", "调用中", "调用失败"],
@@ -300,6 +350,7 @@ const enActs: Record<Act, [string, string, string]> = {
   move: ["Moved", "Moving", "Move Failed"],
   write: ["Wrote", "Writing", "Write Failed"],
   command: ["Ran", "Running command", "Command Failed"],
+  copy: ["Copied", "Copying", "Copy Failed"],
   search: ["Searched", "Searching", "Search Failed"],
   image: ["Viewed", "Viewing image", "Image Failed"],
   ask: ["Called", "Calling a model", "Call Failed"],
@@ -342,17 +393,18 @@ export const zh: Words = {
   act: (act, tense) => zhActs[act][index(tense)],
   failedTool: (name) => `${name} 失败`,
   tally: (t) => {
-    const parts: string[] = [];
-    if (t.read) parts.push(`读取 ${t.read} 个文件`);
-    if (t.edited) parts.push(`修改 ${t.edited} 个文件`);
-    if (t.ran) parts.push(`运行 ${t.ran} 条命令`);
-    if (t.searched) parts.push(`搜索 ${t.searched} 次`);
-    if (t.asked) parts.push(`调用模型 ${t.asked} 次`);
-    if (t.delegated) parts.push(`委派 ${t.delegated} 个子代理`);
-    if (t.coordinated) parts.push(`调度子代理 ${t.coordinated} 次`);
-    if (t.other) parts.push(`调用 ${t.other} 个工具`);
-    if (!parts.length) parts.push(t.thinking ? "Thought" : "活动");
-    if (t.failed) parts.push(`${t.failed} 个失败`);
+    const parts: TallyPart[] = [];
+    if (t.edited) parts.push({ said: `修改 ${t.edited} 个文件`, kind: "edited" });
+    if (t.ran) parts.push({ said: `运行 ${t.ran} 条命令`, kind: "done" });
+    if (t.copied) parts.push({ said: `复制 ${t.copied} 个文件`, kind: "done" });
+    if (t.delegated) parts.push({ said: `委派 ${t.delegated} 个子代理`, kind: "done" });
+    if (t.asked) parts.push({ said: `调用模型 ${t.asked} 次`, kind: "done" });
+    if (t.searched) parts.push({ said: `搜索 ${t.searched} 次`, kind: "done" });
+    if (t.read) parts.push({ said: `读取 ${t.read} 个文件`, kind: "done" });
+    if (t.coordinated) parts.push({ said: `调度子代理 ${t.coordinated} 次`, kind: "done" });
+    if (t.other) parts.push({ said: `调用 ${t.other} 个工具`, kind: "done" });
+    if (!parts.length) parts.push({ said: t.thinking ? "Thought" : "活动", kind: "done" });
+    if (t.failed) parts.push({ said: `${t.failed} 个失败`, kind: "failed" });
     return parts;
   },
   tallyGap: "　",
@@ -363,6 +415,8 @@ export const zh: Words = {
   thinkingTokens: (n) => tokensSaid(n),
   plan: "计划",
   copyMessage: "复制",
+  bubbleMore: "展开全文",
+  bubbleLess: "收起",
   copyCode: "复制代码",
   rewind: "改了重发",
   fork: "从这里分叉",
@@ -399,6 +453,7 @@ export const zh: Words = {
   showLess: "− 收起",
   copy: "复制",
   copied: "已复制",
+  copyDiff: "复制改动",
   sendPlaceholder: (agent) => `发消息给 ${agent}…`,
   send: "发送",
   stop: "停止",
@@ -421,6 +476,20 @@ export const zh: Words = {
   moreLines: (n) => `+ ${n.toLocaleString("zh-CN")} 行`,
   unchangedLines: (n) => `${n} 行未改动`,
   fullScreen: "查看全部",
+  trip: {
+    machines: (n) => `${n} 台`,
+    troubled: (n) => `${n} 台出错`,
+    command: "命令",
+    lastLines: "最后几行",
+    stopped: "已停止",
+    lost: (why) => `没有跑完：${why}`,
+    unfinished: "没有跑完",
+    fed: "用上一行的输出",
+    from: "从",
+    to: "到",
+    copied: (files, size) => `${files} 个文件，${size}`,
+    problems: "没复制成的",
+  },
   output: {
     input: "输入",
     printed: "输出",
@@ -444,6 +513,10 @@ export const zh: Words = {
       [`输入 ${input.toLocaleString("zh-CN")}`, cached ? `缓存命中 ${cached.toLocaleString("zh-CN")}` : "", `输出 ${output.toLocaleString("zh-CN")}`, reasoning ? `其中推理 ${reasoning.toLocaleString("zh-CN")}` : ""]
         .filter(Boolean)
         .join("，"),
+    cost: "花费",
+    costOf: (usd) => (underCent(usd) ? "不到 $0.01" : `约 ${dollars(usd)}`),
+    limits: "额度",
+    window: (name, minutes) => (minutes === 300 || name.startsWith("five_hour") ? "5 小时" : minutes === 10080 || name.startsWith("seven_day") ? "7 天" : name),
   },
   took: (ms) => {
     const seconds = Math.max(0, Math.round(ms / 1000));
@@ -590,18 +663,19 @@ export const en: Words = {
   failedTool: (name) => `${name} Failed`,
   tally: (t) => {
     const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
-    const parts: string[] = [];
-    if (t.read) parts.push(`read ${plural(t.read, "file", "files")}`);
-    if (t.edited) parts.push(`edited ${plural(t.edited, "file", "files")}`);
-    if (t.ran) parts.push(`ran ${plural(t.ran, "command", "commands")}`);
-    if (t.searched) parts.push(t.searched === 1 ? "searched once" : `searched ${t.searched} times`);
-    if (t.asked) parts.push(`called ${plural(t.asked, "model", "models")}`);
-    if (t.delegated) parts.push(`delegated ${plural(t.delegated, "agent", "agents")}`);
-    if (t.coordinated) parts.push(t.coordinated === 1 ? "coordinated agents once" : `coordinated agents ${t.coordinated} times`);
-    if (t.other) parts.push(plural(t.other, "tool call", "tool calls"));
-    if (!parts.length) parts.push(t.thinking ? "Thought" : "Activity");
-    parts[0] = parts[0]!.charAt(0).toUpperCase() + parts[0]!.slice(1);
-    if (t.failed) parts.push(`${t.failed} failed`);
+    const parts: TallyPart[] = [];
+    if (t.edited) parts.push({ said: `edited ${plural(t.edited, "file", "files")}`, kind: "edited" });
+    if (t.ran) parts.push({ said: `ran ${plural(t.ran, "command", "commands")}`, kind: "done" });
+    if (t.copied) parts.push({ said: `copied ${plural(t.copied, "file", "files")}`, kind: "done" });
+    if (t.delegated) parts.push({ said: `delegated ${plural(t.delegated, "agent", "agents")}`, kind: "done" });
+    if (t.asked) parts.push({ said: `called ${plural(t.asked, "model", "models")}`, kind: "done" });
+    if (t.searched) parts.push({ said: t.searched === 1 ? "searched once" : `searched ${t.searched} times`, kind: "done" });
+    if (t.read) parts.push({ said: `read ${plural(t.read, "file", "files")}`, kind: "done" });
+    if (t.coordinated) parts.push({ said: t.coordinated === 1 ? "coordinated agents once" : `coordinated agents ${t.coordinated} times`, kind: "done" });
+    if (t.other) parts.push({ said: plural(t.other, "tool call", "tool calls"), kind: "done" });
+    if (!parts.length) parts.push({ said: t.thinking ? "Thought" : "Activity", kind: "done" });
+    parts[0] = { ...parts[0]!, said: parts[0]!.said.charAt(0).toUpperCase() + parts[0]!.said.slice(1) };
+    if (t.failed) parts.push({ said: `${t.failed} failed`, kind: "failed" });
     return parts;
   },
   tallyGap: ", ",
@@ -612,6 +686,8 @@ export const en: Words = {
   thinkingTokens: (n) => tokensSaid(n),
   plan: "Plan",
   copyMessage: "Copy",
+  bubbleMore: "Show all",
+  bubbleLess: "Show less",
   copyCode: "Copy code",
   rewind: "Edit and resend",
   fork: "Fork from here",
@@ -648,6 +724,7 @@ export const en: Words = {
   showLess: "− show less",
   copy: "Copy",
   copied: "Copied",
+  copyDiff: "Copy diff",
   sendPlaceholder: (agent) => `Message ${agent}…`,
   send: "Send",
   stop: "Stop",
@@ -670,6 +747,20 @@ export const en: Words = {
   moreLines: (n) => `+ ${n.toLocaleString("en")} more line${n === 1 ? "" : "s"}`,
   unchangedLines: (n) => `${n} unchanged lines`,
   fullScreen: "View all",
+  trip: {
+    machines: (n) => `${n} machines`,
+    troubled: (n) => `${n} failed`,
+    command: "Command",
+    lastLines: "Last lines",
+    stopped: "Stopped",
+    lost: (why) => `Did not finish: ${why}`,
+    unfinished: "Did not finish",
+    fed: "Takes the output of the row above",
+    from: "From",
+    to: "To",
+    copied: (files, size) => `${files} ${files === 1 ? "file" : "files"}, ${size}`,
+    problems: "Not copied",
+  },
   output: {
     input: "Input",
     printed: "Output",
@@ -693,6 +784,10 @@ export const en: Words = {
       [`${input.toLocaleString("en")} in`, cached ? `${cached.toLocaleString("en")} cached` : "", `${output.toLocaleString("en")} out`, reasoning ? `${reasoning.toLocaleString("en")} reasoning` : ""]
         .filter(Boolean)
         .join(", "),
+    cost: "Cost",
+    costOf: (usd) => (underCent(usd) ? "under $0.01" : `≈ ${dollars(usd)}`),
+    limits: "Limits",
+    window: (name, minutes) => (minutes === 300 || name.startsWith("five_hour") ? "5 hours" : minutes === 10080 || name.startsWith("seven_day") ? "7 days" : name),
   },
   took: (ms) => {
     const seconds = Math.max(0, Math.round(ms / 1000));

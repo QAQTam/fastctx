@@ -2,6 +2,7 @@
 // conversation itself in a region that scrolls on its own, and the words
 // the user is about to send, always at the foot.
 
+import { keepChoice } from "../app/model-memory";
 import { layerOpened } from "../app/back";
 import { FocusPanel, focusSummary, type FocusPlace } from "../app/focus-panel";
 import type { ComposerWords, FocusWords } from "../app/words";
@@ -11,7 +12,6 @@ import type { Control, Controlled, Offers } from "../world/control";
 import type { Attachment } from "../world/attachments";
 import type { AttachmentSource } from "../world/files";
 import type { Decoding } from "../world/remote-lines";
-import type { ResidentDetail, ResidentNow } from "../world/world";
 import { AttachTray, type AttachSeam, type AttachWords, type Attached } from "./attach";
 import { SendQueue, type Queued } from "./queue";
 import { bindComposer, type ComposerSession, type ComposerSessionState } from "./composer";
@@ -22,7 +22,6 @@ import { Menu, commandFor, commandRow, commandsOf, usageOf, type MenuCommand } f
 import { ModelPanel, enModelPanel, zhModelPanel } from "./model-panel";
 import { effortLabel } from "./effort-slider";
 import { fileRow, mentionAt, mentioned, type FileWords, type FoundFile } from "./mention";
-import type { Details } from "./details";
 import { FileLinks } from "./file-links";
 import { JobsPanel, type Job, type OutputLines } from "./jobs-panel";
 import { AgentsPanel } from "./agents-panel";
@@ -118,14 +117,6 @@ export interface PageOptions {
     open(anchor: HTMLElement): void;
     restore(): void;
   };
-  /** What the World knows of the agent, shown in a card opened from the
-   *  head, and how to ask for it. */
-  details?: {
-    card: Details;
-    label: string;
-    look(): Promise<ResidentDetail | null>;
-    colleagues(): ResidentNow[];
-  };
   /** What the conversation offers, and doing it: its commands, its
    *  model, its usage. */
   controls?: {
@@ -189,6 +180,14 @@ const OFFERS_TRIES = 5;
  *  view is theirs: nothing keeps it at the newest meanwhile. */
 const READING_MS = 150;
 
+/** How far below the top of the view words just sent are put, the answer
+ *  coming in beneath them. */
+const SENT_AT = 24;
+
+/** How long after a send the words sent are looked for to be put at the
+ *  top: words that wait in a queue instead are not, coming later. */
+const SENT_WITHIN_MS = 4000;
+
 /** Whether something between `target` and `region` scrolls up by itself
  *  before the region would. */
 function scrollsUpWithin(target: Element | null, region: HTMLElement): boolean {
@@ -219,8 +218,18 @@ export class ConversationPage {
   private action: HTMLButtonElement;
   private scroller: HTMLElement;
   private name: HTMLElement;
-  private looking = 0;
+  /** Whether the view keeps the newest in sight as it comes. Only when the
+   *  conversation opens, until the reader moves the view, and after they
+   *  ask for the newest: nothing else moves what they look at. */
   private following = true;
+  /** Room under the newest, so words just sent can stand at the top of the
+   *  view with the answer coming in beneath them; the answer takes it up
+   *  as it grows, and it goes once the reader has scrolled away from it. */
+  private room: HTMLElement;
+  /** The words sent the room is kept for. */
+  private roomFor: string | null = null;
+  /** Until when words the user just sent are to be put at the top. */
+  private placeUntil = 0;
   /** A stop was asked for and the turn has not ended yet. */
   private stopping = false;
   /** Words of the shared queue on their way into the turn, by queue item,
@@ -264,22 +273,18 @@ export class ConversationPage {
     this.element.innerHTML = `
       ${options.head(
         `<div class="who">
-        ${options.details ? `<button class="who-seal" type="button" aria-expanded="false">${glyph(markOf(someone.agent), 16)}</button>` : `<span class="who-seal">${glyph(markOf(someone.agent), 16)}</span>`}
+        <span class="who-seal" tabindex="0">${glyph(markOf(someone.agent), 16)}</span>
         <h1 class="who-name">${escape(someone.agent)}</h1>
         <span class="who-home">${glyph("machine", 14)}<span>${escape(someone.assistFrom ? words.assistFrom(someone.assistFrom) : someone.machine)}</span></span>
         <span class="who-state" hidden></span>
       </div>`,
         `<button class="icon-button find-toggle" type="button" aria-label="${escape(words.find.find)}" title="${escape(words.find.find)}">${glyph("search", 18)}</button>${
-          options.details
-            ? `<button class="icon-button details-toggle" type="button" aria-expanded="false" aria-label="${escape(options.details.label)}" title="${escape(options.details.label)}">${glyph("info", 18)}</button>`
-            : ""
-        }${
           options.manage
             ? `<button class="icon-button talk-menu-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="${escape(options.manage.words.more)}">${glyph("more", 20)}</button>`
             : ""
         }`,
       )}
-      <div class="talk-scroller scroller"><div class="conversation"></div></div>
+      <div class="talk-scroller scroller"><div class="conversation"></div><div class="talk-room" aria-hidden="true"></div></div>
       <footer class="composer-dock">
         <button class="to-latest" type="button" hidden aria-label="${escape(words.toLatest)}" title="${escape(words.toLatest)}">${glyph("chevron", 18)}</button>
         <div class="steps-back" hidden><button class="steps-back-go" type="button">${glyph("chevron", 14)}<span></span></button><button class="steps-back-x" type="button">${glyph("close", 12)}</button></div>
@@ -299,6 +304,7 @@ export class ConversationPage {
         </form>
       </footer>`;
     this.scroller = this.element.querySelector<HTMLElement>(".talk-scroller")!;
+    this.room = this.element.querySelector<HTMLElement>(".talk-room")!;
     const transcript = this.element.querySelector<HTMLElement>(".conversation")!;
     this.finder = new Finder(
       transcript,
@@ -357,17 +363,6 @@ export class ConversationPage {
         if ((event.target as HTMLElement).closest(".composer-restore")) manage.restore();
       });
     }
-    if (options.details) {
-      const { card } = options.details;
-      this.element.append(card.element);
-      const toggle = this.element.querySelector<HTMLButtonElement>(".details-toggle")!;
-      toggle.addEventListener("click", () => this.toggleDetails(!card.open));
-      // The seal says who the agent is: pressed, everything known of it.
-      this.element.querySelector(".who-seal")!.addEventListener("click", () => this.toggleDetails(!card.open));
-      this.element.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && card.open) this.toggleDetails(false);
-      });
-    }
     const main = this.element.querySelector<HTMLElement>(".conversation")!;
     this.state = this.element.querySelector<HTMLElement>(".who-state")!;
     this.state.addEventListener("pointerenter", () => {
@@ -424,6 +419,8 @@ export class ConversationPage {
         this.following = false;
       },
       following: () => this.following,
+      // Words the user just sent stand at the top of the view.
+      sent: (key) => this.sent(key),
       // Turns not held are read as the reader comes near them.
       near: (gap, side) => void this.fillGap(gap, side),
       // Words being sent leave from where they were typed.
@@ -540,6 +537,7 @@ export class ConversationPage {
     // The region itself shrinks when the composer grows (an attachment, a
     // longer draft): the same holds.
     const keep = new ResizeObserver(() => {
+      this.fitRoom();
       if (this.following && !this.reading()) this.scroller.scrollTop = this.scroller.scrollHeight;
     });
     keep.observe(main);
@@ -557,22 +555,28 @@ export class ConversationPage {
       this.following = false;
       this.drawLatest();
     };
+    // Any move of the reader's own makes the view theirs, down as well as
+    // up: what comes after is shown where it lands, not brought to them.
+    const moved = () => {
+      if (this.following) up();
+      else reading();
+    };
     // A wheel over something in it that scrolls up by itself (a long code
     // block) moves that, not the view; keys in a field move its caret.
     this.scroller.addEventListener(
       "wheel",
-      (event) => (event.deltaY < 0 && !scrollsUpWithin(event.target as Element, this.scroller) ? up() : reading()),
+      (event) => (event.deltaY < 0 && !scrollsUpWithin(event.target as Element, this.scroller) ? up() : moved()),
       { passive: true },
     );
-    this.scroller.addEventListener("touchmove", reading, { passive: true });
+    this.scroller.addEventListener("touchmove", moved, { passive: true });
     // The scroll bar is the region itself, not anything in it.
     this.scroller.addEventListener("pointerdown", (event) => {
-      if (event.target === this.scroller) reading();
+      if (event.target === this.scroller) moved();
     });
     this.scroller.addEventListener("keydown", (event) => {
       if ((event.target as Element).closest("input, textarea, select, [contenteditable]")) return;
       if (event.key === "PageUp" || event.key === "ArrowUp" || event.key === "Home") up();
-      else if (event.key === "PageDown" || event.key === "ArrowDown" || event.key === "End" || event.key === " ") reading();
+      else if (event.key === "PageDown" || event.key === "ArrowDown" || event.key === "End" || event.key === " ") moved();
     });
     // Otherwise only a scroll the reader made says whether they still
     // follow: one that comes with the region or its content changing size
@@ -587,7 +591,8 @@ export class ConversationPage {
         if (this.following) this.scroller.scrollTop = scrollHeight;
         return;
       }
-      this.following = scrollTop + clientHeight >= scrollHeight - 48;
+      // The room goes once it is wholly below the view: nothing seen moves.
+      if (this.roomFor && this.room.offsetTop >= scrollTop + clientHeight) this.dropRoom();
       this.drawLatest();
     });
   }
@@ -606,18 +611,63 @@ export class ConversationPage {
   private latest: HTMLButtonElement;
 
   private drawLatest(): void {
-    const { scrollTop, clientHeight, scrollHeight } = this.scroller;
-    const far = !this.following && (scrollHeight - scrollTop - clientHeight > clientHeight || this.options.conversation.gaps().some((gap) => !gap.first));
+    const { scrollTop, clientHeight } = this.scroller;
+    // What is below the view, the room aside, is something to go to.
+    const below = this.room.offsetTop - scrollTop - clientHeight;
+    const far = !this.following && (below > 48 || this.options.conversation.gaps().some((gap) => !gap.first));
     if (this.latest.hidden === !far) return;
     this.latest.hidden = !far;
   }
 
-  /** Back to the newest: at once, however far. */
+  /** Back to the newest: at once, however far, and following it from
+   *  there, as the reader asked, until they move the view again. */
   private toLatest(): void {
     this.following = true;
+    this.dropRoom();
     this.render();
     this.scroller.scrollTop = this.scroller.scrollHeight;
     this.drawLatest();
+  }
+
+  /** The next words the user sends are put at the top of the view. */
+  private placeSent(): void {
+    this.following = false;
+    this.placeUntil = performance.now() + SENT_WITHIN_MS;
+  }
+
+  /** Words just sent are on the page: where the user sent them, they stand
+   *  near the top of the view, room made beneath them for the answer. */
+  private sent(key: string): void {
+    if (performance.now() > this.placeUntil) return;
+    this.placeUntil = 0;
+    this.roomFor = key;
+    this.following = false;
+    this.fitRoom();
+    const words = this.view.elementOf(key);
+    if (!words) return;
+    const top = words.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + this.scroller.scrollTop;
+    this.scroller.scrollTop = Math.max(0, top - SENT_AT);
+  }
+
+  /** Keeps the room just as tall as lets the words sent stand at the top of
+   *  the view: what comes beneath them takes it up, so nothing moves. */
+  private fitRoom(): void {
+    if (!this.roomFor) return;
+    const words = this.view.elementOf(this.roomFor);
+    if (!words) {
+      this.dropRoom();
+      return;
+    }
+    const top = words.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + this.scroller.scrollTop;
+    const end = this.room.offsetTop;
+    const room = Math.max(0, Math.round(this.scroller.clientHeight - SENT_AT - (end - top)));
+    const height = `${room}px`;
+    if (this.room.style.height !== height) this.room.style.height = height;
+  }
+
+  private dropRoom(): void {
+    this.roomFor = null;
+    if (this.room.style.height) this.room.style.height = "";
   }
 
   /** Reads the turns of a gap the reader came near, then draws them. */
@@ -641,7 +691,8 @@ export class ConversationPage {
     // A turn is never cut in two: where the latest turn alone is longer,
     // it is asked again only once that much more has come.
     if (latest.end < this.trimmedAt) this.trimmedAt = 0;
-    if (this.following && latest.end - latest.start > LATEST_MOST && !this.trimming && latest.end - this.trimmedAt > LATEST_KEPT) {
+    const nearNewest = this.room.offsetTop - this.scroller.scrollTop - this.scroller.clientHeight < this.scroller.clientHeight;
+    if ((this.following || nearNewest) && latest.end - latest.start > LATEST_MOST && !this.trimming && latest.end - this.trimmedAt > LATEST_KEPT) {
       this.trimming = true;
       this.trimmedAt = latest.end;
       void conversation.trim(LATEST_KEPT).finally(() => {
@@ -715,6 +766,7 @@ export class ConversationPage {
     this.drawState();
     this.drawAction();
     if (follow && !this.reading()) this.scroller.scrollTop = this.scroller.scrollHeight;
+    this.fitRoom();
     this.drawLatest();
     this.bound();
   }
@@ -791,14 +843,12 @@ export class ConversationPage {
 
   /** Stops what the page keeps asking for. */
   leave(): void {
-    clearTimeout(this.looking);
     clearTimeout(this.offersAgain);
     cancelAnimationFrame(this.frame);
     this.view.destroy();
     this.badge?.dispose();
     this.agents.destroy();
     this.finder.destroy();
-    this.looking = -1;
     this.left = true;
     document.removeEventListener("keydown", this.findKey);
     this.stopDrops?.();
@@ -1018,41 +1068,6 @@ export class ConversationPage {
     return this.options.conversation.busy() || !!composer?.awaiting_turn || !!composer?.queue.some((item) => item.sending);
   }
 
-  private toggleDetails(open: boolean): void {
-    const details = this.options.details;
-    if (!details) return;
-    const toggle = this.element.querySelector<HTMLElement>(".details-toggle");
-    const inside = details.card.element.contains(document.activeElement);
-    if (open && !details.card.open) layerOpened({ isOpen: () => details.card.open && this.element.isConnected, close: () => this.toggleDetails(false) });
-    details.card.open = open;
-    toggle?.setAttribute("aria-expanded", String(open));
-    const seal = this.element.querySelector<HTMLElement>("button.who-seal");
-    seal?.setAttribute("aria-expanded", String(open));
-    clearTimeout(this.looking);
-    if (open) {
-      details.card.element.focus({ preventScroll: true });
-      void this.lookAgain();
-    } else if (inside) {
-      // Back to what opened it: on a phone the seal, the head's only way in.
-      (toggle?.offsetParent ? toggle : seal)?.focus({ preventScroll: true });
-    }
-  }
-
-  /** Asks the World about the agent while the card is open, every few
-   *  seconds, as the front page asks about everyone. */
-  private async lookAgain(): Promise<void> {
-    const details = this.options.details;
-    if (!details || !details.card.open || this.looking === -1) return;
-    try {
-      const detail = await details.look();
-      if (detail) details.card.show(detail, details.colleagues(), new Date());
-      else details.card.unknown(null);
-    } catch (error) {
-      details.card.unknown(String(error));
-    }
-    if (details.card.open && this.looking !== -1) this.looking = window.setTimeout(() => void this.lookAgain(), 3000);
-  }
-
   private submit(): void {
     const text = this.input.value.trim();
     if (!this.session && this.tray?.sending) {
@@ -1095,7 +1110,7 @@ export class ConversationPage {
     // What the last command did is behind the conversation now.
     this.say("");
     this.hideSaid();
-    this.following = true;
+    this.placeSent();
     if (session) {
       this.commandMenu?.hide();
       this.nodeTray?.settle();
@@ -1138,7 +1153,9 @@ export class ConversationPage {
     const conversation = this.options.conversation;
     if (!now) this.released = conversation.ended();
     this.failed = null;
-    this.following = true;
+    // Sent by the user's hand, the words come to the top of the view; let
+    // go of the queue by itself, they come in where the reader is not.
+    if (now) this.placeSent();
     const sent = this.options.send(item.text, item.attached);
     void Promise.resolve(sent).then((came) => {
       // No turn to wait for: the rest wait for the user, said above them.
@@ -1162,6 +1179,12 @@ export class ConversationPage {
 
   /** A line beside the composer: what a command did, or that it did not,
    *  with the host's own words on hover. */
+  /** A short line under the input, such as what an act from the head's
+   *  "⋯" came to. */
+  notify(text: string, refused = false): void {
+    this.say(text, "", refused);
+  }
+
   private say(text: string, detail = "", refused = false): void {
     this.note.textContent = text;
     this.note.title = detail;
@@ -1532,7 +1555,7 @@ export class ConversationPage {
             // Asking again sends the same words, with what came with them,
             // as soon as the conversation is back before that turn.
             if (act === "regenerate" && words !== null) {
-              this.following = true;
+              this.placeSent();
               void this.options.send(words, kept.length ? { refs: kept, shown: [] } : { refs: [], shown: [] });
               return;
             }
@@ -1619,12 +1642,14 @@ export class ConversationPage {
 
   /** A choice in the model panel is shown at once with what the next turn
    *  runs with; the host only keeps it for that turn, and a refusal takes
-   *  it back. */
+   *  it back. Taken, it is also what the next new conversation with this
+   *  agent begins with (`app/model-memory.ts`). */
   private async setModel(model: string | null, effort: string | null): Promise<void> {
     const before = this.offered;
     if (before) this.choose({ ...before, model: model ?? before.model, effort: effort ?? before.effort });
     const done = await this.run({ name: "model", description: "", args: null, arguments: "optional", control: "model", source: null }, "", { do: "model", model, effort }, true);
     if (!done && before) this.unchoose(before);
+    else if (done) keepChoice(this.options.someone.agent, model ?? before?.model ?? null, effort ?? before?.effort ?? null);
   }
 
   private async setTier(id: string): Promise<void> {
@@ -1855,7 +1880,8 @@ export class ConversationPage {
     document.addEventListener("pointerdown", (event) => {
       if (pop.hidden || !this.element.isConnected) return;
       const target = event.target as HTMLElement;
-      if (!pop.contains(target) && !chip.contains(target)) this.closeFocus(focus);
+      // The window of a machine's folders, opened from the panel, is part of it.
+      if (!pop.contains(target) && !chip.contains(target) && !target.closest("dialog")) this.closeFocus(focus);
     });
     strip.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || pop.hidden) return;
@@ -1865,16 +1891,11 @@ export class ConversationPage {
     });
   }
 
-  /** The machines and folders keep the size they opened at, growing only
-   *  as a folder is walked to (`../app/steady`). */
-  private focusSteady: Steady | null = null;
-
   private openFocus(focus: NonNullable<PageOptions["focus"]>): void {
     const current = this.options.someone.focus;
     if (!current || this.focusSaving) return;
     const strip = this.element.querySelector<HTMLElement>(".focus-strip")!;
     const pop = strip.querySelector<HTMLElement>(".focus-pop")!;
-    this.focusSteady ??= new Steady(pop, true);
     this.focusDraft = structuredClone(current);
     this.focusPanel ??= new FocusPanel(
       {
@@ -1891,8 +1912,6 @@ export class ConversationPage {
     this.focusPanel.set(current);
     pop.replaceChildren(this.focusPanel.element);
     pop.hidden = false;
-    this.focusSteady.hold();
-    this.focusSteady.watch();
     strip.querySelector(".focus-chip")!.setAttribute("aria-expanded", "true");
     layerOpened({ isOpen: () => !pop.hidden && this.element.isConnected, close: () => this.closeFocus(focus) });
   }
@@ -1902,7 +1921,6 @@ export class ConversationPage {
     const pop = strip.querySelector<HTMLElement>(".focus-pop")!;
     if (pop.hidden) return;
     pop.hidden = true;
-    this.focusSteady?.free();
     strip.querySelector(".focus-chip")!.setAttribute("aria-expanded", "false");
     const before = this.options.someone.focus;
     const next = this.focusDraft;
@@ -2043,7 +2061,10 @@ export class ConversationPage {
     const seal = this.element.querySelector<HTMLElement>(".who-seal")!;
     seal.classList.toggle("gone", this.gone !== null || this.away !== null);
     const model = this.options.conversation.answeredBy ? modelName(this.options.conversation.answeredBy) : someone.model;
-    const sealSaid = [someone.agent, now, model].filter(Boolean).join("　");
+    // Who it is, where it lives, how it is now and its model: on a phone,
+    // where the head has no room for its machine, a long press says it.
+    const lives = someone.assistFrom ? this.options.words.assistFrom(someone.assistFrom) : someone.machine;
+    const sealSaid = [someone.agent, lives, now, model].filter(Boolean).join("　");
     seal.title = sealSaid;
     seal.setAttribute("aria-label", sealSaid);
     const trouble = this.gone ?? (this.away !== null ? now : null);

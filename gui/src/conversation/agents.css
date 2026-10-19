@@ -4,7 +4,7 @@
 
 /* A call that started an agent: its kind as a small chip before what it
    was asked, how it stands after; under it, while it works, the step it
-   takes now, faded in where the last was. */
+   takes now, in place of the last. */
 .row-agent .agent-object {
   display: inline-flex;
   align-items: baseline;
@@ -18,7 +18,7 @@
   padding: 0 6px;
   border-radius: var(--radius-s);
   background: var(--fill);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   line-height: 1.55;
   color: var(--text-2);
   white-space: nowrap;
@@ -47,35 +47,6 @@
   color: var(--wrong);
 }
 
-.row-agent > .agent-now {
-  grid-column: 2 / -1;
-  grid-row: 2;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin: -6px 0 4px;
-  font-size: var(--size-small);
-  color: var(--text-3);
-}
-
-.agent-now-mark {
-  flex: none;
-  display: inline-grid;
-}
-
-.agent-now-said {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-now.fresh .agent-now-said {
-  opacity: var(--rise);
-  animation: rise var(--enter) ease both;
-}
-
 /* What an agent did, opened under its row: its own conversation, drawn as
    the page draws one, a size down, sunk into the page in a box of its own
    that scrolls and follows its end while it works. A box inside a box
@@ -83,8 +54,8 @@
    around it. */
 .agent-box {
   --body-size-in: calc(var(--body-size) - 1px);
-  --size-small: calc(var(--body-size) - 3px);
-  --size-ui: calc(var(--body-size) - 2px);
+  --size-text: var(--body-size-in);
+  --size-fine: calc(var(--body-size) - 3px);
   --size-code: calc((var(--body-size) - 1px) * 0.88);
   --row-line: 34px;
   margin: var(--space-1) 0 var(--space-2);
@@ -110,7 +81,6 @@
 .agent-scroll {
   max-height: min(56dvh, 520px);
   overflow-y: auto;
-  overscroll-behavior: contain;
   scrollbar-width: thin;
 }
 
@@ -137,7 +107,7 @@
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-s);
   background: var(--fill);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   line-height: 1.6;
   color: var(--text-2);
 }
@@ -165,7 +135,7 @@
 .agent-asked-more {
   margin-top: 2px;
   padding: 2px 0;
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
   transition: color var(--hover) ease;
 }
@@ -178,7 +148,7 @@
 .agent-foot {
   margin: 0;
   padding: var(--space-2) var(--space-4) var(--space-3);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -218,7 +188,7 @@
   padding: 0 var(--space-2);
   border-radius: var(--radius-full);
   color: var(--text-2);
-  font-size: var(--size-small);
+  font-size: var(--body-size);
   font-variant-numeric: tabular-nums;
   transition: color var(--hover) ease, background-color var(--hover) ease;
 }
@@ -230,7 +200,7 @@
 }
 
 .composer-agents.going .glyph {
-  color: var(--accent);
+  color: var(--text-2);
   transform: scale(var(--breath-scale));
   opacity: var(--breath-alpha);
   animation: ink-breathe var(--breath-slow) ease-in-out infinite;
@@ -256,7 +226,7 @@
 
 .agents-title {
   margin: 0 var(--space-1) var(--space-2);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
   color: var(--text-3);
 }
 
@@ -293,7 +263,7 @@
   gap: var(--space-2);
   min-width: 0;
   padding: 0 var(--space-2) 0 calc(var(--space-2) + var(--depth, 0) * 14px);
-  font-size: var(--size-small);
+  font-size: var(--size-text);
 }
 
 .lane-task {
@@ -372,7 +342,7 @@
   display: flex;
   justify-content: space-between;
   margin: 2px var(--space-2) 0;
-  font-size: var(--size-small);
+  font-size: var(--size-fine);
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -411,6 +381,3 @@
 :root[data-reduced] .agents-pop,
 :root[data-reduced] .lane-head,
 :root[data-reduced] .row.row-found > .row-line,
-:root[data-reduced] .agent-now.fresh .agent-now-said {
-  animation: none;
-}
